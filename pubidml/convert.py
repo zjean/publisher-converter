@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from . import idml, logsetup, metafile, model, textrepair
+from . import idml, logsetup, metafile, model, pubfile, textrepair
 
 log = logsetup.get_logger("convert")
 
@@ -222,6 +222,105 @@ def _rasterise_items(items: List[model.Item], document: model.Document) -> List[
     return survivors
 
 
+def _is_page_background(item: model.Item, page: model.Page) -> bool:
+    """True for the whole-page rectangle libmspub synthesises for a fill.
+
+    writePageBackground emits one for the master and one for the page
+    before any real shape, so they have to be stepped over before the
+    master's own shapes can be counted off.
+    """
+    if not isinstance(item, model.Rectangle):
+        return False
+    return (
+        abs(item.x) < 1.0
+        and abs(item.y) < 1.0
+        and abs(item.width - page.width) < 1.0
+        and abs(item.height - page.height) < 1.0
+    )
+
+
+def _master_items(page: model.Page, shape_count: int) -> List[model.Item]:
+    """The leading items on a page that came from its master.
+
+    libmspub replays a master's shapes onto each page ahead of that page's
+    own (MSPUBCollector::writePage), so they are the first `shape_count`
+    items once the synthesised backgrounds are stepped over.
+    """
+    start = 0
+    while start < len(page.items) and _is_page_background(page.items[start], page):
+        start += 1
+    return page.items[start:start + shape_count]
+
+
+def _shape_signature(item: model.Item) -> tuple:
+    """Enough of an item to tell whether two pages got the same one."""
+    return (
+        type(item).__name__,
+        round(item.x, 3), round(item.y, 3),
+        round(item.width, 3), round(item.height, 3),
+    )
+
+
+def _resolve_page_numbers(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> None:
+    """Replace Publisher's '#' page-number placeholder with the real number.
+
+    Publisher stores a page-number field as a bare '#' in the text and
+    libmspub has no field handling at all, so a footer reads '#' on every
+    page. Two independent facts make substituting it safe rather than a
+    guess: the document must carry a field table (no TOKN chunk means
+    every '#' in it was typed), and the '#' must sit in content the file
+    says came from a master.
+
+    Anything that does not line up leaves the text exactly as it was.
+    """
+    if structure is None or not structure.has_fields:
+        return
+    if len(structure.pages) != len(document.pages):
+        # The side-channel could not be aligned with what libmspub emitted,
+        # so nothing here can be attributed with confidence.
+        log.info("page structure did not align; leaving '#' alone")
+        return
+
+    attributed = []
+    for index, page in enumerate(document.pages):
+        master = structure.master_for(index)
+        if master is None or not master.shape_count:
+            attributed.append(None)
+            continue
+        attributed.append(_master_items(page, master.shape_count))
+
+    # Pages sharing a master must have been given the same shapes. If they
+    # were not, the attribution is wrong and no substitution is justified.
+    by_master: dict = {}
+    for index, items in enumerate(attributed):
+        if items is None:
+            continue
+        master = structure.master_for(index)
+        signature = tuple(_shape_signature(i) for i in items)
+        if by_master.setdefault(master.seq, signature) != signature:
+            log.info("master content differs between pages; leaving '#' alone")
+            return
+
+    replaced = 0
+    for index, items in enumerate(attributed):
+        for item in items or ():
+            if not isinstance(item, model.TextFrame):
+                continue
+            for paragraph in item.story.paragraphs:
+                for span in paragraph.spans:
+                    if "#" in span.text:
+                        span.text = span.text.replace("#", str(index + 1))
+                        replaced += 1
+
+    if replaced:
+        document.warnings.append(
+            f"page-number field resolved on {replaced} frame(s): Publisher "
+            f"stores it as '#', which would otherwise read '#' on every page"
+        )
+
+
 def _check_overset_text(document: model.Document) -> None:
     """Flag text frames far too small to show the text they contain.
 
@@ -308,6 +407,7 @@ def _convert(
         raise ConversionError("document contains no pages")
 
     textrepair.repair_document(document, codepage)
+    _resolve_page_numbers(document, pubfile.read_structure(source))
     _rasterise_metafiles(document)
     _check_overset_text(document)
 

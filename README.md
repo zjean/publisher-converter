@@ -326,10 +326,14 @@ These are real and deliberate, not bugs to be surprised by later.
   onto each page ahead of that page's own. Headers, footers and page
   borders therefore survive as ordinary frames, correctly positioned, but
   as content repeated per page rather than as an Affinity master.
-- **Page numbers do not follow the page.** Publisher stores a page-number
-  field as a literal `#` in the text, and libmspub has no field handling
-  at all, so a footer reading `#` converts to a literal `#` on every
-  page. Renumbering is a manual step in Affinity.
+- **Page numbers are resolved, not live.** Publisher stores a page-number
+  field as a literal `#` and libmspub has no field handling at all, so
+  the converter reads the master-page structure out of the `.pub` itself
+  and substitutes the real number per page. The result is correct but
+  static: reordering pages in Affinity will not renumber them. Files
+  where this fires are flagged `review`. A `#` is only ever replaced when
+  the document carries a field table *and* the text came from a master,
+  so a typed `#` is left alone.
 - **Margin and column guides are lost.** libmspub reports exactly two
   properties for a page, `svg:width` and `svg:height` — no margins, no
   guides, no baseline grid — so Affinity applies its own defaults.
