@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from . import convert
+from . import convert, logsetup
 
 REPORT_COLUMNS = [
     "source",
@@ -101,13 +101,37 @@ def run(argv=None) -> int:
             "hide text, but placement matches the source exactly"
         ),
     )
+    parser.add_argument(
+        "--log-file", type=Path, default=None,
+        help=(
+            "where to write the diagnostic log "
+            f"(default: a timestamped file in {logsetup.default_log_dir()})"
+        ),
+    )
+    parser.add_argument(
+        "--no-log", action="store_true",
+        help="do not write a log file",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="record debug-level detail in the log",
+    )
     parser.add_argument("-q", "--quiet", action="store_true", help="only print the summary")
     args = parser.parse_args(argv)
 
+    log_path = None
+    if not args.no_log:
+        log_path = logsetup.configure(args.log_file, args.verbose)
+        logsetup.install_excepthook()
+        logsetup.log_environment(convert.PUBDUMP)
+    log = logsetup.get_logger("cli")
+
     if not args.source.exists():
+        log.error("source not found: %s", args.source)
         parser.error(f"source not found: {args.source}")
 
     sources = find_sources(args.source, not args.no_recursive)
+    log.info("found %d .pub file(s) under %s", len(sources), args.source)
     if not sources:
         print(f"No .pub files found under {args.source}", file=sys.stderr)
         return 1
@@ -145,6 +169,7 @@ def run(argv=None) -> int:
 
     results.sort(key=lambda r: str(r.source))
     _write_report(report_path, results)
+    log.info("report written to %s", report_path)
 
     ok = sum(1 for r in results if _status(r) == "ok")
     review = sum(1 for r in results if _status(r) == "review")
@@ -159,6 +184,16 @@ def run(argv=None) -> int:
     if skipped:
         print(f"  {skipped} skipped (already converted; use --force to redo)")
     print(f"Report: {report_path}")
+    if log_path:
+        print(f"Log:    {log_path}")
+
+    log.info(
+        "finished: %d ok, %d review, %d failed, %d skipped",
+        ok, review, failed, skipped,
+    )
+    for result in results:
+        if not result.ok:
+            log.error("FAILED %s: %s", result.source, result.error)
 
     return 1 if failed else 0
 

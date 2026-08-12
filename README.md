@@ -81,12 +81,51 @@ pyinstaller pub2idml.spec     # -> dist/pub2idml.exe
 ```
 
 `dist/pub2idml.exe` embeds Python, `pubdump.exe` and the native DLLs.
-Nothing needs installing on the target machine.
+Nothing needs installing on the target machine — no Python, no MSYS2, no
+Publisher. It runs on Windows 10 and 11 x64.
 
 **Don't want to set up a Windows toolchain?** `.github/workflows/build-windows.yml`
-does all of the above on a GitHub `windows-latest` runner and uploads
-`pub2idml.exe` as a build artifact. Push the repo and download the result;
-you only need Windows to *run* it, not to build it.
+does all of the above on a GitHub runner and uploads `pub2idml.exe` as a
+build artifact. Push the repo and download the result; you only need
+Windows to *run* it, not to build it.
+
+The workflow does not merely build — it proves the result is standalone.
+After bundling it copies the executable to a bare directory, **strips
+`PATH` down to `C:\Windows\system32`** so neither MSYS2 nor Python is
+reachable, converts the sample files there, and then checks that five
+`.idml` packages exist, that each is a valid ZIP whose first entry is
+`mimetype`, and that a log was written. A missing DLL fails the build
+instead of failing on your machine.
+
+Two Windows notes:
+
+- The executable is **unsigned**, so SmartScreen shows "Windows protected
+  your PC" on first run. *More info → Run anyway*, or sign it with a code
+  signing certificate if it is going to be distributed widely.
+- One-file bundles unpack to `%TEMP%` on each launch, costing roughly two
+  seconds of startup. Irrelevant for a batch of hundreds; noticeable if
+  you invoke it per file in a loop.
+
+## Logging
+
+Every run writes a diagnostic log, so a batch that misbehaves on another
+machine can be diagnosed without reproducing it:
+
+```
+Windows   %LOCALAPPDATA%\pub2idml\logs\pub2idml-<timestamp>.log
+macOS     ~/Library/Logs/pub2idml/
+Linux     ~/.local/state/pub2idml/logs/
+```
+
+The path is printed at the end of every run. The log records the version,
+platform, whether it is a frozen bundle, the resolved parser path, each
+file with its timing and counts, **libmspub's own stderr** (the best clue
+when a file converts badly), every warning, and full tracebacks for
+unexpected failures — including crashes, via an installed `excepthook`.
+
+The console stays a short summary; detail goes to the file. Options:
+`--log-file PATH` to choose the location, `-v` for debug-level detail,
+`--no-log` to disable. The 30 most recent logs are kept.
 
 ## Use
 

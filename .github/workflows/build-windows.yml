@@ -1,9 +1,16 @@
 name: build-windows
 
-# Produces a standalone pub2idml.exe. The native parser is built under
-# MSYS2 UCRT64 (the only Windows environment that packages libmspub), then
-# bundled by PyInstaller running on a normal Windows Python so the result
-# has no MSYS2 runtime dependency.
+# Produces a single self-contained pub2idml.exe for Windows 10/11 x64.
+#
+# The native parser is built under MSYS2 UCRT64 (the only Windows
+# environment that packages libmspub), then bundled by PyInstaller running
+# on a normal Windows Python so the result carries no MSYS2 dependency.
+#
+# The runner is Windows Server, not Windows 11, but the two share the same
+# binary interface for this purpose: UCRT ships with both, and every other
+# dependency is bundled. What matters is the isolation test below, which
+# runs the executable with MSYS2 and Python removed from PATH — that, not
+# the runner's edition, is what proves it will start on a clean machine.
 
 on:
   push:
@@ -24,20 +31,28 @@ jobs:
           install: >-
             make
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-libmspub
 
-      - name: Build pubdump.exe and collect DLLs
+      - name: Record dependency versions
+        shell: msys2 {0}
+        run: |
+          pacman -Q mingw-w64-ucrt-x86_64-libmspub mingw-w64-ucrt-x86_64-librevenge
+          gcc --version | head -1
+
+      - name: Build pubdump.exe and collect its DLLs
         shell: msys2 {0}
         run: |
           make
           make dlls
           ls -la bin/
 
-      - name: Smoke-test the parser
+      - name: Parser smoke test (inside MSYS2)
         shell: msys2 {0}
         run: |
-          ./bin/pubdump.exe "files/Cantico_dei_Cantici.pub" | head -5
+          ./bin/pubdump.exe "files/Cantico_dei_Cantici.pub" | head -3
+          echo "parser OK"
 
       - uses: actions/setup-python@v5
         with:
@@ -47,18 +62,76 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip pyinstaller
-          pyinstaller pub2idml.spec
+          pyinstaller --clean --noconfirm pub2idml.spec
+          Get-Item dist\pub2idml.exe | Select-Object Name,Length
 
-      - name: Verify the bundled executable converts a file
+      # The real test: no MSYS2, no Python, no repo on PATH, run from a
+      # different drive location. If anything is missing from the bundle
+      # this fails here rather than on a user's machine.
+      - name: Verify self-contained (PATH stripped to Windows only)
         shell: pwsh
         run: |
-          .\dist\pub2idml.exe files -o out
-          if (-not (Test-Path "out\conversion-report.csv")) {
-            throw "no report produced"
-          }
-          Get-Content "out\conversion-report.csv"
+          $isolated = "C:\isolated"
+          New-Item -ItemType Directory -Force -Path $isolated | Out-Null
+          Copy-Item dist\pub2idml.exe $isolated\
+          Copy-Item -Recurse files $isolated\files
 
-      - uses: actions/upload-artifact@v4
+          $env:PATH = "C:\Windows\system32;C:\Windows"
+          Push-Location $isolated
+          .\pub2idml.exe --help | Select-Object -First 3
+          .\pub2idml.exe files -o out --log-file run.log -v
+          if ($LASTEXITCODE -ne 0) { throw "conversion exited $LASTEXITCODE" }
+          Pop-Location
+
+      - name: Check the output is real
+        shell: pwsh
+        run: |
+          $out = "C:\isolated\out"
+          $idml = Get-ChildItem $out -Filter *.idml
+          if ($idml.Count -lt 5) { throw "expected 5 .idml, got $($idml.Count)" }
+          foreach ($f in $idml) {
+            if ($f.Length -lt 2000) { throw "$($f.Name) is suspiciously small" }
+          }
+          if (-not (Test-Path "$out\conversion-report.csv")) { throw "no report" }
+          Write-Host "--- report ---"
+          Get-Content "$out\conversion-report.csv"
+
+          # Every .idml must be a valid zip whose first entry is the mimetype.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          foreach ($f in $idml) {
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($f.FullName)
+            $first = $zip.Entries[0].FullName
+            $zip.Dispose()
+            if ($first -ne "mimetype") { throw "$($f.Name): first entry is $first" }
+          }
+          Write-Host "all $($idml.Count) packages structurally valid"
+
+      - name: Check logging works
+        shell: pwsh
+        run: |
+          $log = "C:\isolated\run.log"
+          if (-not (Test-Path $log)) { throw "no log file written" }
+          $text = Get-Content $log -Raw
+          foreach ($needle in @("pub2idml", "frozen bundle: True", "parser:", "finished:")) {
+            if ($text -notmatch [regex]::Escape($needle)) { throw "log missing '$needle'" }
+          }
+          Write-Host "--- log ---"
+          Get-Content $log
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
         with:
-          name: pub2idml-windows-x64
+          name: pub2idml-windows-x64-${{ github.sha }}
           path: dist/pub2idml.exe
+          if-no-files-found: error
+
+      # Kept even when earlier steps fail: this is the diagnostic trail.
+      - name: Upload logs and converted output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics-${{ github.sha }}
+          path: |
+            C:\isolated\run.log
+            C:\isolated\out\conversion-report.csv
+          if-no-files-found: warn

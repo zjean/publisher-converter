@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import io
 import os
+import time
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from . import idml, metafile, model, textrepair
+from . import idml, logsetup, metafile, model, textrepair
+
+log = logsetup.get_logger("convert")
 
 
 def _locate_pubdump() -> Path:
@@ -88,15 +91,28 @@ def dump_events(source: Path, pubdump: Path = PUBDUMP) -> str:
             creationflags=creation_flags,
         )
     except subprocess.TimeoutExpired:
+        log.error("parser timed out after 300s on %s", source)
         raise ConversionError("timed out after 300s") from None
+    except OSError as exc:
+        log.error("could not launch parser %s: %s", pubdump, exc)
+        raise ConversionError(f"could not launch parser: {exc}") from None
+
+    stderr = completed.stderr.decode("utf-8", "replace").strip()
+    log.debug(
+        "parser exit=%d stdout=%d bytes stderr=%d bytes for %s",
+        completed.returncode, len(completed.stdout), len(completed.stderr), source.name,
+    )
+    if stderr:
+        # libmspub warns about structures it does not understand; these are
+        # the single most useful clue when a file converts badly.
+        log.info("parser stderr for %s: %s", source.name, stderr[:4000])
 
     if completed.returncode == EXIT_UNSUPPORTED:
         raise ConversionError("not a supported Publisher file (or corrupt)")
     if completed.returncode == EXIT_PARSE_FAILED:
         raise ConversionError("libmspub could not parse the document")
     if completed.returncode != 0:
-        detail = completed.stderr.decode("utf-8", "replace").strip()
-        raise ConversionError(detail or f"pubdump exited {completed.returncode}")
+        raise ConversionError(stderr or f"pubdump exited {completed.returncode}")
 
     return completed.stdout.decode("utf-8", "replace")
 
@@ -192,21 +208,26 @@ def convert(
     source = Path(source)
     destination = Path(destination)
     result = Result(source=source)
+    started = time.monotonic()
+    log.info("converting %s -> %s", source, destination)
 
     try:
         events = dump_events(source, pubdump)
     except ConversionError as exc:
         result.error = str(exc)
+        log.error("%s: %s", source.name, exc)
         return result
 
     try:
         document = model.build(io.StringIO(events))
     except Exception as exc:  # malformed event stream
         result.error = f"model build failed: {exc}"
+        log.exception("%s: model build failed", source.name)
         return result
 
     if not document.pages:
         result.error = "document contains no pages"
+        log.error("%s: no pages in document", source.name)
         return result
 
     textrepair.repair_document(document, codepage)
@@ -222,6 +243,7 @@ def convert(
         writer.write(destination)
     except Exception as exc:
         result.error = f"IDML write failed: {exc}"
+        log.exception("%s: IDML write failed", source.name)
         return result
 
     result.output = destination
@@ -240,5 +262,13 @@ def convert(
                 result.images += 1
             elif isinstance(item, (model.Rectangle, model.Ellipse, model.Polygon, model.Path)):
                 result.shapes += 1
+
+    log.info(
+        "%s: ok in %.2fs - %d pages, %d frames, %d images, %d shapes, %d chars, fonts=%s",
+        source.name, time.monotonic() - started, result.pages, result.text_frames,
+        result.images, result.shapes, result.characters, ", ".join(result.fonts) or "none",
+    )
+    for warning in result.warnings:
+        log.warning("%s: %s", source.name, warning)
 
     return result

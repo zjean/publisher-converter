@@ -231,9 +231,21 @@ builds `pubdump.exe` under MSYS2 UCRT64, bundles it with PyInstaller, runs
 the result against the sample files, and uploads `pub2idml.exe` as an
 artifact. You need Windows only to *run* the tool, not to build it.
 
-Two things that will only surface on a real run: MSYS2 ships libmspub
-**0.1.4** where development used **0.1.5**, and `make dlls` may miss a
-transitive ICU DLL. The workflow's smoke-test step catches both.
+The workflow now proves self-containment rather than assuming it: it runs
+the bundled exe with `PATH` stripped to `C:\Windows\system32`, so a
+missing DLL fails the build instead of failing on your machine. DLL
+collection is transitive via `objdump` (`tools/collect-dlls.sh`), which
+replaced an unreliable `ldd`-based step.
+
+The bundle logic itself is verified — a one-file build on macOS resolves
+its parser through `sys._MEIPASS` and converts all five samples with a
+stripped `PATH`. What remains untested until the workflow runs is
+Windows-specific: the MSYS2 build and DLL collection, and the fact that
+MSYS2 ships libmspub **0.1.4** where development used **0.1.5**.
+
+Note the artifact is **unsigned**, so first run shows a SmartScreen
+warning ("More info" → "Run anyway"). Signing needs a code signing
+certificate and is only worth it for wider distribution.
 
 ---
 

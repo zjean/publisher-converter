@@ -35,10 +35,12 @@ $(BIN): src/pubdump.cpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS) $(EXTRA_LDFLAGS)
 
-# Copy the MinGW DLLs pubdump.exe links against into bin/, so the folder
-# is self-contained before PyInstaller bundles it.
+# Copy the MinGW DLLs pubdump.exe needs into bin/, transitively, so the
+# folder is self-contained before PyInstaller bundles it.
 dlls: $(BIN)
-	@ldd $(BIN) | grep -i '/ucrt64/bin/' | awk '{print $$3}' | xargs -r -I{} cp -v {} bin/
+	@sh tools/collect-dlls.sh $(BIN) $(UCRT_BIN)
+
+UCRT_BIN ?= /ucrt64/bin
 
 clean:
 	rm -rf bin
