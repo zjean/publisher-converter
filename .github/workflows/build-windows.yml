@@ -1,0 +1,64 @@
+name: build-windows
+
+# Produces a standalone pub2idml.exe. The native parser is built under
+# MSYS2 UCRT64 (the only Windows environment that packages libmspub), then
+# bundled by PyInstaller running on a normal Windows Python so the result
+# has no MSYS2 runtime dependency.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libmspub
+
+      - name: Build pubdump.exe and collect DLLs
+        shell: msys2 {0}
+        run: |
+          make
+          make dlls
+          ls -la bin/
+
+      - name: Smoke-test the parser
+        shell: msys2 {0}
+        run: |
+          ./bin/pubdump.exe "files/Cantico_dei_Cantici.pub" | head -5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bundle with PyInstaller
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          pyinstaller pub2idml.spec
+
+      - name: Verify the bundled executable converts a file
+        shell: pwsh
+        run: |
+          .\dist\pub2idml.exe files -o out
+          if (-not (Test-Path "out\conversion-report.csv")) {
+            throw "no report produced"
+          }
+          Get-Content "out\conversion-report.csv"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pub2idml-windows-x64
+          path: dist/pub2idml.exe

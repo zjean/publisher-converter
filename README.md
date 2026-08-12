@@ -1,0 +1,251 @@
+# pub2idml
+
+Batch-converts Microsoft Publisher `.pub` files into Adobe IDML packages
+that Affinity can open as editable layouts — text in real text frames,
+placed images, shapes and colours, not a flattened picture of the page.
+
+Built because Affinity cannot read `.pub` and never will, and Microsoft
+retires Publisher on **1 October 2026** (13 October for perpetual Office
+2021), after which `.pub` files can no longer be opened in Publisher
+itself.
+
+## How it works
+
+Publisher's format is closed and undocumented, so the binary parsing is
+delegated to **libmspub** (the Document Liberation Project library that
+LibreOffice uses). Everything above that is ours:
+
+```
+   .pub
+     │
+     ▼
+  bin/pubdump          C++ shim. Implements librevenge's RVNGDrawingInterface
+     │                 and serialises every libmspub callback to JSON lines.
+     ▼
+  JSON event stream
+     │
+     ▼
+  pubidml/model.py     Replays the flat event stream into a document tree:
+     │                 pages, frames, shapes, images, styled text runs.
+     ▼
+  pubidml/idml.py      Emits the IDML package (ZIP of XML parts).
+     │
+     ▼
+   .idml  +  <name>_images/
+```
+
+Splitting at the JSON boundary keeps all binary-format handling in the
+one library that already solves it, and leaves document reconstruction
+in Python where it is easy to test and extend.
+
+## Install
+
+### macOS
+
+Requires Homebrew and the Xcode command line tools.
+
+```sh
+brew install libmspub pkg-config
+make
+```
+
+That produces `bin/pubdump`. No Python dependencies beyond the standard
+library, and **Microsoft Publisher is not required** — the files are
+parsed directly.
+
+### Windows
+
+The Python half is standard library only and already portable; the only
+Windows-specific work is building `pubdump.exe`.
+
+Note that **vcpkg packages neither libmspub nor librevenge**, so an MSVC
+build would mean compiling both from source. MSYS2 packages both — but
+`libmspub` is only in the `ucrt64` and `clang64` repos, *not* `mingw64`.
+Use a **UCRT64** shell.
+
+```sh
+pacman -S make mingw-w64-ucrt-x86_64-gcc \
+          mingw-w64-ucrt-x86_64-pkgconf \
+          mingw-w64-ucrt-x86_64-libmspub
+
+make           # builds bin/pubdump.exe
+make dlls      # copies the MinGW DLLs it links against into bin/
+```
+
+`bin/` is then self-contained and `python pub2idml.py …` works. To ship a
+single executable to people without a build environment:
+
+```sh
+pip install pyinstaller
+pyinstaller pub2idml.spec     # -> dist/pub2idml.exe
+```
+
+`dist/pub2idml.exe` embeds Python, `pubdump.exe` and the native DLLs.
+Nothing needs installing on the target machine.
+
+**Don't want to set up a Windows toolchain?** `.github/workflows/build-windows.yml`
+does all of the above on a GitHub `windows-latest` runner and uploads
+`pub2idml.exe` as a build artifact. Push the repo and download the result;
+you only need Windows to *run* it, not to build it.
+
+## Use
+
+```sh
+# one file
+./pub2idml "files/Cantico_dei_Cantici.pub" -o converted
+
+# a whole collection, recursively, mirroring the folder structure
+./pub2idml ~/Documents/publisher-archive -o ~/Documents/converted
+
+# reconvert everything, 8 at a time
+./pub2idml ~/Documents/publisher-archive -o ~/converted --force -j 8
+```
+
+Output:
+
+```
+converted/
+  Newsletters/
+    March 2019.idml
+    March 2019_images/
+      image1.jpg
+  conversion-report.csv
+```
+
+Images are written to a sidecar folder next to each `.idml` and
+referenced by relative link, which is how InDesign packages normally
+carry placed artwork. **Keep the `_images` folder next to the `.idml`**
+until you have opened it in Affinity and saved as `.afpub`.
+
+### Optional: EMF artwork
+
+Publisher embeds clip-art as Windows metafiles. Most are empty 128-byte
+stubs left where a picture placeholder used to be — those are detected
+and dropped silently, because there is no artwork in them to lose.
+
+Metafiles that *do* carry artwork are rasterised to PNG if two optional
+tools are present:
+
+```sh
+brew install libemf2svg imagemagick
+```
+
+Without them, EMF artwork is dropped and the report says so, naming the
+number of drawing records that were lost. Everything else still converts.
+
+### Text in non-Latin scripts
+
+libmspub ignores the document code page and decodes every byte as
+Latin-1, so Cyrillic, Greek and similar text arrives as mojibake —
+`Ðóññêèé òåêñò` instead of `Русский текст`. The original bytes survive,
+so this is reversible, and the converter repairs it automatically.
+
+Guessing the code page wrongly would destroy correct text, so detection
+is deliberately conservative and needs two independent signals to agree:
+a high share of non-ASCII letters, *and* those letters appearing in long
+unbroken runs. Accents in Western European text are isolated — `être`,
+`Zoë`, `Grüße` all give runs of one — so Dutch, French, German, Italian
+and Portuguese are never touched, even when heavily accented. Among the
+candidate code pages, the winner must also beat the runner-up by a clear
+margin on letter-frequency plausibility; a coin flip is declined and the
+text left alone.
+
+Override with `--codepage cp1251` to force one, or `--codepage none` to
+disable repair entirely.
+
+### The report
+
+`conversion-report.csv` is the point of the tool at collection scale.
+Each row carries page/frame/image/character counts, the fonts the file
+needs, and a status:
+
+| status | meaning |
+|---|---|
+| `ok` | converted, nothing suspicious |
+| `review` | converted, but something was approximated or dropped — see `warnings` |
+| `failed` | not converted — see `error` |
+
+Sort by `status`, then by `characters` descending, and you have a triage
+queue: the files worth a human's attention first.
+
+## Known limitations
+
+These are real and deliberate, not bugs to be surprised by later.
+
+- **WMF artwork is not converted.** EMF is handled (see below), but
+  `emf2svg-conv` reads EMF only, so WMF clip-art is dropped with a
+  warning naming the record count.
+- **CJK text is not repaired.** The code page detector (see below) works
+  on alphabetic scripts, where letter frequency is a usable signal. For
+  Chinese, Japanese and Korean it declines to guess rather than risk
+  corrupting text, so those documents still need `--codepage cp932` or
+  similar passed explicitly.
+- **Master-page items are baked into each page.** libmspub replays them
+  per page, so they arrive as ordinary items rather than as an Affinity
+  master.
+- **Story threading is not reconstructed.** Each Publisher text frame
+  becomes its own IDML story, so text that flowed from frame to frame no
+  longer reflows across them.
+- **Groups are flattened.** Children keep their absolute positions;
+  nothing moves, but the grouping is gone.
+- **Gradients collapse to their first stop**, and elliptical arcs are
+  approximated with straight segments.
+- **Tables are flattened to paragraphs.** The copy survives, the grid
+  does not. Flagged `review`.
+- **Fonts are referenced by name.** Affinity substitutes anything not
+  installed — install the source fonts first, or expect reflow.
+- **libmspub sometimes reports a degenerate frame size.** One sample has
+  a 5.5 x 5.7 pt text frame holding 3,869 characters, which Affinity
+  shows as an empty box. Inventing a plausible size would be inventing
+  layout, so the frame is left as reported and the file is flagged
+  `review` with the character count and frame size, ready to be resized
+  by hand.
+- **Text wrap is inferred, not read.** libmspub exposes no wrap data at
+  all, and images arrive after the text in z-order, so without help they
+  paint over the copy. Images therefore get a bounding-box wrap by
+  default, which is what Publisher layouts almost always intend.
+  Page-sized images are treated as backgrounds and left unwrapped. Use
+  `--no-image-wrap` for exact source stacking instead.
+
+## Verification status
+
+Verified by round-tripping through Affinity on macOS and measuring the
+rendered output, not by inspection alone.
+
+**Geometry is exact.** A test document with known rectangles rendered at
+300 dpi and measured by connected-component analysis:
+
+| | expected (pt) | measured (pt) |
+|---|---|---|
+| plain rect | 50, 50, 100×60 | 49.9, 49.9, 100.1×60.0 |
+| plain rect | 412, 100, 150×80 | 412.1, 100.1, 150.0×79.9 |
+| rotated 30° | bbox 162.6, 527.0, 274.8×176.0 | 162.7, 527.0, 274.6×175.9 |
+
+Rotation is applied about the item centre, matching Publisher, and a
+positive angle renders clockwise. Text frames measure equally exactly
+(169.7 pt against a specified 170 pt), and text wraps within them.
+
+Also confirmed against real documents: multi-page output, accented Latin
+text, font and colour mapping, italics, placed images resolving through
+the sidecar link folder, and text flowing around images.
+
+**Not yet verified:** whether Publisher's rotation *sign* matches ours.
+The magnitude and pivot are right, but confirming the direction needs a
+reference rendering of the same `.pub` — either Publisher itself, or
+LibreOffice, which drives the same libmspub and so shows how the
+reference consumer reads the property.
+
+## Layout
+
+```
+Makefile              builds bin/pubdump
+src/pubdump.cpp       libmspub → JSON event stream
+pub2idml              CLI entry point
+pubidml/
+  units.py            length parsing, points conversion
+  model.py            event stream → document model
+  idml.py             document model → IDML package
+  convert.py          single-file conversion
+  cli.py              batch driver and CSV report
+files/                sample .pub documents
+```

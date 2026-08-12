@@ -1,0 +1,3 @@
+#!/bin/sh
+# Batch-convert Microsoft Publisher files to IDML for Affinity.
+exec python3 -m pubidml.cli "$@"
