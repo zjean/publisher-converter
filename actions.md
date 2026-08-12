@@ -181,7 +181,171 @@ Once the block ID and its value mapping are known:
 
 ---
 
-## 2. Confirm the rotation sign  ⏰ quick, no Publisher needed
+## 2. Recover the page margins  ⏰ needs Publisher, before 1 Oct 2026
+
+### Why this matters
+
+Margin and column guides are lost entirely. Every converted document
+arrives in Affinity with default margins, so anyone continuing to lay out
+a page has to measure the original by eye to match it.
+
+### What is already known
+
+Established here, so don't re-derive it:
+
+- **libmspub cannot help.** Its `Margins` struct is *shape* margins — the
+  text-frame insets already exposed as `fo:padding-*`. There is no
+  page-margin block id anywhere in `MSPUBBlockID.h`, and `startPage`
+  carries exactly two properties, `svg:width` and `svg:height`.
+- **The DOCUMENT chunk is accounted for** and contains no margin. Block
+  `0x12` decodes as page size and matches the known dimensions, `0x2a` is
+  a GUID, and the rest are sequence-number references and small enums.
+- **The master page chunk holds the master's name** — `0x0e` a short
+  `"A"`, `0x0f` the full `"Master Page"` — plus two coordinate pairs at
+  roughly 25in and 120in, far too large to be page margins.
+- Publisher measures in **EMU, 914400 per inch**, so 0.5in reads 457200.
+
+So the field exists somewhere not yet looked at, and one controlled pair
+will find it.
+
+### Step 1 — produce the sample files (on Windows, with Publisher, ~10 min)
+
+**Change only the margins between saves.** Use *asymmetric* values, so
+each edge is individually identifiable rather than four copies of one
+number.
+
+1. New blank document, letter size. Add a text box with a few paragraphs
+   so the page is not empty.
+2. **Page Design → Margins → Custom Margins**, set
+   **left 0.5", top 1.0", right 1.5", bottom 2.0"**. Save as
+   `margins-a.pub`.
+3. Change *only* the margins to **left 0.25", top 0.75", right 1.25",
+   bottom 1.75"** and *Save As* `margins-b.pub`.
+4. Copy both to `files/margin-samples/` on the Mac.
+
+The eight values are all distinct, which is the point: whichever block
+holds a margin will read one of them.
+
+### Step 2 — run the diff (on the Mac, ~1 min)
+
+```sh
+cd ~/prive/tools/affinity-converter
+python3 research/diff_blocks.py \
+  a=files/margin-samples/margins-a.pub \
+  b=files/margin-samples/margins-b.pub
+```
+
+Unlike `diff_wrap.py`, this parses the file directly rather than a
+libmspub trace, so it also sees blocks libmspub never reads — which is
+where the margin has to be. Both control behaviours are verified:
+identical inputs report "no block changed", unrelated files report
+differences.
+
+The tool already prints any plausible length in inches beside the raw
+value, so a margin should be readable at a glance.
+
+### Step 3 — read the result
+
+You are looking for four blocks in the same chunk reading
+`457200 / 914400 / 1371600 / 1828800` under `a` and
+`228600 / 685800 / 1143000 / 1600200` under `b`. They may be four
+separate blocks or one 16-byte container holding four `U32`s — the
+DOCUMENT chunk already uses that shape for page size at block `0x12`.
+
+If nothing matches, the margins are held per master page rather than per
+document: re-run against the master chunk by noting its offset from
+`python3 research/master_pages.py files/margin-samples/margins-a.pub`.
+
+### Step 4 — wire it in
+
+Emit `MarginPreference` on each `Page` element in `idml.py`, beside the
+existing `GeometricBounds`. IDML takes it directly:
+
+```xml
+<MarginPreference Top="72" Left="36" Bottom="144" Right="108"
+                  ColumnCount="1" ColumnGutter="12"/>
+```
+
+Column guides very likely sit next to the margins in the same chunk; if
+the diff turns them up too, `ColumnCount` is the same one-line change.
+
+---
+
+## 3. Pin down Publisher's field table  ⏰ needs Publisher, before 1 Oct 2026
+
+### Why this matters
+
+A page-number field is stored as a bare `#` in the text, so a footer
+reading `#` converts to a literal `#` on every page. The converter can
+already tell *that* a document has fields and can locate master content,
+which is enough to substitute page numbers safely. What it cannot yet do
+is say **which** `#` belongs to **which** field — so a document mixing a
+page number with a typed `#` needs a human.
+
+### What is already known
+
+- libmspub reads only seven Quill chunk types — `TEXT`, `STRS`, `SYID`,
+  `PL  `, `FDPC`, `FDPP`, `STSH` — and **skips `TOKN`**, the field table.
+- Across the sample set **no file contains a `#` without a `TOKN` chunk**,
+  which is what makes `TOKN` usable as a gate.
+- `TOKN` holds field names: one sample ends with a counted UTF-16 string,
+  `07 00 "orgname"`, Publisher's Organization Name field.
+- Byte 16 reads **3** where the only field is a page number and **28**
+  where it is `orgname` — consistent with a field-type code, but two
+  samples cannot establish that.
+- **The missing link is token → position.** Both `TOKN` chunks in the
+  page-numbered sample are byte-identical 52-byte blobs carrying no
+  character offsets, so the association lives elsewhere — probably the
+  chunk id, which is 6 and 7 there.
+
+### Step 1 — produce the sample files (on Windows, with Publisher, ~10 min)
+
+Four small files. Keep them otherwise identical.
+
+1. New document. **View → Master Page**, add a text box in the footer.
+   **Insert → Page Number**. Back to **View → Normal**. Add two more
+   pages so numbering is visible. Save as `field-pagenum.pub`.
+2. Same document, but in the footer box type a literal `#` instead of
+   inserting the field. Save as `field-literal-hash.pub`.
+   **This is the control**: it must produce no `TOKN`, or a clearly
+   different one.
+3. Same as 1, but put the page number at the *end* of a longer line —
+   type `Page ` before it. Save as `field-pagenum-offset.pub`.
+   **This is the one that pins the position link**: the `#` moves to a
+   known, different character index while everything else stays put.
+4. Same as 1, plus **Insert → Date & Time** in a second footer box.
+   Save as `field-pagenum-plus-date.pub`.
+5. Copy all four to `files/field-samples/` on the Mac.
+
+### Step 2 — read the tokens (on the Mac, ~1 min)
+
+```sh
+cd ~/prive/tools/affinity-converter
+python3 research/quill_tokens.py files/field-samples/*.pub
+```
+
+It prints each file's `TOKN` chunks as raw hex beside the character
+indices of every `#` in the text, which is exactly the comparison needed.
+
+### Step 3 — read the result
+
+- `field-literal-hash.pub` **must** show `0` TOKN chunks. If it shows
+  one, the gate is unsound and page-number substitution must not ship.
+- Diff `field-pagenum.pub` against `field-pagenum-offset.pub`: the `#`
+  moves by exactly the length of `"Page "`, so whichever bytes in `TOKN`
+  change by 5 are the character offset.
+- `field-pagenum-plus-date.pub` should show two tokens with different
+  type codes at byte 16, confirming 3 = page number.
+
+### Step 4 — wire it in
+
+Once the offset is known, `#` substitution stops being an inference and
+becomes a lookup, and the `review` flag proposed for the heuristic
+version can be dropped.
+
+---
+
+## 4. Confirm the rotation sign  ⏰ quick, no Publisher needed
 
 Rotation **magnitude and pivot are verified correct** (a 300 dpi render
 measured 274.6 × 175.9 pt against a predicted 274.8 × 176.0 for a 300×30
@@ -206,7 +370,7 @@ This also gives a free reference renderer for action 3.
 
 ---
 
-## 3. Measure fidelity on your real collection
+## 5. Measure fidelity on your real collection
 
 Before trusting the tool at scale, quantify it on ~30 files spanning the
 variety of your archive (newsletters, flyers, multi-page, heavy imagery).
@@ -222,7 +386,7 @@ fallback is Markzware OmniMarkz (~€200) benchmarked on the same 30 files
 
 ---
 
-## 4. Build the Windows executable
+## 6. Build the Windows executable
 
 Everything is prepared; nothing here needs a decision.
 
@@ -249,7 +413,7 @@ certificate and is only worth it for wider distribution.
 
 ---
 
-## 5. Report the clip-path bug upstream
+## 7. Report the clip-path bug upstream
 
 libmspub reads `pWrapPolygonVertices` (Escher `0xC383`) and passes it to
 `setShapeClipPath` (`MSPUBParser.cpp` ~line 1946). That property is the
