@@ -106,10 +106,38 @@ Two Windows notes:
   seconds of startup. Irrelevant for a batch of hundreds; noticeable if
   you invoke it per file in a loop.
 
+### Getting pub2idml.exe
+
+Every green build of `main` publishes a **rolling prerelease** tagged
+`latest`, so the newest executable always sits at a stable URL:
+
+> **Releases → Latest build (main) → `pub2idml.exe`**
+
+Or from the command line:
+
+```sh
+gh release download latest --repo zjean/publisher-converter --pattern 'pub2idml.exe'
+```
+
+Each release also carries `pub2idml.exe.sha256`; verify on Windows with:
+
+```powershell
+Get-FileHash pub2idml.exe -Algorithm SHA256
+```
+
+For a pinned version rather than a moving target, push a tag and that
+build gets its own permanent release:
+
+```sh
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+Build artifacts are also attached to each Actions run, but they expire
+after 90 days and need a GitHub login — the release assets do not.
+
 ### Running pub2idml.exe on Windows
 
-Download `pub2idml.exe` from the build artifact and put it anywhere —
-there is nothing to install. Open **PowerShell** or **Command Prompt** in
+Put `pub2idml.exe` anywhere — there is nothing to install. Open **PowerShell** or **Command Prompt** in
 the folder containing it. It is a command line tool: double-clicking it
 just prints the usage and closes.
 

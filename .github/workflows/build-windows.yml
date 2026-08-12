@@ -15,7 +15,12 @@ name: build-windows
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+
+# Needed to publish releases with the bundled executable.
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -118,12 +123,62 @@ jobs:
           Write-Host "--- log ---"
           Get-Content $log
 
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\pub2idml.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  pub2idml.exe" | Out-File -Encoding ascii dist\pub2idml.exe.sha256
+          Write-Host "SHA256: $hash"
+
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: pub2idml-windows-x64-${{ github.sha }}
-          path: dist/pub2idml.exe
+          path: |
+            dist/pub2idml.exe
+            dist/pub2idml.exe.sha256
           if-no-files-found: error
+
+      # Every green build on main replaces a rolling prerelease, so the
+      # newest executable always has a stable download URL. Build
+      # artifacts expire after 90 days and need a login; release assets
+      # do not.
+      - name: Publish rolling prerelease
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @"
+          Automatic build of `${{ github.sha }}` on $(Get-Date -Format 'yyyy-MM-dd').
+
+          Self-contained Windows 10/11 x64 executable — no Python, no MSYS2,
+          no Microsoft Publisher needed. Verified in this build by running
+          with PATH stripped to C:\Windows\system32.
+
+          The executable is unsigned, so SmartScreen shows a warning on
+          first run: **More info -> Run anyway**.
+
+          Usage and options: see the README.
+          "@
+          $notes | Out-File -Encoding utf8 notes.md
+
+          # Recreate rather than edit, so the tag follows the newest commit.
+          gh release delete latest --yes --cleanup-tag 2>$null
+          gh release create latest `
+            dist/pub2idml.exe dist/pub2idml.exe.sha256 `
+            --prerelease --title "Latest build (main)" --notes-file notes.md `
+            --target $env:GITHUB_SHA
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${{ github.ref_name }} `
+            dist/pub2idml.exe dist/pub2idml.exe.sha256 `
+            --title "pub2idml ${{ github.ref_name }}" --generate-notes
 
       # Kept even when earlier steps fail: this is the diagnostic trail.
       - name: Upload logs and converted output
