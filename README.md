@@ -106,6 +106,74 @@ Two Windows notes:
   seconds of startup. Irrelevant for a batch of hundreds; noticeable if
   you invoke it per file in a loop.
 
+### Running pub2idml.exe on Windows
+
+Download `pub2idml.exe` from the build artifact and put it anywhere —
+there is nothing to install. Open **PowerShell** or **Command Prompt** in
+the folder containing it. It is a command line tool: double-clicking it
+just prints the usage and closes.
+
+```powershell
+# convert one file
+.\pub2idml.exe "C:\Archive\March 2019.pub" -o C:\Converted
+
+# convert a whole collection, recursively, mirroring the folder structure
+.\pub2idml.exe C:\Archive -o C:\Converted
+
+# eight at a time, redoing files already converted
+.\pub2idml.exe C:\Archive -o C:\Converted --force -j 8
+
+# maximum diagnostics, log next to the output
+.\pub2idml.exe C:\Archive -o C:\Converted -v --log-file C:\Converted\run.log
+```
+
+Quote any path containing spaces. Paths may be absolute or relative, and
+UNC network paths (`\\server\share\...`) work.
+
+#### Options
+
+| Option | Meaning |
+|---|---|
+| `source` | a `.pub` file, or a folder to search (required) |
+| `-o`, `--output PATH` | output folder; created if absent. Default `.\converted` |
+| `-j`, `--jobs N` | parallel conversions. Default: one per CPU core |
+| `--no-recursive` | only the given folder, do not descend into subfolders |
+| `--force` | reconvert files whose `.idml` already exists. Without it, those are skipped, so an interrupted run resumes cheaply |
+| `--report PATH` | where to write the CSV. Default `<output>\conversion-report.csv` |
+| `--codepage MODE` | `auto` (default) detects and repairs non-Latin text, `none` disables repair, or force a codec such as `cp1251`, `cp932` |
+| `--no-image-wrap` | keep the source's exact stacking instead of flowing text around images. Images will then cover text |
+| `--log-file PATH` | write the log here instead of `%LOCALAPPDATA%\pub2idml\logs` |
+| `--no-log` | do not write a log file |
+| `-v`, `--verbose` | debug-level detail in the log (not the console) |
+| `-q`, `--quiet` | print only the final summary, not each file |
+| `-h`, `--help` | full usage |
+
+**Exit code** is `0` when everything converted and `1` if any file
+failed, so it can be used in a script:
+
+```powershell
+.\pub2idml.exe C:\Archive -o C:\Converted -q
+if ($LASTEXITCODE -ne 0) { Write-Host "some files failed - check the report" }
+```
+
+#### What you get back
+
+```
+C:\Converted\
+  Newsletters\
+    March 2019.idml
+    March 2019_images\        <- keep this next to the .idml
+      image1.jpg
+  conversion-report.csv
+```
+
+Open the `.idml` in Affinity and **save as `.afpub`**. Only then is the
+`_images` folder no longer needed — until that point the `.idml` links to
+it, and moving one without the other loses the pictures.
+
+Start with the report, not the files: sort by `status`, deal with
+`failed` and `review` first, and trust the `ok` rows.
+
 ## Logging
 
 Every run writes a diagnostic log, so a batch that misbehaves on another
