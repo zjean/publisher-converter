@@ -28,8 +28,15 @@ CXX      ?= c++
 CXXFLAGS += -std=c++17 -O2 -Wall -Wextra $(shell $(PKGCONFIG) --cflags $(PKGS))
 LDLIBS   += $(shell $(PKGCONFIG) --libs $(PKGS))
 
-.PHONY: all clean dlls
+PYTHON ?= python3
+
+.PHONY: all clean dlls test
 all: $(BIN)
+
+# Standard library only, matching the runtime's own constraint. The tests
+# that need the parser skip themselves when bin/pubdump is not built.
+test:
+	$(PYTHON) -m unittest discover -s tests -t . -v
 
 $(BIN): src/pubdump.cpp
 	@mkdir -p bin
