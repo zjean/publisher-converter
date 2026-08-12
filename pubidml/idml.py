@@ -113,6 +113,47 @@ def _matrix(rotation_deg: float, tx: float, ty: float) -> str:
     return f"{fmt(cos)} {fmt(sin)} {fmt(-sin)} {fmt(cos)} {fmt(tx)} {fmt(ty)}"
 
 
+def _is_quarter_turn(rotation_deg: float) -> bool:
+    """True when a rotation exchanges the horizontal and vertical axes."""
+    return abs((abs(rotation_deg) % 180.0) - 90.0) < 45.0
+
+
+def _content_bounds(rotation_deg: float, width: float, height: float):
+    """The size to place a picture at, before its own rotation is applied.
+
+    A quarter turn exchanges the footprint's axes, so a WxH frame is
+    covered by a picture placed at HxW. Placing it at WxH regardless is
+    what left rotated photographs both squashed and short of their frame:
+    a 4000x3000 landscape photo was placed into portrait bounds and only
+    then turned.
+    """
+    if _is_quarter_turn(rotation_deg):
+        return height, width
+    return width, height
+
+
+def _content_matrix(rotation_deg: float, width: float, height: float) -> str:
+    """Place a picture's content centred on the frame that holds it.
+
+    IDML applies an ItemTransform as x' = a*x + c*y + tx, so the rotation
+    runs before the translation. Offsetting by half the *unrotated* size
+    therefore only centres content that is not rotated at all: at 90
+    degrees it puts the picture wholly outside its frame, where it is
+    clipped and the page simply looks as though the image is missing.
+
+    Negating the rotated centre puts it back on the frame's own centre,
+    and reduces to the old offset when the rotation is zero.
+    """
+    half_w, half_h = width / 2.0, height / 2.0
+    if not rotation_deg:
+        return f"1 0 0 1 {fmt(-half_w)} {fmt(-half_h)}"
+    radians = math.radians(rotation_deg)
+    cos, sin = math.cos(radians), math.sin(radians)
+    tx = -(cos * half_w - sin * half_h)
+    ty = -(sin * half_w + cos * half_h)
+    return f"{fmt(cos)} {fmt(sin)} {fmt(-sin)} {fmt(cos)} {fmt(tx)} {fmt(ty)}"
+
+
 def _rect_path(parent: ET.Element, width: float, height: float) -> None:
     """Attach a closed rectangular PathGeometry centred on the origin."""
     half_w, half_h = width / 2.0, height / 2.0
@@ -652,13 +693,17 @@ class IdmlWriter:
         filename = f"{self.image_dir_name}/image{index}{model.extension_for(item.mime_type)}"
         self.image_files.append((filename, item.data))
 
-        half_w, half_h = item.width / 2.0, item.height / 2.0
+        placed_w, placed_h = _content_bounds(
+            item.content_rotation, item.width, item.height
+        )
         image = ET.SubElement(
             rectangle,
             "Image",
             {
                 "Self": self.ids.next("img"),
-                "ItemTransform": _matrix(item.content_rotation, -half_w, -half_h),
+                "ItemTransform": _content_matrix(
+                    item.content_rotation, placed_w, placed_h
+                ),
                 "ImageTypeName": type_name,
                 "ActualPpi": "72 72",
                 "EffectivePpi": "72 72",
@@ -674,8 +719,8 @@ class IdmlWriter:
             {
                 "Left": "0",
                 "Top": "0",
-                "Right": fmt(item.width),
-                "Bottom": fmt(item.height),
+                "Right": fmt(placed_w),
+                "Bottom": fmt(placed_h),
             },
         )
         ET.SubElement(

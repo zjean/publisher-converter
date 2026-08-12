@@ -198,6 +198,113 @@ class ImageTypeTest(unittest.TestCase):
                 self.assertEqual(image.get("ImageTypeName"), expected)
 
 
+class ContentTransformTest(unittest.TestCase):
+    """A picture must land on the frame that holds it, at any rotation.
+
+    IDML clips content to its frame, so a picture placed outside its own
+    frame does not look wrong -- it looks absent. Every rotated image in
+    the sample set was 100% outside, which is why a whole document read as
+    having no pictures at all.
+    """
+
+    @staticmethod
+    def content_box(transform: str, width: float, height: float):
+        a, b, c, d, tx, ty = (float(v) for v in transform.split())
+        corners = [
+            (a * x + c * y + tx, b * x + d * y + ty)
+            for x, y in ((0, 0), (width, 0), (0, height), (width, height))
+        ]
+        xs = [p[0] for p in corners]
+        ys = [p[1] for p in corners]
+        return min(xs), max(xs), min(ys), max(ys)
+
+    def test_content_is_centred_on_the_frame_at_every_rotation(self):
+        width, height = 267.2, 360.0
+        for rotation in (0, 90, -90, 180, 270, -46, 45):
+            with self.subTest(rotation=rotation):
+                x0, x1, y0, y1 = self.content_box(
+                    idml._content_matrix(rotation, width, height), width, height
+                )
+                # fmt rounds to six decimals, so the matrix components carry
+                # a little rounding into the corner arithmetic. A thousandth
+                # of a point is ~350 nanometres; the concern is placement,
+                # not float exactness.
+                self.assertAlmostEqual((x0 + x1) / 2, 0.0, places=3)
+                self.assertAlmostEqual((y0 + y1) / 2, 0.0, places=3)
+
+    def test_a_rotated_picture_covers_the_whole_frame(self):
+        # Not merely overlaps: a quarter-turned picture placed at the frame's
+        # own dimensions leaves the frame only 74% covered and clips the rest.
+        width, height = 267.2, 360.0
+        for rotation in (0, 90, -90, 180, 270, -270):
+            with self.subTest(rotation=rotation):
+                placed_w, placed_h = idml._content_bounds(rotation, width, height)
+                x0, x1, y0, y1 = self.content_box(
+                    idml._content_matrix(rotation, placed_w, placed_h),
+                    placed_w,
+                    placed_h,
+                )
+                self.assertLessEqual(x0, -width / 2 + 0.001, "frame not covered on the left")
+                self.assertGreaterEqual(x1, width / 2 - 0.001, "frame not covered on the right")
+                self.assertLessEqual(y0, -height / 2 + 0.001, "frame not covered on top")
+                self.assertGreaterEqual(y1, height / 2 - 0.001, "frame not covered at the bottom")
+
+    def test_a_quarter_turn_preserves_the_pictures_aspect_ratio(self):
+        # The decisive evidence: a 4000x3000 photo placed into portrait
+        # bounds and then turned is squashed. Placed bounds must carry the
+        # frame's aspect inverted, so the turn restores it.
+        width, height = 267.2, 360.0
+        placed_w, placed_h = idml._content_bounds(-90, width, height)
+        self.assertAlmostEqual(placed_w / placed_h, height / width, places=6)
+        unrotated_w, unrotated_h = idml._content_bounds(0, width, height)
+        self.assertAlmostEqual(unrotated_w / unrotated_h, width / height, places=6)
+
+    def test_only_quarter_turns_swap_the_axes(self):
+        for rotation in (0, 180, -180, 360, 10, 44):
+            with self.subTest(rotation=rotation):
+                self.assertEqual(idml._content_bounds(rotation, 200.0, 100.0), (200.0, 100.0))
+        for rotation in (90, -90, 270, 100):
+            with self.subTest(rotation=rotation):
+                self.assertEqual(idml._content_bounds(rotation, 200.0, 100.0), (100.0, 200.0))
+
+    def test_an_unrotated_picture_fills_its_frame_exactly(self):
+        width, height = 200.0, 100.0
+        x0, x1, y0, y1 = self.content_box(
+            idml._content_matrix(0, width, height), width, height
+        )
+        self.assertAlmostEqual(x0, -width / 2)
+        self.assertAlmostEqual(x1, width / 2)
+        self.assertAlmostEqual(y0, -height / 2)
+        self.assertAlmostEqual(y1, height / 2)
+
+    def test_zero_rotation_output_is_unchanged(self):
+        # Fourteen of the eighteen sample images are unrotated and were
+        # already correct; this must stay byte-identical for them.
+        self.assertEqual(idml._content_matrix(0, 200.0, 100.0), "1 0 0 1 -100 -50")
+
+    def test_every_image_in_a_built_package_overlaps_its_frame(self):
+        document = graphic_object_document("image/png")
+        document.pages[0].items[0].content_rotation = -90.0
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            spread = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            root = ET.fromstring(archive.read(spread))
+        image = next(root.iter("Image"))
+        bounds = image.find("Properties/GraphicBounds")
+        placed_w = float(bounds.get("Right"))
+        placed_h = float(bounds.get("Bottom"))
+        x0, x1, y0, y1 = self.content_box(image.get("ItemTransform"), placed_w, placed_h)
+        # The frame is the Rectangle's own drawn outline, not the placed size.
+        geometry = next(root.iter("PathGeometry"))
+        anchors = [p.get("Anchor").split() for p in geometry.iter("PathPointType")]
+        frame_w = max(float(a[0]) for a in anchors) - min(float(a[0]) for a in anchors)
+        frame_h = max(float(a[1]) for a in anchors) - min(float(a[1]) for a in anchors)
+        self.assertLessEqual(x0, -frame_w / 2 + 0.001)
+        self.assertGreaterEqual(x1, frame_w / 2 - 0.001)
+        self.assertLessEqual(y0, -frame_h / 2 + 0.001)
+        self.assertGreaterEqual(y1, frame_h / 2 - 0.001)
+
+
 class StructureTest(unittest.TestCase):
     def test_zip_entry_names_are_fixed_and_cannot_traverse(self):
         path = write_package(image_document(), name="../escape")
