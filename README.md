@@ -321,11 +321,15 @@ These are real and deliberate, not bugs to be surprised by later.
   Chinese, Japanese and Korean it declines to guess rather than risk
   corrupting text, so those documents still need `--codepage cp932` or
   similar passed explicitly.
-- **Master-page items are baked into each page.** libmspub never
-  announces masters; it resolves them internally and replays their shapes
-  onto each page ahead of that page's own. Headers, footers and page
-  borders therefore survive as ordinary frames, correctly positioned, but
-  as content repeated per page rather than as an Affinity master.
+- **Master pages are reconstructed where the file allows it.** libmspub
+  never announces masters; it resolves them internally and replays their
+  shapes onto each page. The converter reads the master structure out of
+  the `.pub` itself and lifts that repeated content back onto real IDML
+  master spreads, so a running header is stored once rather than copied
+  onto every page. A Publisher master covering a facing pair becomes two
+  masters, which looks identical and differs only in editing structure.
+  Anything that does not line up cleanly stays flattened, exactly as
+  before — nothing is ever moved on a guess.
 - **Page numbers are resolved, not live.** Publisher stores a page-number
   field as a literal `#` and libmspub has no field handling at all, so
   the converter reads the master-page structure out of the `.pub` itself

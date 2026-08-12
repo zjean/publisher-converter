@@ -122,6 +122,12 @@ class BackgroundDetectionTest(unittest.TestCase):
 
 
 class PageNumberTest(unittest.TestCase):
+    """A footer holding a page-number field stays put and gets numbered.
+
+    It cannot move onto a master: one copy there cannot read 1 on one page
+    and 2 on the next. Everything beside it still moves.
+    """
+
     def _document(self, pages: int, text: str = " #") -> model.Document:
         document = model.Document()
         for _ in range(pages):
@@ -130,54 +136,150 @@ class PageNumberTest(unittest.TestCase):
         return document
 
     def footers(self, document):
-        return [p.items[0].story.paragraphs[0].spans[0].text for p in document.pages]
+        return [
+            next(i for i in p.items if isinstance(i, model.TextFrame))
+            .story.paragraphs[0].spans[0].text
+            for p in document.pages
+        ]
 
     def test_the_placeholder_becomes_the_real_page_number(self):
         document = self._document(3)
-        convert._resolve_page_numbers(document, structure_for(3, fields=True))
+        convert._apply_master_pages(document, structure_for(3, fields=True))
         self.assertEqual(self.footers(document), [" 1", " 2", " 3"])
         self.assertTrue(any("page-number field" in w for w in document.warnings))
 
-    def test_a_document_with_no_field_table_is_left_alone(self):
-        # No TOKN chunk means every '#' in the document was typed.
+    def test_the_numbered_frame_is_not_moved_onto_a_master(self):
         document = self._document(3)
-        convert._resolve_page_numbers(document, structure_for(3, fields=False))
-        self.assertEqual(self.footers(document), [" #", " #", " #"])
-        self.assertEqual(document.warnings, [])
+        convert._apply_master_pages(document, structure_for(3, fields=True))
+        self.assertEqual(document.masters, [])
+        for page in document.pages:
+            self.assertIsNone(page.master)
 
-    def test_no_structure_at_all_is_left_alone(self):
+    def test_without_a_field_table_the_hash_is_ordinary_master_content(self):
+        # No TOKN chunk means the '#' was typed, so the frame is repeated
+        # content like any other and belongs on the master, text intact.
+        document = self._document(3)
+        convert._apply_master_pages(document, structure_for(3, fields=False))
+        self.assertEqual(len(document.masters), 1)
+        text = document.masters[0].items[0].story.paragraphs[0].spans[0].text
+        self.assertEqual(text, " #")
+        for page in document.pages:
+            self.assertEqual(page.master, "A")
+
+    def test_no_structure_at_all_changes_nothing(self):
         document = self._document(2)
-        convert._resolve_page_numbers(document, None)
+        convert._apply_master_pages(document, None)
         self.assertEqual(self.footers(document), [" #", " #"])
+        self.assertEqual(document.masters, [])
 
-    def test_a_page_count_mismatch_is_left_alone(self):
+    def test_a_page_count_mismatch_changes_nothing(self):
         # Nothing can be attributed if the two halves cannot be lined up.
         document = self._document(3)
-        convert._resolve_page_numbers(document, structure_for(5, fields=True))
+        convert._apply_master_pages(document, structure_for(5, fields=True))
         self.assertEqual(self.footers(document), [" #", " #", " #"])
+        self.assertEqual(document.masters, [])
         self.assertEqual(document.warnings, [])
-
-    def test_inconsistent_master_content_is_left_alone(self):
-        # If pages sharing a master did not get the same shapes, the
-        # attribution is wrong and no substitution is justified.
-        document = self._document(3)
-        document.pages[1].items[0].x = 999.0
-        convert._resolve_page_numbers(document, structure_for(3, fields=True))
-        self.assertEqual(self.footers(document), [" #", " #", " #"])
 
     def test_a_hash_outside_master_content_is_left_alone(self):
         document = model.Document()
         for _ in range(2):
-            page = page_with(frame_saying("nothing here"), frame_saying("Suite #3"))
-            document.pages.append(page)
-        convert._resolve_page_numbers(document, structure_for(2, fields=True, shapes=1))
-        second = [p.items[1].story.paragraphs[0].spans[0].text for p in document.pages]
-        self.assertEqual(second, ["Suite #3", "Suite #3"])
+            document.pages.append(page_with(frame_saying("nothing here"),
+                                            frame_saying("Suite #3")))
+        convert._apply_master_pages(document, structure_for(2, fields=True, shapes=1))
+        remaining = [
+            p.items[-1].story.paragraphs[0].spans[0].text for p in document.pages
+        ]
+        self.assertEqual(remaining, ["Suite #3", "Suite #3"])
 
     def test_surrounding_text_survives(self):
         document = self._document(2, text="Page # of many")
-        convert._resolve_page_numbers(document, structure_for(2, fields=True))
+        convert._apply_master_pages(document, structure_for(2, fields=True))
         self.assertEqual(self.footers(document), ["Page 1 of many", "Page 2 of many"])
+
+
+class MasterExtractionTest(unittest.TestCase):
+    """Content Publisher held once should end up stored once."""
+
+    def _document(self, pages: int, master_text: str = "Running header"):
+        document = model.Document()
+        for _ in range(pages):
+            header = frame_saying(master_text)
+            rule = model.Rectangle(x=10.0, y=730.0, width=400.0, height=2.0)
+            own = model.TextFrame(x=50.0, y=100.0, width=200.0, height=50.0)
+            document.pages.append(page_with(header, rule, own))
+        return document
+
+    def test_repeated_content_moves_onto_one_master(self):
+        document = self._document(3)
+        convert._apply_master_pages(document, structure_for(3, fields=False, shapes=2))
+        self.assertEqual(len(document.masters), 1)
+        self.assertEqual(len(document.masters[0].items), 2)
+        for page in document.pages:
+            self.assertEqual(page.master, "A")
+            self.assertEqual(len(page.items), 1, "only the page's own item should remain")
+        self.assertTrue(any("master page" in w for w in document.warnings))
+
+    def test_the_master_takes_the_page_size(self):
+        document = self._document(2)
+        convert._apply_master_pages(document, structure_for(2, fields=False, shapes=2))
+        self.assertAlmostEqual(document.masters[0].width, 612.0)
+        self.assertAlmostEqual(document.masters[0].height, 792.0)
+
+    def test_a_page_number_frame_stays_on_the_page(self):
+        # One copy on a master cannot read 1 on one page and 2 on the next.
+        document = self._document(3, master_text="Page #")
+        convert._apply_master_pages(document, structure_for(3, fields=True, shapes=2))
+        kept = [p.items[0].story.paragraphs[0].spans[0].text for p in document.pages]
+        self.assertEqual(kept, ["Page 1", "Page 2", "Page 3"])
+        # The rule beside it has no field, so it still moves.
+        self.assertEqual(len(document.masters), 1)
+        self.assertEqual(len(document.masters[0].items), 1)
+        for page in document.pages:
+            self.assertEqual(len(page.items), 2)
+
+    def test_a_facing_pair_becomes_two_masters(self):
+        # One Publisher master can cover a left and a right page. They look
+        # different, so they become two IDML masters rather than blocking
+        # extraction entirely.
+        document = self._document(4)
+        for even in (1, 3):
+            document.pages[even].items[1].x = 200.0
+        convert._apply_master_pages(document, structure_for(4, fields=False, shapes=2))
+        self.assertEqual(len(document.masters), 2)
+        self.assertEqual([p.master for p in document.pages], ["A", "B", "A", "B"])
+
+    def test_more_than_two_layouts_per_master_moves_nothing(self):
+        # A Publisher master covers at most a facing pair, so three
+        # different layouts means the attribution is wrong.
+        document = self._document(3)
+        document.pages[1].items[1].x = 200.0
+        document.pages[2].items[1].x = 400.0
+        convert._apply_master_pages(document, structure_for(3, fields=False, shapes=2))
+        self.assertEqual(document.masters, [])
+        for page in document.pages:
+            self.assertIsNone(page.master)
+            self.assertEqual(len(page.items), 3)
+
+    def test_pages_of_different_sizes_get_their_own_master(self):
+        # The sheet is part of a master's identity, so content is never
+        # lifted onto a page of the wrong dimensions.
+        document = self._document(2)
+        document.pages[1].width = 400.0
+        convert._apply_master_pages(document, structure_for(2, fields=False, shapes=2))
+        self.assertEqual(len(document.masters), 2)
+        self.assertAlmostEqual(document.masters[0].width, 612.0)
+        self.assertAlmostEqual(document.masters[1].width, 400.0)
+
+    def test_resources_reach_the_document_through_a_master(self):
+        document = model.Document()
+        master = model.Master(name="A")
+        frame = frame_saying("x")
+        frame.story.paragraphs[0].spans[0].font = "Master Only Font"
+        frame.story.paragraphs[0].spans[0].color = (1, 2, 3)
+        master.items.append(frame)
+        document.masters.append(master)
+        self.assertIn("Master Only Font", document.fonts)
+        self.assertIn((1, 2, 3), document.colors)
 
 
 @needs_samples
@@ -186,7 +288,7 @@ class EndToEndTest(unittest.TestCase):
     def test_the_missal_footers_number_one_to_fifteen(self):
         source = SAMPLES / "MISSAL MARIANA E PEDRO.pub"
         document = convert.parse_document(source)
-        convert._resolve_page_numbers(document, pubfile.read_structure(source))
+        convert._apply_master_pages(document, pubfile.read_structure(source))
         footers = []
         for page in document.pages:
             frame = next(i for i in page.items if isinstance(i, model.TextFrame))
@@ -201,7 +303,7 @@ class EndToEndTest(unittest.TestCase):
         before = [s.text for p in document.pages
                   for i in model._walk(p.items) if isinstance(i, model.TextFrame)
                   for par in i.story.paragraphs for s in par.spans]
-        convert._resolve_page_numbers(document, pubfile.read_structure(source))
+        convert._apply_master_pages(document, pubfile.read_structure(source))
         after = [s.text for p in document.pages
                  for i in model._walk(p.items) if isinstance(i, model.TextFrame)
                  for par in i.story.paragraphs for s in par.spans]

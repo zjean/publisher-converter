@@ -277,6 +277,13 @@ class IdmlWriter:
 
         spread_parts: List[str] = []
         story_parts: List[str] = []
+        master_parts: List[str] = []
+
+        # Masters are written first so that a page can name one it applies.
+        for master in self.doc.masters:
+            part_name = f"MasterSpreads/MasterSpread_{self.master_id(master.name)}.xml"
+            master_parts.append(part_name)
+            self._parts[part_name] = self._master_spread_part(master, story_parts)
 
         for index, page in enumerate(self.doc.pages, start=1):
             spread_name = f"Spreads/Spread_spread{index}.xml"
@@ -291,7 +298,13 @@ class IdmlWriter:
         self._parts["Resources/Preferences.xml"] = self._preferences_part()
         self._parts["XML/BackingStory.xml"] = self._backing_story_part()
         self._parts["XML/Tags.xml"] = self._tags_part()
-        self._parts["designmap.xml"] = self._designmap_part(spread_parts, story_parts)
+        self._parts["designmap.xml"] = self._designmap_part(
+            spread_parts, story_parts, master_parts
+        )
+
+    @staticmethod
+    def master_id(name: str) -> str:
+        return f"master{name}"
 
     def _collect_resources(self) -> None:
         self.fonts = self.doc.fonts
@@ -320,7 +333,55 @@ class IdmlWriter:
         )
         return _serialise(root)
 
-    def _designmap_part(self, spreads: List[str], stories: List[str]) -> bytes:
+    def _master_spread_part(self, master: model.Master, story_parts: List[str]) -> bytes:
+        """A MasterSpread holding content Publisher kept once, not per page.
+
+        Same shape as a Spread, and its items keep the page coordinates
+        they already had: a master serves only pages of its own size, so
+        the centred origin is identical and nothing needs moving.
+        """
+        root = ET.Element(
+            "idPkg:MasterSpread", {"xmlns:idPkg": IDPKG, "DOMVersion": DOM_VERSION}
+        )
+        identifier = self.master_id(master.name)
+        spread = ET.SubElement(
+            root,
+            "MasterSpread",
+            {
+                "Self": identifier,
+                "Name": f"{master.name}-Master",
+                "NamePrefix": master.name,
+                "BaseName": "Master",
+                "ShowMasterItems": "true",
+                "PageCount": "1",
+                "OverriddenPageItemProps": "",
+                "ItemTransform": "1 0 0 1 0 0",
+            },
+        )
+        half_w, half_h = master.width / 2.0, master.height / 2.0
+        ET.SubElement(
+            spread,
+            "Page",
+            {
+                "Self": f"{identifier}_page",
+                "Name": master.name,
+                "AppliedMaster": "n",
+                "OverrideList": "",
+                "GeometricBounds": f"0 0 {fmt(master.height)} {fmt(master.width)}",
+                "ItemTransform": f"1 0 0 1 {fmt(-half_w)} {fmt(-half_h)}",
+                "AppliedTrapPreset": "TrapPreset/$ID/kDefaultTrapStyleName",
+                "GridStartingPoint": "TopOutside",
+                "UseMasterGrid": "true",
+            },
+        )
+        page = model.Page(width=master.width, height=master.height)
+        for item in _flatten(master.items):
+            self._emit_item(spread, item, page, story_parts)
+        return _serialise(root)
+
+    def _designmap_part(
+        self, spreads: List[str], stories: List[str], masters: List[str] = ()
+    ) -> bytes:
         document = ET.Element(
             "Document",
             {
@@ -342,6 +403,9 @@ class IdmlWriter:
             tag = {"Graphic.xml": "Graphic", "Fonts.xml": "Fonts",
                    "Styles.xml": "Styles", "Preferences.xml": "Preferences"}[Path(src).name]
             ET.SubElement(document, f"idPkg:{tag}", {"src": src})
+        # Masters must be declared before the spreads that apply them.
+        for src in masters:
+            ET.SubElement(document, "idPkg:MasterSpread", {"src": src})
         for src in spreads:
             ET.SubElement(document, "idPkg:Spread", {"src": src})
         for src in stories:
@@ -554,7 +618,7 @@ class IdmlWriter:
             {
                 "Self": f"page{index}",
                 "Name": str(index),
-                "AppliedMaster": "n",
+                "AppliedMaster": self.master_id(page.master) if page.master else "n",
                 "OverrideList": "",
                 "GeometricBounds": f"0 0 {fmt(page.height)} {fmt(page.width)}",
                 "ItemTransform": f"1 0 0 1 {fmt(-half_w)} {fmt(-half_h)}",

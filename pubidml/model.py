@@ -240,11 +240,26 @@ class Page:
     width: float = 612.0
     height: float = 792.0
     items: List[Item] = field(default_factory=list)
+    #: Name of the master this page applies, once the .pub's own structure
+    #: has been read. libmspub replays master content onto every page, so
+    #: this stays None unless that content could be lifted back out.
+    master: Optional[str] = None
+
+
+@dataclass
+class Master:
+    """Content Publisher held once and repeated on every page applying it."""
+
+    name: str = "A"
+    width: float = 612.0
+    height: float = 792.0
+    items: List[Item] = field(default_factory=list)
 
 
 @dataclass
 class Document:
     pages: List[Page] = field(default_factory=list)
+    masters: List["Master"] = field(default_factory=list)
     title: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
     # True once the parser's endDocument event has been seen. A stream that
@@ -252,32 +267,42 @@ class Document:
     # but silently short document, which would be reported as a success.
     complete: bool = False
 
+    def all_items(self):
+        """Every item in the document, masters included.
+
+        Resources are collected document-wide, so anything reached only
+        through a master -- a font used solely in a footer, say -- has to
+        be visible here or it goes missing from the package.
+        """
+        for page in self.pages:
+            yield from _walk(page.items)
+        for master in self.masters:
+            yield from _walk(master.items)
+
     @property
     def fonts(self) -> List[str]:
         found = set()
-        for page in self.pages:
-            for item in _walk(page.items):
-                if isinstance(item, TextFrame):
-                    for paragraph in item.story.paragraphs:
-                        for span in paragraph.spans:
-                            if span.font:
-                                found.add(span.font)
+        for item in self.all_items():
+            if isinstance(item, TextFrame):
+                for paragraph in item.story.paragraphs:
+                    for span in paragraph.spans:
+                        if span.font:
+                            found.add(span.font)
         return sorted(found)
 
     @property
     def colors(self) -> List[Color]:
         found = set()
-        for page in self.pages:
-            for item in _walk(page.items):
-                if item.style.fill:
-                    found.add(item.style.fill)
-                if item.style.stroke:
-                    found.add(item.style.stroke)
-                if isinstance(item, TextFrame):
-                    for paragraph in item.story.paragraphs:
-                        for span in paragraph.spans:
-                            if span.color:
-                                found.add(span.color)
+        for item in self.all_items():
+            if item.style.fill:
+                found.add(item.style.fill)
+            if item.style.stroke:
+                found.add(item.style.stroke)
+            if isinstance(item, TextFrame):
+                for paragraph in item.story.paragraphs:
+                    for span in paragraph.spans:
+                        if span.color:
+                            found.add(span.color)
         return sorted(found)
 
 

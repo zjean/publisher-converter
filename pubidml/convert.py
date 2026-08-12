@@ -180,6 +180,11 @@ def _rasterise_metafiles(document: model.Document) -> None:
     """
     for page in document.pages:
         page.items = _rasterise_items(page.items, document)
+    # Masters are extracted before this runs -- they have to be, since
+    # rasterisation can drop artwork and that would break the shape count
+    # the attribution relies on -- so they need visiting separately.
+    for master in document.masters:
+        master.items = _rasterise_items(master.items, document)
 
 
 def _rasterise_items(items: List[model.Item], document: model.Document) -> List[model.Item]:
@@ -261,63 +266,142 @@ def _shape_signature(item: model.Item) -> tuple:
     )
 
 
-def _resolve_page_numbers(
-    document: model.Document, structure: Optional["pubfile.FileStructure"]
-) -> None:
-    """Replace Publisher's '#' page-number placeholder with the real number.
+def _carries_page_number(item: model.Item, has_fields: bool) -> bool:
+    """True for a master frame holding what is probably a page-number field."""
+    if not has_fields or not isinstance(item, model.TextFrame):
+        return False
+    return any(
+        "#" in span.text
+        for paragraph in item.story.paragraphs
+        for span in paragraph.spans
+    )
 
-    Publisher stores a page-number field as a bare '#' in the text and
-    libmspub has no field handling at all, so a footer reads '#' on every
-    page. Two independent facts make substituting it safe rather than a
-    guess: the document must carry a field table (no TOKN chunk means
-    every '#' in it was typed), and the '#' must sit in content the file
-    says came from a master.
 
-    Anything that does not line up leaves the text exactly as it was.
+def _attribute_masters(
+    document: model.Document, structure: "pubfile.FileStructure"
+) -> Optional[List[List[model.Item]]]:
+    """Which leading items on each page came from that page's master.
+
+    Returns None when the attribution cannot be trusted, which is the
+    common case for anything unusual: the two halves must line up page for
+    page, and pages sharing a master must have been given the same shapes.
     """
-    if structure is None or not structure.has_fields:
-        return
     if len(structure.pages) != len(document.pages):
-        # The side-channel could not be aligned with what libmspub emitted,
-        # so nothing here can be attributed with confidence.
-        log.info("page structure did not align; leaving '#' alone")
-        return
+        log.info("page structure did not align with the event stream")
+        return None
 
-    attributed = []
+    attributed: List[tuple] = []
     for index, page in enumerate(document.pages):
         master = structure.master_for(index)
         if master is None or not master.shape_count:
-            attributed.append(None)
+            attributed.append(([], None))
             continue
-        attributed.append(_master_items(page, master.shape_count))
+        items = _master_items(page, master.shape_count)
+        # The sheet is part of the identity as well as the shapes: content
+        # can only be shared by pages of one size, or lifting it would put
+        # it on a page of the wrong dimensions.
+        signature = (
+            tuple(_shape_signature(i) for i in items),
+            round(page.width, 3),
+            round(page.height, 3),
+        )
+        attributed.append((items, (master.seq, signature)))
 
-    # Pages sharing a master must have been given the same shapes. If they
-    # were not, the attribution is wrong and no substitution is justified.
-    by_master: dict = {}
-    for index, items in enumerate(attributed):
-        if items is None:
+    # A Publisher master covers either one page or a facing pair, so one
+    # master sequence number may legitimately present two different
+    # layouts -- a left and a right. More than two means the attribution
+    # is wrong rather than the document unusual, and nothing should move.
+    variants: dict = {}
+    for _items, key in attributed:
+        if key is not None:
+            variants.setdefault(key[0], set()).add(key[1])
+    for seq, signatures in variants.items():
+        if len(signatures) > 2:
+            log.info(
+                "master %s presents %d different layouts; leaving pages flattened",
+                seq, len(signatures),
+            )
+            return None
+    return attributed
+
+
+def _apply_master_pages(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> None:
+    """Lift repeated master content onto real masters, and fix page numbers.
+
+    libmspub replays a master's shapes onto every page and says nothing
+    about where they came from, so a footer arrives fifteen times over. The
+    .pub itself says which page is a master and which master each page
+    applies, so the copies can be reduced back to one.
+
+    Frames holding a page-number field stay behind. Publisher stores that
+    field as a bare '#', and a single copy on a master cannot read '1' on
+    one page and '2' on the next -- so those keep their per-page position
+    and get the real number substituted instead. A '#' is only ever touched
+    when the document carries a field table, since a document with none
+    cannot contain a field and every '#' in it was typed.
+    """
+    if structure is None:
+        return
+    attributed = _attribute_masters(document, structure)
+    if attributed is None:
+        return
+
+    masters: dict = {}
+    names = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    lifted = numbered = 0
+
+    for index, (items, key) in enumerate(attributed):
+        if not items:
             continue
-        master = structure.master_for(index)
-        signature = tuple(_shape_signature(i) for i in items)
-        if by_master.setdefault(master.seq, signature) != signature:
-            log.info("master content differs between pages; leaving '#' alone")
-            return
+        page = document.pages[index]
 
-    replaced = 0
-    for index, items in enumerate(attributed):
-        for item in items or ():
-            if not isinstance(item, model.TextFrame):
-                continue
-            for paragraph in item.story.paragraphs:
+        # Compared by identity: two master items can be genuinely equal as
+        # values (two identical rules, say) and `in` would confuse them.
+        keep_ids = {
+            id(i) for i in items if _carries_page_number(i, structure.has_fields)
+        }
+        move = [i for i in items if id(i) not in keep_ids]
+        keep = [i for i in items if id(i) in keep_ids]
+
+        for frame in keep:
+            for paragraph in frame.story.paragraphs:
                 for span in paragraph.spans:
                     if "#" in span.text:
                         span.text = span.text.replace("#", str(index + 1))
-                        replaced += 1
+                        numbered += 1
 
-    if replaced:
+        if not move:
+            continue
+
+        # Keyed by layout, not just by master: a facing-pages master holds
+        # a left and a right page, which become two IDML masters. The page
+        # looks the same either way; only the editing structure differs.
+        if key not in masters:
+            master = model.Master(
+                name=names[len(masters) % len(names)],
+                width=page.width,
+                height=page.height,
+                items=list(move),
+            )
+            masters[key] = master
+            document.masters.append(master)
+            lifted += len(move)
+
+        page.master = masters[key].name
+        move_ids = {id(i) for i in move}
+        page.items = [i for i in page.items if id(i) not in move_ids]
+
+    if numbered:
         document.warnings.append(
-            f"page-number field resolved on {replaced} frame(s): Publisher "
+            f"page-number field resolved on {numbered} frame(s): Publisher "
             f"stores it as '#', which would otherwise read '#' on every page"
+        )
+    if lifted:
+        document.warnings.append(
+            f"{lifted} repeated item(s) moved onto {len(masters)} master "
+            f"page(s) rather than copied onto every page"
         )
 
 
@@ -407,7 +491,7 @@ def _convert(
         raise ConversionError("document contains no pages")
 
     textrepair.repair_document(document, codepage)
-    _resolve_page_numbers(document, pubfile.read_structure(source))
+    _apply_master_pages(document, pubfile.read_structure(source))
     _rasterise_metafiles(document)
     _check_overset_text(document)
 
@@ -428,17 +512,16 @@ def _convert(
     result.fonts = document.fonts
     result.warnings = list(document.warnings)
 
-    for page in document.pages:
-        for item in model._walk(page.items):
-            if isinstance(item, model.TextFrame):
-                result.text_frames += 1
-                for paragraph in item.story.paragraphs:
-                    for span in paragraph.spans:
-                        result.characters += len(span.text)
-            elif isinstance(item, model.Image):
-                result.images += 1
-            elif isinstance(item, (model.Rectangle, model.Ellipse, model.Polygon, model.Path)):
-                result.shapes += 1
+    for item in document.all_items():
+        if isinstance(item, model.TextFrame):
+            result.text_frames += 1
+            for paragraph in item.story.paragraphs:
+                for span in paragraph.spans:
+                    result.characters += len(span.text)
+        elif isinstance(item, model.Image):
+            result.images += 1
+        elif isinstance(item, (model.Rectangle, model.Ellipse, model.Polygon, model.Path)):
+            result.shapes += 1
 
     log.info(
         "%s: ok in %.2fs - %d pages, %d frames, %d images, %d shapes, %d chars, fonts=%s",
