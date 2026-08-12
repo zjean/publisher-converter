@@ -321,9 +321,20 @@ These are real and deliberate, not bugs to be surprised by later.
   Chinese, Japanese and Korean it declines to guess rather than risk
   corrupting text, so those documents still need `--codepage cp932` or
   similar passed explicitly.
-- **Master-page items are baked into each page.** libmspub replays them
-  per page, so they arrive as ordinary items rather than as an Affinity
-  master.
+- **Master-page items are baked into each page.** libmspub never
+  announces masters; it resolves them internally and replays their shapes
+  onto each page ahead of that page's own. Headers, footers and page
+  borders therefore survive as ordinary frames, correctly positioned, but
+  as content repeated per page rather than as an Affinity master.
+- **Page numbers do not follow the page.** Publisher stores a page-number
+  field as a literal `#` in the text, and libmspub has no field handling
+  at all, so a footer reading `#` converts to a literal `#` on every
+  page. Renumbering is a manual step in Affinity.
+- **Margin and column guides are lost.** libmspub reports exactly two
+  properties for a page, `svg:width` and `svg:height` — no margins, no
+  guides, no baseline grid — so Affinity applies its own defaults.
+- **Text frames become single-column** and **facing pages are not set**,
+  so a booklet or 2-up layout arrives as single pages.
 - **Story threading is not reconstructed.** Each Publisher text frame
   becomes its own IDML story, so text that flowed from frame to frame no
   longer reflows across them.

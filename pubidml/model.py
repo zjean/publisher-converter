@@ -388,8 +388,17 @@ class ModelBuilder:
         self._page = None
 
     def _on_startMasterPage(self, props: dict) -> None:
-        # Master page content is replayed onto each page by libmspub, so
-        # capturing it again would duplicate every item.
+        # Kept as a guard, not because it fires: libmspub 0.1.5 never calls
+        # librevenge's master-page callbacks at all. It resolves masters
+        # internally instead and replays their shapes onto each page ahead
+        # of that page's own -- MSPUBCollector::writePage does
+        # writePageShapes(master) then writePageShapes(page) -- so header
+        # and footer frames arrive as ordinary items and are preserved.
+        # Verified against the 0.1.5 source and against a 15-page sample
+        # whose footer frame is identical on every page.
+        #
+        # If a future libmspub starts announcing masters, this stops the
+        # content being captured twice. Until then it is unreachable.
         self._in_master = True
 
     def _on_endMasterPage(self) -> None:

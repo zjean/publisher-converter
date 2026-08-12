@@ -36,8 +36,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
-from . import model
-from .units import fmt
+from . import imagemeta, model
+from .units import PT_PER_INCH, fmt
 
 IDPKG = "http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"
 DOM_VERSION = "8.0"
@@ -111,6 +111,34 @@ def _matrix(rotation_deg: float, tx: float, ty: float) -> str:
     radians = math.radians(rotation_deg)
     cos, sin = math.cos(radians), math.sin(radians)
     return f"{fmt(cos)} {fmt(sin)} {fmt(-sin)} {fmt(cos)} {fmt(tx)} {fmt(ty)}"
+
+
+def _resolution(data: bytes, placed_w: float, placed_h: float) -> dict:
+    """ActualPpi and EffectivePpi for a picture placed at a given size.
+
+    Actual is what the file claims about itself; effective is what that
+    works out to once it is scaled onto the page, and it is the number
+    that decides whether the artwork holds up in print. Both were
+    hard-coded to 72, which made every picture in the document look
+    identically fine in the links panel — including one placed at 42 ppi.
+
+    Effective resolution does not depend on the declared value: it is
+    simply pixels over placed inches. So a file that stores no density
+    still gets a truthful effective figure, and only the actual figure
+    falls back to the conventional 72.
+    """
+    info = imagemeta.inspect(data)
+    if not info.known or placed_w <= 0 or placed_h <= 0:
+        return {"ActualPpi": "72 72", "EffectivePpi": "72 72"}
+
+    actual_x = info.ppi_x or 72.0
+    actual_y = info.ppi_y or 72.0
+    effective_x = info.width_px / (placed_w / PT_PER_INCH)
+    effective_y = info.height_px / (placed_h / PT_PER_INCH)
+    return {
+        "ActualPpi": f"{round(actual_x)} {round(actual_y)}",
+        "EffectivePpi": f"{round(effective_x)} {round(effective_y)}",
+    }
 
 
 def _is_quarter_turn(rotation_deg: float) -> bool:
@@ -705,8 +733,7 @@ class IdmlWriter:
                     item.content_rotation, placed_w, placed_h
                 ),
                 "ImageTypeName": type_name,
-                "ActualPpi": "72 72",
-                "EffectivePpi": "72 72",
+                **_resolution(item.data, placed_w, placed_h),
                 "Visible": "true",
             },
         )
