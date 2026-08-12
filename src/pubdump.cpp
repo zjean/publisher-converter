@@ -105,6 +105,22 @@ void serialiseList(const librevenge::RVNGPropertyList &propList, std::string &ou
   out += '}';
 }
 
+// The event stream is the only channel to the Python half, which trusts a
+// zero exit code to mean "this stream is complete". A short write must
+// therefore stop the run rather than leave a truncated stream behind: cut
+// on a line boundary it parses perfectly and yields a silently smaller
+// document — fewer pages, fewer frames, reported as a success.
+const int EXIT_WRITE_FAILED = 5;
+
+void writeLine(const std::string &line)
+{
+  if (std::fwrite(line.data(), 1, line.size(), stdout) != line.size())
+  {
+    std::fprintf(stderr, "pubdump: failed writing event stream\n");
+    std::exit(EXIT_WRITE_FAILED);
+  }
+}
+
 class JsonPainter : public librevenge::RVNGDrawingInterface
 {
 public:
@@ -117,7 +133,7 @@ private:
     std::string line = "{\"e\":";
     jsonString(event, line);
     line += "}\n";
-    std::fwrite(line.data(), 1, line.size(), stdout);
+    writeLine(line);
   }
 
   void emit(const char *event, const librevenge::RVNGPropertyList &propList)
@@ -127,7 +143,7 @@ private:
     line += ",\"p\":";
     serialiseList(propList, line);
     line += "}\n";
-    std::fwrite(line.data(), 1, line.size(), stdout);
+    writeLine(line);
   }
 
   void emitText(const char *event, const librevenge::RVNGString &text)
@@ -137,7 +153,7 @@ private:
     line += ",\"t\":";
     jsonString(text.cstr(), line);
     line += "}\n";
-    std::fwrite(line.data(), 1, line.size(), stdout);
+    writeLine(line);
   }
 
 public:
@@ -226,6 +242,12 @@ int main(int argc, char **argv)
     return 4;
   }
 
-  std::fflush(stdout);
+  // Output buffered until now can still fail to reach the pipe; exiting 0
+  // here would present a truncated stream as a complete one.
+  if (std::fflush(stdout) != 0 || std::ferror(stdout))
+  {
+    std::fprintf(stderr, "pubdump: failed writing event stream\n");
+    return EXIT_WRITE_FAILED;
+  }
   return 0;
 }

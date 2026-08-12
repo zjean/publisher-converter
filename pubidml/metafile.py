@@ -134,10 +134,39 @@ def _inspect_wmf(data: bytes) -> MetafileInfo:
     return info
 
 
+def _resolve_tool(name: str) -> Optional[str]:
+    """Locate a helper binary, refusing one that sits in the working directory.
+
+    On Windows shutil.which prepends the current directory to the search
+    path (via NeedCurrentDirectoryForExePath), and passing an explicit
+    `path=` does not suppress that — the insert happens either way. Since
+    the documented workflow is to cd into a folder of .pub files and
+    convert in place, an archive that shipped its own magick.exe alongside
+    the documents would get that binary executed. A helper found in the
+    working directory is not a system tool, so it is refused rather than
+    run; the caller then reports the artwork as unconvertible.
+    """
+    found = shutil.which(name)
+    if not found:
+        return None
+    found = os.path.abspath(found)
+    # Compare resolved directories, not the raw strings: /var is a symlink
+    # to /private/var on macOS, so the two spellings of one directory would
+    # otherwise not match. The *directory* is resolved rather than the file,
+    # because a planted symlink pointing at some other binary is still a
+    # binary the working directory chose.
+    here = os.path.realpath(os.getcwd())
+    if os.path.normcase(os.path.realpath(os.path.dirname(found))) == os.path.normcase(here):
+        return None
+    return found
+
+
+def _magick() -> Optional[str]:
+    return _resolve_tool("magick") or _resolve_tool("convert")
+
+
 def converters_available() -> bool:
-    return bool(shutil.which("emf2svg-conv")) and bool(
-        shutil.which("magick") or shutil.which("convert")
-    )
+    return bool(_resolve_tool("emf2svg-conv")) and bool(_magick())
 
 
 def to_png(data: bytes, width_pt: float, height_pt: float, dpi: int = 300) -> Optional[bytes]:
@@ -147,10 +176,14 @@ def to_png(data: bytes, width_pt: float, height_pt: float, dpi: int = 300) -> Op
     reads EMF only.
     """
     info = inspect(data)
-    if info.kind != "emf" or info.is_empty or not converters_available():
+    if info.kind != "emf" or info.is_empty:
         return None
 
-    magick = shutil.which("magick") or shutil.which("convert")
+    emf2svg = _resolve_tool("emf2svg-conv")
+    magick = _magick()
+    if not emf2svg or not magick:
+        return None
+
     width_px = max(1, min(10000, round(width_pt / 72.0 * dpi))) if width_pt else 1000
     height_px = max(1, min(10000, round(height_pt / 72.0 * dpi))) if height_pt else 1000
 
@@ -164,7 +197,7 @@ def to_png(data: bytes, width_pt: float, height_pt: float, dpi: int = 300) -> Op
 
         try:
             step = subprocess.run(
-                ["emf2svg-conv", "-i", emf_path, "-o", svg_path],
+                [emf2svg, "-i", emf_path, "-o", svg_path],
                 capture_output=True,
                 timeout=60,
             )

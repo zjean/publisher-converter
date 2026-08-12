@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import os
+import tempfile
+import threading
 import time
 import subprocess
 import sys
@@ -42,6 +44,9 @@ PUBDUMP = _locate_pubdump()
 # pubdump exit codes
 EXIT_UNSUPPORTED = 3
 EXIT_PARSE_FAILED = 4
+EXIT_WRITE_FAILED = 5
+
+PARSE_TIMEOUT_S = 300
 
 
 class ConversionError(Exception):
@@ -73,8 +78,15 @@ class Result:
         )
 
 
-def dump_events(source: Path, pubdump: Path = PUBDUMP) -> str:
-    """Run the libmspub shim and return its JSON event stream."""
+def parse_document(source: Path, pubdump: Path = PUBDUMP) -> model.Document:
+    """Run the libmspub shim and replay its event stream into a Document.
+
+    The stream is consumed line by line rather than buffered whole. A
+    picture-heavy Publisher file emits tens of megabytes of base64, and
+    holding the raw bytes, the decoded string and the decoded images at
+    once put peak memory at roughly three times the file size — per worker,
+    across the whole thread pool.
+    """
     if not pubdump.exists():
         raise ConversionError(
             f"pubdump binary missing at {pubdump} — run 'make' first"
@@ -83,38 +95,81 @@ def dump_events(source: Path, pubdump: Path = PUBDUMP) -> str:
     # driven from a shortcut or a future GUI wrapper.
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-    try:
-        completed = subprocess.run(
-            [str(pubdump), str(source)],
-            capture_output=True,
-            timeout=300,
-            creationflags=creation_flags,
-        )
-    except subprocess.TimeoutExpired:
-        log.error("parser timed out after 300s on %s", source)
-        raise ConversionError("timed out after 300s") from None
-    except OSError as exc:
-        log.error("could not launch parser %s: %s", pubdump, exc)
-        raise ConversionError(f"could not launch parser: {exc}") from None
+    # stderr goes to a file rather than a pipe: nothing drains it while the
+    # event stream is being read, and libmspub is chatty enough about
+    # structures it does not understand to fill a pipe buffer and deadlock.
+    with tempfile.TemporaryFile() as errors:
+        try:
+            process = subprocess.Popen(
+                [str(pubdump), str(source)],
+                stdout=subprocess.PIPE,
+                stderr=errors,
+                creationflags=creation_flags,
+            )
+        except OSError as exc:
+            log.error("could not launch parser %s: %s", pubdump, exc)
+            raise ConversionError(f"could not launch parser: {exc}") from None
 
-    stderr = completed.stderr.decode("utf-8", "replace").strip()
-    log.debug(
-        "parser exit=%d stdout=%d bytes stderr=%d bytes for %s",
-        completed.returncode, len(completed.stdout), len(completed.stderr), source.name,
-    )
+        # A deadline inside the read loop cannot fire while the loop is
+        # blocked in readline, so the parser is killed from a timer instead.
+        timed_out = threading.Event()
+
+        def expire() -> None:
+            timed_out.set()
+            process.kill()
+
+        watchdog = threading.Timer(PARSE_TIMEOUT_S, expire)
+        watchdog.start()
+
+        document = None
+        build_error = None
+        try:
+            # The context manager closes the pipes and reaps the child on
+            # every path, including one where building the reader itself
+            # fails — otherwise a parser could be left running.
+            with process:
+                stream = io.TextIOWrapper(
+                    process.stdout, encoding="utf-8", errors="replace"
+                )
+                try:
+                    document = model.build(stream)
+                except Exception as exc:  # malformed event stream
+                    build_error = exc
+                finally:
+                    stream.close()
+        finally:
+            watchdog.cancel()
+        returncode = process.returncode
+
+        errors.seek(0)
+        stderr = errors.read().decode("utf-8", "replace").strip()
+
+    log.debug("parser exit=%d for %s", returncode, source.name)
     if stderr:
         # libmspub warns about structures it does not understand; these are
         # the single most useful clue when a file converts badly.
         log.info("parser stderr for %s: %s", source.name, stderr[:4000])
 
-    if completed.returncode == EXIT_UNSUPPORTED:
+    if timed_out.is_set():
+        log.error("parser timed out after %ds on %s", PARSE_TIMEOUT_S, source)
+        raise ConversionError(f"timed out after {PARSE_TIMEOUT_S}s")
+    if build_error is not None:
+        log.error("%s: malformed event stream: %s", source.name, build_error)
+        raise ConversionError(f"malformed event stream: {build_error}")
+    if returncode == EXIT_UNSUPPORTED:
         raise ConversionError("not a supported Publisher file (or corrupt)")
-    if completed.returncode == EXIT_PARSE_FAILED:
+    if returncode == EXIT_PARSE_FAILED:
         raise ConversionError("libmspub could not parse the document")
-    if completed.returncode != 0:
-        raise ConversionError(stderr or f"pubdump exited {completed.returncode}")
+    if returncode == EXIT_WRITE_FAILED:
+        raise ConversionError("parser could not write its event stream")
+    if returncode != 0:
+        raise ConversionError(stderr or f"pubdump exited {returncode}")
+    if not document.complete:
+        # Syntactically valid but short: the stream was cut on a line
+        # boundary, so every downstream count would be quietly wrong.
+        raise ConversionError("parser output was truncated")
 
-    return completed.stdout.decode("utf-8", "replace")
+    return document
 
 
 def _rasterise_metafiles(document: model.Document) -> None:
@@ -124,32 +179,47 @@ def _rasterise_metafiles(document: model.Document) -> None:
     Publisher's empty placeholder stubs.
     """
     for page in document.pages:
-        survivors = []
-        for item in page.items:
-            if not (
-                isinstance(item, model.Image)
-                and item.mime_type in metafile.METAFILE_MIME_TYPES
-            ):
-                survivors.append(item)
-                continue
+        page.items = _rasterise_items(page.items, document)
 
-            png = metafile.to_png(item.data, item.width, item.height)
-            if png:
-                item.data = png
-                item.mime_type = "image/png"
-                survivors.append(item)
-                continue
 
-            info = metafile.inspect(item.data)
-            if metafile.converters_available():
-                reason = "conversion failed"
-            else:
-                reason = "install emf2svg-conv and ImageMagick to convert it"
-            document.warnings.append(
-                f"{info.kind.upper()} artwork dropped "
-                f"({info.drawing_records} drawing records): {reason}"
-            )
-        page.items = survivors
+def _rasterise_items(items: List[model.Item], document: model.Document) -> List[model.Item]:
+    """Rasterise metafiles at any depth, returning the items that survive.
+
+    Groups are descended into: every other document-wide pass uses
+    model._walk, and a shallow pass here let grouped artwork through
+    un-rasterised and un-reported, to be written out as a broken link.
+    """
+    survivors: List[model.Item] = []
+    for item in items:
+        if isinstance(item, model.Group):
+            item.children = _rasterise_items(item.children, document)
+            survivors.append(item)
+            continue
+
+        if not (
+            isinstance(item, model.Image)
+            and item.mime_type in metafile.METAFILE_MIME_TYPES
+        ):
+            survivors.append(item)
+            continue
+
+        png = metafile.to_png(item.data, item.width, item.height)
+        if png:
+            item.data = png
+            item.mime_type = "image/png"
+            survivors.append(item)
+            continue
+
+        info = metafile.inspect(item.data)
+        if metafile.converters_available():
+            reason = "conversion failed"
+        else:
+            reason = "install emf2svg-conv and ImageMagick to convert it"
+        document.warnings.append(
+            f"{info.kind.upper()} artwork dropped "
+            f"({info.drawing_records} drawing records): {reason}"
+        )
+    return survivors
 
 
 def _check_overset_text(document: model.Document) -> None:
@@ -206,29 +276,36 @@ def convert(
     file, so `report.idml` is accompanied by `report_images/`.
     """
     source = Path(source)
-    destination = Path(destination)
     result = Result(source=source)
-    started = time.monotonic()
-    log.info("converting %s -> %s", source, destination)
-
     try:
-        events = dump_events(source, pubdump)
+        _convert(result, source, Path(destination), pubdump, codepage, wrap_images)
     except ConversionError as exc:
         result.error = str(exc)
         log.error("%s: %s", source.name, exc)
-        return result
+    except Exception as exc:
+        # A worker must never propagate. cli.py collects results across a
+        # whole batch, and one escaped exception would discard every result
+        # gathered so far along with the report that makes them usable.
+        result.error = f"unexpected error: {exc.__class__.__name__}: {exc}"
+        log.exception("%s: unexpected error", source.name)
+    return result
 
-    try:
-        document = model.build(io.StringIO(events))
-    except Exception as exc:  # malformed event stream
-        result.error = f"model build failed: {exc}"
-        log.exception("%s: model build failed", source.name)
-        return result
+
+def _convert(
+    result: Result,
+    source: Path,
+    destination: Path,
+    pubdump: Path,
+    codepage: Optional[str],
+    wrap_images: bool,
+) -> None:
+    started = time.monotonic()
+    log.info("converting %s -> %s", source, destination)
+
+    document = parse_document(source, pubdump)
 
     if not document.pages:
-        result.error = "document contains no pages"
-        log.error("%s: no pages in document", source.name)
-        return result
+        raise ConversionError("document contains no pages")
 
     textrepair.repair_document(document, codepage)
     _rasterise_metafiles(document)
@@ -241,10 +318,10 @@ def convert(
     )
     try:
         writer.write(destination)
-    except Exception as exc:
-        result.error = f"IDML write failed: {exc}"
-        log.exception("%s: IDML write failed", source.name)
-        return result
+    except idml.MalformedPartError as exc:
+        raise ConversionError(str(exc)) from exc
+    except OSError as exc:
+        raise ConversionError(f"IDML write failed: {exc}") from exc
 
     result.output = destination
     result.pages = len(document.pages)
@@ -270,5 +347,3 @@ def convert(
     )
     for warning in result.warnings:
         log.warning("%s: %s", source.name, warning)
-
-    return result

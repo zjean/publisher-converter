@@ -22,6 +22,7 @@ Latin text are left completely untouched.
 
 from __future__ import annotations
 
+import codecs
 from collections import Counter
 from typing import Iterable, List, Optional
 
@@ -238,8 +239,30 @@ def repair_document(document, codec: Optional[str] = "auto") -> Optional[str]:
     if not chosen:
         return None
 
+    # `repair` swallows a bad codec per span and returns the text unchanged,
+    # so without this a typo in --codepage would leave every run untouched
+    # while the warning below still claimed the text had been re-decoded.
+    try:
+        codecs.lookup(chosen)
+    except LookupError:
+        document.warnings.append(
+            f"text left as-is: {chosen} is not a code page Python knows"
+        )
+        return None
+
+    changed = 0
     for span in spans:
-        span.text = repair(span.text, chosen)
+        repaired = repair(span.text, chosen)
+        if repaired != span.text:
+            span.text = repaired
+            changed += 1
+
+    if not changed:
+        document.warnings.append(
+            f"text left as-is: {chosen} changed nothing (the text was "
+            f"probably decoded correctly already)"
+        )
+        return None
 
     document.warnings.append(
         f"text re-decoded as {chosen}: libmspub had applied the wrong code page"

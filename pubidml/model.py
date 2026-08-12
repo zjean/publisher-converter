@@ -247,6 +247,10 @@ class Document:
     pages: List[Page] = field(default_factory=list)
     title: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
+    # True once the parser's endDocument event has been seen. A stream that
+    # is cut on a line boundary otherwise replays as a syntactically perfect
+    # but silently short document, which would be reported as a success.
+    complete: bool = False
 
     @property
     def fonts(self) -> List[str]:
@@ -286,18 +290,34 @@ def _walk(items: List[Item]):
 
 
 # libmspub hands back Publisher's raw control characters inside the text
-# runs. The carriage return is Publisher's paragraph terminator, but the
-# event stream already delimits paragraphs with openParagraph/closeParagraph,
-# so leaving it in makes IDML see an explicit break mid-paragraph — which
+# runs, and XML 1.0 permits almost none of them. Publisher uses several
+# structurally — 0x0C page break, 0x0E column break, 0x13-0x15 field
+# delimiters, 0x1F optional hyphen — and any one of them reaching <Content>
+# produces a Story part no XML parser will open, i.e. a silently unusable
+# package. Enumerating only the codes we have seen would leave the rest to
+# escape, so the table strips everything XML forbids and adds back the two
+# that carry meaning.
+#
+# The carriage return is Publisher's paragraph terminator, but the event
+# stream already delimits paragraphs with openParagraph/closeParagraph, so
+# leaving it in makes IDML see an explicit break mid-paragraph — which
 # fully justifies the line before it, spreading the last line of every
 # justified paragraph across the measure. Vertical tab is Publisher's
 # forced line break and maps to the Unicode line separator.
-_TEXT_TRANSLATION = {
-    0x00: None,
-    0x0A: None,
-    0x0D: None,
-    0x0B: 0x2028,
-}
+def _build_text_translation() -> dict:
+    table = {code: None for code in range(0x20)}
+    table[0x09] = 0x09    # tab is structural in IDML; idml.py splits runs on it
+    table[0x0B] = 0x2028  # forced line break -> Unicode line separator
+    table[0x7F] = None    # DEL: legal XML, but never meaningful in body copy
+    # Lone surrogates and the two non-characters are illegal in XML 1.0 and
+    # can reach here through a \u escape in the event stream.
+    table.update({code: None for code in range(0xD800, 0xE000)})
+    table[0xFFFE] = None
+    table[0xFFFF] = None
+    return table
+
+
+_TEXT_TRANSLATION = _build_text_translation()
 
 
 def clean_text(text: str) -> str:
@@ -350,6 +370,9 @@ class ModelBuilder:
         return self.doc
 
     # -- document / page --------------------------------------------------
+
+    def _on_endDocument(self) -> None:
+        self.doc.complete = True
 
     def _on_setDocumentMetaData(self, props: dict) -> None:
         self.doc.title = props.get("dc:title") or props.get("dc:subject")

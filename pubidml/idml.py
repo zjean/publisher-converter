@@ -34,6 +34,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import quote
 
 from . import model
 from .units import fmt
@@ -72,6 +73,10 @@ _IMAGE_TYPE_NAME = {
     "image/bmp": "$ID/BMP",
 }
 
+# RFC 3986 path characters that need no escaping: the sub-delims plus ':',
+# '@' and the separator. Everything else in a filename gets percent-encoded.
+_URI_PATH_SAFE = "/!$&'()*+,;=:@"
+
 NO_PARAGRAPH_STYLE = "ParagraphStyle/$ID/[No paragraph style]"
 NO_CHARACTER_STYLE = "CharacterStyle/$ID/[No character style]"
 
@@ -80,8 +85,21 @@ def _pkg(tag: str) -> str:
     return f"{{{IDPKG}}}{tag}"
 
 
+class MalformedPartError(Exception):
+    """Raised when a generated part is not well-formed XML."""
+
+
 def _serialise(element: ET.Element, processing_instruction: bool = False) -> bytes:
     body = ET.tostring(element, encoding="unicode")
+    # ElementTree escapes markup but passes control characters through
+    # untouched, and text extracted from a .pub is full of them. A part that
+    # is not well-formed produces a package that opens nowhere, so verify
+    # here rather than let the run be reported as a success. This is the
+    # last point at which the failure can still be attributed to a file.
+    try:
+        ET.fromstring(body)
+    except ET.ParseError as exc:
+        raise MalformedPartError(f"generated XML is not well-formed: {exc}") from exc
     head = _XML_DECL + (_AID_PI if processing_instruction else "")
     return (head + body).encode("utf-8")
 
@@ -587,6 +605,18 @@ class IdmlWriter:
         self._parts[part_name] = self._story_part(story_id, frame.story)
 
     def _emit_image(self, spread: ET.Element, item: model.Image, page: model.Page) -> None:
+        # Anything not in the table has no IDML representation. Emitting it
+        # anyway under the old "$ID/JPEG" default wrote, say, an .emf and
+        # told Affinity it was a JPEG: the package opens, the artwork is
+        # silently absent, and the run still reports ok. Skipping it and
+        # saying so is the honest outcome.
+        type_name = _IMAGE_TYPE_NAME.get(item.mime_type)
+        if type_name is None:
+            self.doc.warnings.append(
+                f"image dropped: {item.mime_type} has no IDML equivalent"
+            )
+            return
+
         attributes = self._frame_attributes(item, page, "$ID/[Normal Graphics Frame]")
         attributes["ContentType"] = "GraphicType"
         # A picture frame's own fill would paint over the artwork.
@@ -629,7 +659,7 @@ class IdmlWriter:
             {
                 "Self": self.ids.next("img"),
                 "ItemTransform": _matrix(item.content_rotation, -half_w, -half_h),
-                "ImageTypeName": _IMAGE_TYPE_NAME.get(item.mime_type, "$ID/JPEG"),
+                "ImageTypeName": type_name,
                 "ActualPpi": "72 72",
                 "EffectivePpi": "72 72",
                 "Visible": "true",
@@ -653,8 +683,16 @@ class IdmlWriter:
             "Link",
             {
                 "Self": self.ids.next("link"),
-                "LinkResourceURI": f"file:{filename}",
-                "LinkResourceFormat": _IMAGE_TYPE_NAME.get(item.mime_type, "$ID/JPEG"),
+                # The sidecar folder is named after the source file, so the
+                # path carries whatever the user's archive contains. A bare
+                # '#' truncates the URI at the fragment and a bare '%' is an
+                # invalid escape, either of which breaks the link silently.
+                # The safe set is RFC 3986's legal path characters, so names
+                # that already worked — parentheses in particular — are left
+                # byte-for-byte alone and only genuinely illegal characters
+                # (space, '#', '%') are escaped.
+                "LinkResourceURI": "file:" + quote(filename, safe=_URI_PATH_SAFE),
+                "LinkResourceFormat": type_name,
                 "StoredState": "Normal",
                 "LinkClassID": "35906",
                 "LinkClientID": "257",

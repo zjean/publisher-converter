@@ -9,6 +9,7 @@ triaged rather than inspected file by file.
 from __future__ import annotations
 
 import argparse
+import codecs
 import concurrent.futures
 import csv
 import sys
@@ -50,6 +51,24 @@ def destination_for(source: Path, source_root: Path, output_root: Path) -> Path:
     else:
         relative = source.relative_to(source_root)
     return (output_root / relative).with_suffix(".idml")
+
+
+def _force_utf8_console() -> None:
+    """Print non-ASCII filenames without dying on a redirected stream.
+
+    On Windows a redirected stdout uses the locale encoding (usually
+    cp1252), so printing a Cyrillic or Greek filename — exactly the case
+    the code-page repair exists to serve — raises UnicodeEncodeError in the
+    middle of a batch. `pub2idml.exe archive -o out > run.txt` is an
+    entirely ordinary thing to type.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            # Not a reconfigurable text stream (or absent in a windowed
+            # build); printing is best-effort from here.
+            pass
 
 
 def _status(result: convert.Result) -> str:
@@ -118,6 +137,18 @@ def run(argv=None) -> int:
     )
     parser.add_argument("-q", "--quiet", action="store_true", help="only print the summary")
     args = parser.parse_args(argv)
+    _force_utf8_console()
+
+    # Validate before anything expensive starts: an unknown codec is caught
+    # per span deep inside the repair and the text silently left as it was,
+    # so a typo would otherwise surface only as still-broken text in the
+    # output, after the whole batch had run.
+    codepage = None if args.codepage.lower() == "none" else args.codepage
+    if codepage is not None and codepage.lower() != "auto":
+        try:
+            codecs.lookup(codepage)
+        except LookupError:
+            parser.error(f"unknown codec for --codepage: {args.codepage}")
 
     log_path = None
     if not args.no_log:
@@ -148,28 +179,49 @@ def run(argv=None) -> int:
             continue
         jobs.append((source, destination))
 
-    codepage = None if args.codepage.lower() == "none" else args.codepage
-
     results: List[convert.Result] = []
-    if jobs:
-        workers = args.jobs if args.jobs > 0 else None
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(
-                    convert.convert, source, destination,
-                    codepage=codepage, wrap_images=not args.no_image_wrap,
-                ): source
-                for source, destination in jobs
-            }
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                results.append(result)
-                if not args.quiet:
-                    _print_result(result)
-
-    results.sort(key=lambda r: str(r.source))
-    _write_report(report_path, results)
-    log.info("report written to %s", report_path)
+    interrupted = False
+    try:
+        if jobs:
+            workers = args.jobs if args.jobs > 0 else None
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(
+                        convert.convert, source, destination,
+                        codepage=codepage, wrap_images=not args.no_image_wrap,
+                    ): source
+                    for source, destination in jobs
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    source = futures[future]
+                    try:
+                        result = future.result()
+                    except BaseException as exc:
+                        # convert.convert catches its own failures, so this is
+                        # something it could not: record it as a failed row
+                        # rather than let it discard the whole batch.
+                        log.exception("worker died on %s", source)
+                        result = convert.Result(
+                            source=source,
+                            error=f"worker died: {exc.__class__.__name__}: {exc}",
+                        )
+                    results.append(result)
+                    if not args.quiet:
+                        _print_result(result)
+    except KeyboardInterrupt:
+        interrupted = True
+        log.warning("interrupted after %d of %d file(s)", len(results), len(jobs))
+    finally:
+        # The report is the point of the tool at collection scale, so it is
+        # written even when the run ends badly: an interrupted or crashed
+        # batch still leaves a triage list of what did convert.
+        results.sort(key=lambda r: str(r.source))
+        try:
+            _write_report(report_path, results)
+            log.info("report written to %s", report_path)
+        except OSError as exc:
+            log.error("could not write report to %s: %s", report_path, exc)
+            print(f"Could not write report to {report_path}: {exc}", file=sys.stderr)
 
     ok = sum(1 for r in results if _status(r) == "ok")
     review = sum(1 for r in results if _status(r) == "review")
@@ -183,6 +235,8 @@ def run(argv=None) -> int:
         print(f"  {failed} failed")
     if skipped:
         print(f"  {skipped} skipped (already converted; use --force to redo)")
+    if interrupted:
+        print(f"  interrupted: {len(jobs) - len(results)} file(s) not attempted")
     print(f"Report: {report_path}")
     if log_path:
         print(f"Log:    {log_path}")
@@ -195,7 +249,7 @@ def run(argv=None) -> int:
         if not result.ok:
             log.error("FAILED %s: %s", result.source, result.error)
 
-    return 1 if failed else 0
+    return 1 if (failed or interrupted) else 0
 
 
 def _print_result(result: convert.Result) -> None:
