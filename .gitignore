@@ -16,3 +16,10 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Your own .pub files. The five samples already committed here stay
+# tracked -- a gitignore rule does not untrack what is already in, and CI
+# converts them as its isolation test. Anything added from now on is
+# private to your working copy, which also means `git clean -fdx` will
+# delete it.
+files/
