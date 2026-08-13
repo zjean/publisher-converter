@@ -502,14 +502,16 @@ Established here; don't re-derive it.
   Page 1 has a pair of these at (34.6, 20.4), 338.9 x 163.2pt — one filled
   brown, one stroked darker — which is masthead-sized.
 
-  Two readings fit and they cannot be told apart from here. Either these
-  are the *outline* of a filled shape that libmspub emitted as loose edges,
-  in which case joining top-edge to reversed-bottom-edge recovers a filled
-  band; or they are guide geometry belonging to something else — WordArt has
-  exactly this shape, a top and bottom guide — in which case they were never
-  meant to be visible and the missing thing is the text. **Whatever object
-  you click in step 1 should settle this too**, so note whether the headline
-  sits on a coloured band or is simply coloured text.
+  **Resolved: they are filled shapes**, and they are now closed back up by
+  walking the second edge backwards, so the bands and the ribbon are drawn.
+  Two things settled it — the joined outlines are coherent, non-crossing
+  quads in banner colours, page one's being a deliberately slanted
+  318 x 74 pt parallelogram with a stroked twin; and the missing backgrounds
+  were reported from Affinity, which is what these are.
+
+  This does *not* explain the missing headline text, so the question below
+  stands on its own. It does mean the headline area now has its band back,
+  and only the words are absent.
 
 Regenerate the table with:
 
