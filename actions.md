@@ -502,16 +502,29 @@ Established here; don't re-derive it.
   Page 1 has a pair of these at (34.6, 20.4), 338.9 x 163.2pt — one filled
   brown, one stroked darker — which is masthead-sized.
 
-  **Resolved: they are filled shapes**, and they are now closed back up by
-  walking the second edge backwards, so the bands and the ribbon are drawn.
-  Two things settled it — the joined outlines are coherent, non-crossing
-  quads in banner colours, page one's being a deliberately slanted
-  318 x 74 pt parallelogram with a stroked twin; and the missing backgrounds
-  were reported from Affinity, which is what these are.
+  Two readings fitted, and **one has since been ruled out by experiment.**
+  Either these were the *outline* of a filled shape libmspub emitted as
+  loose edges — in which case joining top-edge to reversed-bottom-edge
+  recovers a band — or they are guide geometry belonging to something else,
+  WordArt having exactly this shape in a top and bottom guide, in which
+  case they were never meant to be visible.
 
-  This does *not* explain the missing headline text, so the question below
-  stands on its own. It does mean the headline area now has its band back,
-  and only the words are absent.
+  The join was implemented and tried. It produced coherent,
+  non-self-crossing quads in banner colours, page one's a deliberately
+  slanted 318 x 74 pt parallelogram with a stroked twin — so the geometry
+  was no help in telling the two apart. Opened in Affinity, the result was
+  **shapes that are not in the source document**, so it was reverted
+  (commit d43cdfe, reverted immediately after).
+
+  So these are guide geometry, not artwork, and that is a genuine
+  narrowing: **whatever the headline objects are, they carry their own
+  geometry and their own text, and libmspub hands over neither.** WordArt
+  fits that exactly. Step 1 below is now the only way to confirm it, and
+  the answer decides whether the text is recoverable from the file or
+  whether the honest end state is a warning naming each lost headline.
+
+  Do not re-try the join. It is disproven, and it silently adds filled
+  shapes on top of the page.
 
 Regenerate the table with:
 

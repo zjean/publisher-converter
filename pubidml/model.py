@@ -522,7 +522,6 @@ class ModelBuilder:
         ops, xs, ys = _normalise_path(props.get("svg:d") or [])
         if not ops or not xs:
             return
-        ops = _join_edge_pair(ops)
         item = Path(
             x=min(xs),
             y=min(ys),
@@ -772,55 +771,6 @@ def _rotation(props: dict) -> float:
     discards the bogus suffix.
     """
     return units.to_float(props.get("librevenge:rotate"), 0.0) or 0.0
-
-
-def _join_edge_pair(ops: List[tuple]) -> List[tuple]:
-    """Close two loose edges back into the outline they came from.
-
-    libmspub reports a filled Publisher shape as its top and bottom edges,
-    as two separate two-point subpaths -- 50 of the 56 paths in the sample
-    corpus arrive with more than one subpath, and most of those are this
-    shape. Left apart the outline encloses nothing and the fill draws
-    nothing. Run together in the order given it crosses over into a bowtie,
-    which is what used to be painted across a page of the newsletter.
-
-    Walking the second edge backwards is what closes the rim properly. It
-    recovers the slanted masthead ribbon on page 1 of 1336 kerkbode.pub --
-    a 318 x 74 pt parallelogram, filled brown with a stroked twin -- and
-    the coloured bands behind its headlines.
-
-    Only this exact shape is joined: two edges, two points each, no curves.
-    Anything else is left as the disjoint subpaths it says it is.
-    """
-    subpaths: List[List[tuple]] = []
-    current: List[tuple] = []
-    for op in ops:
-        if op[0] == "M":
-            if current:
-                subpaths.append(current)
-            current = [op]
-        elif op[0] == "L":
-            current.append(op)
-        elif op[0] == "Z":
-            if current:
-                subpaths.append(current)
-                current = []
-        else:
-            return ops  # a curve; not the shape this handles
-    if current:
-        subpaths.append(current)
-
-    if len(subpaths) != 2 or any(len(edge) != 2 for edge in subpaths):
-        return ops
-
-    (start, end), (other_start, other_end) = subpaths
-    return [
-        ("M", start[1], start[2]),
-        ("L", end[1], end[2]),
-        ("L", other_end[1], other_end[2]),
-        ("L", other_start[1], other_start[2]),
-        ("Z",),
-    ]
 
 
 def _line_spacing(props: dict) -> dict:

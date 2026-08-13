@@ -354,11 +354,11 @@ class SubpathTest(unittest.TestCase):
     stretched across the page, which is worse than drawing nothing.
     """
 
-    # Three disjoint outlines. Deliberately not the two-edge shape, which
-    # the model reads as one band -- see model._join_edge_pair.
+    # Two horizontal rules, 31.5pt apart, exactly as libmspub reports the
+    # ones on page 4 of 1336 kerkbode.pub.
     TWO_RULES = [
-        ("M", 10.0, 10.0), ("L", 90.0, 10.0), ("L", 90.0, 20.0), ("Z",),
-        ("M", 10.0, 40.0), ("L", 90.0, 40.0), ("L", 90.0, 50.0), ("Z",),
+        ("M", 172.4, 292.1), ("L", 342.9, 292.1), ("Z",), ("Z",),
+        ("M", 174.4, 323.6), ("L", 345.0, 323.6), ("Z",),
     ]
 
     def _geometry(self, ops: list, **style) -> ET.Element:
@@ -385,7 +385,7 @@ class SubpathTest(unittest.TestCase):
         spread = self._geometry(self.TWO_RULES, fill=(0, 0, 0))
         for path in spread.iter("GeometryPathType"):
             points = list(path.iter("PathPointType"))
-            self.assertEqual(len(points), 3, "each outline keeps its own points")
+            self.assertEqual(len(points), 2, "a rule has two ends, not four")
 
     def test_the_second_rule_keeps_its_own_vertical_position(self):
         # Welding put the second rule's start where the first one's end
@@ -395,6 +395,8 @@ class SubpathTest(unittest.TestCase):
             [p.get("Anchor").split()[1] for p in path.iter("PathPointType")]
             for path in spread.iter("GeometryPathType")
         ]
+        for anchors in rules:
+            self.assertEqual(len(set(anchors)), 1, "a horizontal rule is level")
         self.assertNotEqual(rules[0][0], rules[1][0])
 
     def test_a_single_subpath_is_written_exactly_as_before(self):
