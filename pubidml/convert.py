@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import tempfile
@@ -11,7 +12,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from . import idml, logsetup, metafile, model, pubfile, textrepair
 
@@ -172,32 +173,65 @@ def parse_document(source: Path, pubdump: Path = PUBDUMP) -> model.Document:
     return document
 
 
-def _rasterise_metafiles(document: model.Document) -> None:
-    """Turn EMF artwork into PNG, or drop it with an accurate warning.
+@dataclass
+class _DroppedArtwork:
+    """One distinct piece of artwork that could not be converted."""
 
-    Only non-empty metafiles reach this point; the model already discards
-    Publisher's empty placeholder stubs.
+    kind: str
+    drawing_records: int
+    reason: str
+    copies: int = 0
+
+
+def _rasterise_metafiles(document: model.Document) -> None:
+    """Turn metafile artwork into images, or drop it with an accurate warning.
+
+    Artwork is accounted for by content rather than by frame: Publisher
+    repeats one logo across every page of a newsletter, and reporting the
+    same loss 64 times buries everything else in the report.
     """
+    dropped: Dict[bytes, _DroppedArtwork] = {}
     for page in document.pages:
-        page.items = _rasterise_items(page.items, document)
+        page.items = _rasterise_items(page.items, dropped)
     # Masters are extracted before this runs -- they have to be, since
     # rasterisation can drop artwork and that would break the shape count
     # the attribution relies on -- so they need visiting separately.
     for master in document.masters:
-        master.items = _rasterise_items(master.items, document)
+        master.items = _rasterise_items(master.items, dropped)
+
+    for entry in dropped.values():
+        copies = f", {entry.copies} copies" if entry.copies > 1 else ""
+        document.warnings.append(
+            f"{entry.kind} artwork dropped "
+            f"({entry.drawing_records} drawing record(s){copies}): {entry.reason}"
+        )
 
 
-def _rasterise_items(items: List[model.Item], document: model.Document) -> List[model.Item]:
-    """Rasterise metafiles at any depth, returning the items that survive.
+def _drop_reason(info: metafile.MetafileInfo) -> str:
+    """Why this artwork was lost, in terms of what was actually attempted."""
+    if info.kind == "wmf":
+        # Nothing was tried at all: emf2svg-conv reads EMF only. Blaming a
+        # failed conversion here named the wrong culprit, and did so
+        # whenever the tools merely happened to be installed.
+        return "no WMF converter available (emf2svg-conv reads EMF only)"
+    if metafile.converters_available():
+        return "conversion failed"
+    return "install emf2svg-conv and ImageMagick to convert it"
+
+
+def _rasterise_items(
+    items: List[model.Item], dropped: Dict[bytes, _DroppedArtwork]
+) -> List[model.Item]:
+    """Convert metafiles at any depth, returning the items that survive.
 
     Groups are descended into: every other document-wide pass uses
     model._walk, and a shallow pass here let grouped artwork through
-    un-rasterised and un-reported, to be written out as a broken link.
+    unconverted and unreported, to be written out as a broken link.
     """
     survivors: List[model.Item] = []
     for item in items:
         if isinstance(item, model.Group):
-            item.children = _rasterise_items(item.children, document)
+            item.children = _rasterise_items(item.children, dropped)
             survivors.append(item)
             continue
 
@@ -208,6 +242,23 @@ def _rasterise_items(items: List[model.Item], document: model.Document) -> List[
             survivors.append(item)
             continue
 
+        info = metafile.inspect(item.data)
+        if info.is_empty:
+            # Publisher's placeholder stub. The model drops these on the
+            # bitmap-fill route already; checking again here keeps the two
+            # entry points agreeing and keeps the report free of artwork
+            # that never existed.
+            continue
+
+        # A bitmap in a metafile envelope needs no external tool, so it is
+        # tried first: it works where nothing is installed, and it avoids
+        # resampling a photograph through SVG.
+        unwrapped = metafile.embedded_bitmap(item.data)
+        if unwrapped:
+            item.data, item.mime_type = unwrapped
+            survivors.append(item)
+            continue
+
         png = metafile.to_png(item.data, item.width, item.height)
         if png:
             item.data = png
@@ -215,15 +266,16 @@ def _rasterise_items(items: List[model.Item], document: model.Document) -> List[
             survivors.append(item)
             continue
 
-        info = metafile.inspect(item.data)
-        if metafile.converters_available():
-            reason = "conversion failed"
-        else:
-            reason = "install emf2svg-conv and ImageMagick to convert it"
-        document.warnings.append(
-            f"{info.kind.upper()} artwork dropped "
-            f"({info.drawing_records} drawing records): {reason}"
-        )
+        key = hashlib.sha1(item.data).digest()
+        entry = dropped.get(key)
+        if entry is None:
+            entry = _DroppedArtwork(
+                kind=info.kind.upper(),
+                drawing_records=info.drawing_records,
+                reason=_drop_reason(info),
+            )
+            dropped[key] = entry
+        entry.copies += 1
     return survivors
 
 

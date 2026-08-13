@@ -12,7 +12,7 @@ from pathlib import Path
 
 from pubidml import convert, model
 
-from . import support
+from . import support, test_metafile
 from .support import event
 
 REPO = Path(__file__).resolve().parent.parent
@@ -171,6 +171,81 @@ class RasteriseWalkTest(unittest.TestCase):
         survivors = list(model._walk(document.pages[0].items))
         self.assertIn(inner, survivors)
         self.assertIn(outer, survivors)
+
+
+class MetafileReportingTest(unittest.TestCase):
+    """What the operator is told about artwork that did not make it."""
+
+    def _document(self, *images: model.Image) -> model.Document:
+        document = model.Document(pages=[model.Page()])
+        document.pages[0].items.extend(images)
+        return document
+
+    def _image(self, data: bytes, mime: str) -> model.Image:
+        return model.Image(data=data, mime_type=mime, width=72.0, height=72.0)
+
+    def test_a_wrapped_photograph_is_unwrapped_with_no_external_tool(self):
+        payload = test_metafile.dib(2, 2, bytes([10, 20, 30, 0] * 4))
+        document = self._document(
+            self._image(test_metafile.emf_with_dib(payload), "image/emf")
+        )
+        convert._rasterise_metafiles(document)
+
+        images = [i for i in document.pages[0].items if isinstance(i, model.Image)]
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0].mime_type, "image/png")
+        self.assertEqual(images[0].data[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(document.warnings, [])
+
+    def test_one_logo_used_many_times_is_reported_once(self):
+        logo = test_metafile.wmf(
+            (test_metafile.META_POLYGON, 528), (test_metafile.META_EOF, 6)
+        )
+        document = self._document(
+            *[self._image(logo, "image/wmf") for _ in range(64)]
+        )
+        convert._rasterise_metafiles(document)
+
+        self.assertEqual(len(document.warnings), 1, document.warnings)
+        self.assertIn("64", document.warnings[0])
+
+    def test_two_different_pieces_of_artwork_are_reported_separately(self):
+        first = test_metafile.wmf(
+            (test_metafile.META_POLYGON, 528), (test_metafile.META_EOF, 6)
+        )
+        second = test_metafile.wmf(
+            (test_metafile.META_POLYPOLYGON, 64), (test_metafile.META_EOF, 6)
+        )
+        document = self._document(
+            self._image(first, "image/wmf"), self._image(second, "image/wmf")
+        )
+        convert._rasterise_metafiles(document)
+        self.assertEqual(len(document.warnings), 2, document.warnings)
+
+    def test_a_wmf_is_not_blamed_on_a_failed_conversion(self):
+        # emf2svg-conv reads EMF only, so nothing was ever attempted. The
+        # old message said "conversion failed" whenever the tools happened
+        # to be installed, which named the wrong culprit.
+        logo = test_metafile.wmf(
+            (test_metafile.META_POLYGON, 528), (test_metafile.META_EOF, 6)
+        )
+        document = self._document(self._image(logo, "image/wmf"))
+        convert._rasterise_metafiles(document)
+
+        warning = document.warnings[0]
+        self.assertIn("WMF", warning)
+        self.assertNotIn("conversion failed", warning)
+
+    def test_the_real_drawing_record_count_is_reported(self):
+        logo = test_metafile.wmf(
+            (test_metafile.META_POLYGON, 528),
+            (test_metafile.META_POLYPOLYGON, 64),
+            (test_metafile.META_EOF, 6),
+        )
+        document = self._document(self._image(logo, "image/wmf"))
+        convert._rasterise_metafiles(document)
+        # Not "0 drawing records", which is what a WMF read as an EMF gives.
+        self.assertIn("2", document.warnings[0])
 
 
 class ThreadDuplicateStoriesTest(unittest.TestCase):

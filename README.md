@@ -318,21 +318,34 @@ referenced by relative link, which is how InDesign packages normally
 carry placed artwork. **Keep the `_images` folder next to the `.idml`**
 until you have opened it in Affinity and saved as `.afpub`.
 
-### Optional: EMF artwork
+### Optional: EMF vector artwork
 
-Publisher embeds clip-art as Windows metafiles. Most are empty 128-byte
-stubs left where a picture placeholder used to be — those are detected
-and dropped silently, because there is no artwork in them to lose.
+Publisher embeds clip-art as Windows metafiles. Most are empty stubs left
+where a picture placeholder used to be — those are detected and dropped
+silently, because there is no artwork in them to lose.
 
-Metafiles that *do* carry artwork are rasterised to PNG if two optional
-tools are present:
+A **pasted photograph** is also stored as a metafile, one whose only
+drawing record wraps an uncompressed bitmap. Those are unwrapped directly
+to PNG with no external tool, at their exact pixel dimensions — the two
+in the sample set are 1348x894 and 262x198, and both are 100% bitmap.
+This is the common case and it needs nothing installed.
+
+What is left is genuine *vector* clip-art. EMF of that kind is rasterised
+to PNG if two optional tools are present:
 
 ```sh
 brew install libemf2svg imagemagick
 ```
 
-Without them, EMF artwork is dropped and the report says so, naming the
-number of drawing records that were lost. Everything else still converts.
+Without them it is dropped and the report says so. **WMF vector artwork is
+never converted**, installed tools or not, because `emf2svg-conv` reads
+EMF only — the report names that as the reason rather than blaming a
+conversion that was never attempted.
+
+Losses are reported per distinct artwork, not per frame. Publisher repeats
+one logo across every page, so a newsletter that used to produce 64
+identical warnings now produces one, naming the drawing-record count and
+how many copies were affected.
 
 ### Text in non-Latin scripts
 
@@ -373,9 +386,17 @@ queue: the files worth a human's attention first.
 
 These are real and deliberate, not bugs to be surprised by later.
 
-- **WMF artwork is not converted.** EMF is handled (see below), but
-  `emf2svg-conv` reads EMF only, so WMF clip-art is dropped with a
-  warning naming the record count.
+- **WMF vector artwork is not converted.** `emf2svg-conv` reads EMF only
+  and nothing else is installed by default, so WMF clip-art is dropped and
+  reported (see below). This is the largest remaining gap: one newsletter
+  repeats a single logo across 64 frames, and one file in the sample set is
+  17 distinct pieces of WMF line art. Translating the common WMF drawing
+  records into native IDML paths would recover them as editable vectors
+  with no dependency, which is the natural next step.
+- **Metafile-wrapped bitmaps are unwrapped, vector envelopes are not.** A
+  pasted photograph arrives as a metafile whose only record blits an
+  uncompressed bitmap; that is extracted losslessly without any external
+  tool (see below). Only genuine vector clip-art needs the optional tools.
 - **CJK text is not repaired.** The code page detector (see below) works
   on alphabetic scripts, where letter frequency is a usable signal. For
   Chinese, Japanese and Korean it declines to guess rather than risk

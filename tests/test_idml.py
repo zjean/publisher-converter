@@ -166,7 +166,12 @@ class ImageTypeTest(unittest.TestCase):
     def test_a_format_idml_cannot_carry_is_dropped_and_reported(self):
         # Previously this was written out as an .emf labelled "$ID/JPEG":
         # the package opened, the artwork was silently absent, ok reported.
-        document = graphic_object_document(mime="image/x-emf")
+        #
+        # The vehicle is deliberately not a metafile. Those are screened at
+        # parse time now -- an empty one is dropped as the placeholder stub
+        # it is -- so a metafile never reaches the writer and would test
+        # nothing here.
+        document = graphic_object_document(mime="image/svg+xml")
         self.assertEqual(
             len([i for i in document.pages[0].items if isinstance(i, model.Image)]),
             1,

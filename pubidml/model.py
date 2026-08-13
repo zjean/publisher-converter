@@ -540,11 +540,14 @@ class ModelBuilder:
         except Exception:
             self.doc.warnings.append("image dropped: undecodable binary payload")
             return
-        item = Image(
-            data=data,
-            mime_type=props.get("librevenge:mime-type", "image/png"),
-            rotation=_rotation(props),
-        )
+        mime = props.get("librevenge:mime-type", "image/png")
+        if mime in metafile.METAFILE_MIME_TYPES and metafile.inspect(data).is_empty:
+            # Publisher's empty placeholder stub, the same thing
+            # _promote_bitmap_fill screens out. This route had no such check,
+            # so stubs reached the conversion pass and were reported as lost
+            # artwork -- 64 warnings for pictures that never existed.
+            return
+        item = Image(data=data, mime_type=mime, rotation=_rotation(props))
         self._apply_box(item, props)
         self._place(item)
 
