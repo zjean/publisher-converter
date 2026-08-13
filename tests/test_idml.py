@@ -742,3 +742,121 @@ class ThreadedStoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GradientFillTest(unittest.TestCase):
+    """A gradient has to become a real IDML gradient resource.
+
+    Collapsing it to its first stop is how the white-to-cream panels in the
+    sample corpus vanished: the ramp starts white.
+    """
+
+    @staticmethod
+    def _document(*gradients) -> model.Document:
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        for gradient in gradients:
+            document.pages[0].items.append(
+                model.Rectangle(
+                    x=10.0, y=10.0, width=100.0, height=50.0,
+                    style=model.GraphicStyle(
+                        fill=gradient.stops[0].color, gradient=gradient
+                    ),
+                )
+            )
+        return document
+
+    @staticmethod
+    def _ramp(*colours, angle=0.0, radial=False) -> model.Gradient:
+        step = 100.0 / max(1, len(colours) - 1)
+        return model.Gradient(
+            stops=tuple(
+                model.GradientStop(location=index * step, color=colour)
+                for index, colour in enumerate(colours)
+            ),
+            angle=angle,
+            radial=radial,
+        )
+
+    def _parts(self, document: model.Document):
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            graphic = ET.fromstring(archive.read("Resources/Graphic.xml"))
+            spread = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            return graphic, ET.fromstring(archive.read(spread))
+
+    def test_the_ramp_becomes_a_gradient_resource(self):
+        graphic, _ = self._parts(
+            self._document(self._ramp((255, 255, 255), (255, 238, 221), (255, 255, 255)))
+        )
+        gradients = list(graphic.iter("Gradient"))
+        self.assertEqual(len(gradients), 1)
+        stops = list(gradients[0].iter("GradientStop"))
+        self.assertEqual(len(stops), 3)
+        self.assertEqual(
+            [s.get("StopColor") for s in stops],
+            ["Color/C_FFFFFF", "Color/C_FFEEDD", "Color/C_FFFFFF"],
+        )
+        self.assertEqual([s.get("Location") for s in stops], ["0", "50", "100"])
+
+    def test_the_shape_fills_with_the_gradient_not_a_flat_colour(self):
+        _, spread = self._parts(
+            self._document(self._ramp((255, 255, 255), (255, 238, 221)))
+        )
+        fill = next(spread.iter("Rectangle")).get("FillColor")
+        self.assertTrue(fill.startswith("Gradient/"), fill)
+
+    def test_the_angle_is_carried(self):
+        _, spread = self._parts(
+            self._document(self._ramp((0, 0, 0), (255, 255, 255), angle=90.0))
+        )
+        self.assertEqual(next(spread.iter("Rectangle")).get("GradientFillAngle"), "90")
+
+    def test_a_radial_ramp_is_typed_radial(self):
+        graphic, _ = self._parts(
+            self._document(self._ramp((0, 0, 0), (255, 255, 255), radial=True))
+        )
+        self.assertEqual(next(graphic.iter("Gradient")).get("Type"), "Radial")
+
+    def test_a_linear_ramp_is_typed_linear(self):
+        graphic, _ = self._parts(
+            self._document(self._ramp((0, 0, 0), (255, 255, 255)))
+        )
+        self.assertEqual(next(graphic.iter("Gradient")).get("Type"), "Linear")
+
+    def test_two_shapes_with_the_same_ramp_share_one_resource(self):
+        ramp = self._ramp((0, 0, 0), (255, 255, 255))
+        graphic, spread = self._parts(self._document(ramp, ramp))
+        self.assertEqual(len(list(graphic.iter("Gradient"))), 1)
+        fills = {r.get("FillColor") for r in spread.iter("Rectangle")}
+        self.assertEqual(len(fills), 1)
+
+    def test_different_ramps_get_their_own_resources(self):
+        graphic, _ = self._parts(
+            self._document(
+                self._ramp((0, 0, 0), (255, 255, 255)),
+                self._ramp((255, 0, 0), (0, 0, 255)),
+            )
+        )
+        self.assertEqual(len(list(graphic.iter("Gradient"))), 2)
+
+    def test_every_stop_colour_exists_as_a_swatch(self):
+        graphic, _ = self._parts(
+            self._document(self._ramp((255, 255, 255), (255, 238, 221)))
+        )
+        colours = {c.get("Self") for c in graphic.iter("Color")}
+        for stop in graphic.iter("GradientStop"):
+            self.assertIn(stop.get("StopColor"), colours)
+
+    def test_a_flat_fill_is_written_exactly_as_before(self):
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        document.pages[0].items.append(
+            model.Rectangle(
+                x=10.0, y=10.0, width=100.0, height=50.0,
+                style=model.GraphicStyle(fill=(1, 2, 3)),
+            )
+        )
+        graphic, spread = self._parts(document)
+        self.assertEqual(len(list(graphic.iter("Gradient"))), 0)
+        rectangle = next(spread.iter("Rectangle"))
+        self.assertEqual(rectangle.get("FillColor"), "Color/C_010203")
+        self.assertIsNone(rectangle.get("GradientFillAngle"))

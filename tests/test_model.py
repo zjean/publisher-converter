@@ -269,3 +269,81 @@ class ParseColorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GradientTest(unittest.TestCase):
+    """Publisher gradients, as libmspub reports them.
+
+    Only the first stop was kept, which is how a background disappears: the
+    ramps in the sample corpus start white, so a white-to-cream panel
+    collapsed to white on white paper.
+    """
+
+    STOPS = [
+        {"svg:offset": "0.0000%", "svg:stop-color": "#ffffff",
+         "svg:stop-opacity": "100.0000%"},
+        {"svg:offset": "50.0000%", "svg:stop-color": "#ffeedd",
+         "svg:stop-opacity": "100.0000%"},
+        {"svg:offset": "100.0000%", "svg:stop-color": "#ffffff",
+         "svg:stop-opacity": "100.0000%"},
+    ]
+
+    def _style(self, **extra) -> model.GraphicStyle:
+        props = {"draw:fill": "gradient", "draw:angle": "90.0000in"}
+        props.update(extra)
+        doc = support.document(
+            event("setStyle", props),
+            event(
+                "drawRectangle",
+                {"svg:x": "1in", "svg:y": "1in", "svg:width": "2in", "svg:height": "1in"},
+            ),
+        )
+        return doc.pages[0].items[0].style
+
+    def test_every_stop_is_kept_in_order(self):
+        gradient = self._style(**{"svg:linearGradient": self.STOPS}).gradient
+        self.assertIsNotNone(gradient)
+        self.assertEqual(
+            [(s.location, s.color) for s in gradient.stops],
+            [(0.0, (255, 255, 255)), (50.0, (255, 238, 221)), (100.0, (255, 255, 255))],
+        )
+
+    def test_the_angle_is_read_past_librevenges_bogus_unit(self):
+        # libmspub inserts the angle as a plain double, so librevenge stamps
+        # it with its default inch unit; the value is degrees.
+        gradient = self._style(**{"svg:linearGradient": self.STOPS}).gradient
+        self.assertAlmostEqual(gradient.angle, 90.0)
+
+    def test_a_radial_gradient_is_marked_as_one(self):
+        gradient = self._style(**{"svg:radialGradient": self.STOPS}).gradient
+        self.assertTrue(gradient.radial)
+
+    def test_a_linear_gradient_is_not_radial(self):
+        gradient = self._style(**{"svg:linearGradient": self.STOPS}).gradient
+        self.assertFalse(gradient.radial)
+
+    def test_the_flat_fill_still_holds_the_first_stop(self):
+        # Anything not gradient-aware keeps working exactly as before.
+        style = self._style(**{"svg:linearGradient": self.STOPS})
+        self.assertEqual(style.fill, (255, 255, 255))
+
+    def test_a_single_stop_is_not_a_gradient(self):
+        style = self._style(**{"svg:linearGradient": self.STOPS[:1]})
+        self.assertIsNone(style.gradient)
+        self.assertEqual(style.fill, (255, 255, 255))
+        self.assertTrue(style.approximated_fill)
+
+    def test_a_representable_gradient_is_not_called_approximated(self):
+        style = self._style(**{"svg:linearGradient": self.STOPS})
+        self.assertFalse(style.approximated_fill)
+
+    def test_stop_colours_reach_the_documents_colour_table(self):
+        doc = support.document(
+            event("setStyle", {"draw:fill": "gradient", "draw:angle": "0in",
+                               "svg:linearGradient": self.STOPS}),
+            event(
+                "drawRectangle",
+                {"svg:x": "1in", "svg:y": "1in", "svg:width": "2in", "svg:height": "1in"},
+            ),
+        )
+        self.assertIn((255, 238, 221), doc.colors)

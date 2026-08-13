@@ -278,6 +278,9 @@ class IdmlWriter:
         self.wrap_images = wrap_images
         self.facing_pages = facing_pages
         self.color_ids: Dict[model.Color, str] = {}
+        # Equal gradients share one resource, which is why model.Gradient is
+        # frozen: Publisher repeats the same ramp across a document.
+        self.gradient_ids: Dict[model.Gradient, str] = {}
         self.fonts: List[str] = []
         # (relative path, bytes) pairs the caller must write next to the IDML
         self.image_files: List[tuple] = []
@@ -375,6 +378,19 @@ class IdmlWriter:
         self.fonts = self.doc.fonts
         for color in self.doc.colors:
             self.color_ids[color] = "Color/C_%02X%02X%02X" % color
+        for item in self.doc.all_items():
+            gradient = item.style.gradient
+            if gradient is not None and gradient not in self.gradient_ids:
+                self.gradient_ids[gradient] = f"Gradient/G_{len(self.gradient_ids) + 1}"
+
+    def _fill_ref(self, style: model.GraphicStyle) -> str:
+        """A shape's fill: its gradient where it has one, else its colour."""
+        gradient = style.gradient
+        if gradient is not None:
+            reference = self.gradient_ids.get(gradient)
+            if reference:
+                return reference
+        return self._color_ref(style.fill)
 
     def _color_ref(self, color: Optional[model.Color], fallback: str = "Swatch/None") -> str:
         if color is None:
@@ -535,6 +551,27 @@ class IdmlWriter:
                 "SwatchCreatorID": "7937",
             },
         )
+        for gradient, identifier in self.gradient_ids.items():
+            element = ET.SubElement(
+                root,
+                "Gradient",
+                {
+                    "Self": identifier,
+                    "Type": "Radial" if gradient.radial else "Linear",
+                },
+            )
+            for index, stop in enumerate(gradient.stops):
+                ET.SubElement(
+                    element,
+                    "GradientStop",
+                    {
+                        "Self": f"{identifier}GradientStop{index}",
+                        "StopColor": self._color_ref(stop.color, "Color/Black"),
+                        "Location": fmt(stop.location),
+                        "Midpoint": "50",
+                    },
+                )
+
         ET.SubElement(
             root,
             "Swatch",
@@ -780,12 +817,16 @@ class IdmlWriter:
             "Self": self_id or self.ids.next(),
             "ItemTransform": _matrix(item.rotation, centre_x, centre_y),
             "AppliedObjectStyle": f"ObjectStyle/{object_style}",
-            "FillColor": self._color_ref(item.style.fill),
+            "FillColor": self._fill_ref(item.style),
             "StrokeColor": self._color_ref(item.style.stroke),
             "StrokeWeight": fmt(item.style.stroke_width),
             "StrokeAlignment": "CenterAlignment",
             "Visible": "true",
         }
+        gradient = item.style.gradient
+        if gradient is not None and gradient in self.gradient_ids:
+            # Publisher's angle is degrees, the same convention IDML uses.
+            attributes["GradientFillAngle"] = fmt(gradient.angle)
         if item.style.stroke is not None:
             attributes["AppliedStrokeStyle"] = "StrokeStyle/$ID/Solid"
         if item.style.fill_opacity < 1.0:

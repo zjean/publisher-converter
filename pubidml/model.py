@@ -40,6 +40,23 @@ def parse_color(value: Optional[str]) -> Optional[Color]:
         return None
 
 
+@dataclass(frozen=True)
+class GradientStop:
+    """One stop on a gradient ramp, positioned 0-100 along it."""
+
+    location: float
+    color: Color
+
+
+@dataclass(frozen=True)
+class Gradient:
+    """A gradient fill. Frozen so equal gradients share one IDML resource."""
+
+    stops: Tuple[GradientStop, ...]
+    angle: float = 0.0
+    radial: bool = False
+
+
 @dataclass
 class GraphicStyle:
     """The fill/stroke state librevenge sets before each draw call."""
@@ -49,8 +66,12 @@ class GraphicStyle:
     stroke: Optional[Color] = None
     stroke_width: float = 0.0
     stroke_opacity: float = 1.0
-    # True when the source declared a gradient we cannot represent; the
-    # writer substitutes the first stop and the converter reports it.
+    # The gradient ramp, when the fill is one and it has enough stops to be
+    # worth writing. `fill` still carries the first stop, so anything not
+    # gradient-aware behaves as it always did.
+    gradient: Optional[Gradient] = None
+    # True only when a gradient could *not* be represented and the flat
+    # first stop stands in for it.
     approximated_fill: bool = False
     # Publisher pictures never arrive as drawGraphicObject. libmspub
     # reports them as a bitmap fill on the shape that follows, so the
@@ -68,12 +89,26 @@ class GraphicStyle:
         if fill_kind == "solid":
             style.fill = parse_color(props.get("draw:fill-color"))
         elif fill_kind == "gradient":
-            stops = props.get("svg:linearGradient") or props.get("svg:radialGradient") or []
-            if stops:
-                style.fill = parse_color(stops[0].get("svg:stop-color"))
+            radial = "svg:radialGradient" in props
+            raw = props.get("svg:linearGradient") or props.get("svg:radialGradient") or []
+            stops = _gradient_stops(raw)
+            # The first stop doubles as the flat fallback fill.
+            style.fill = (
+                stops[0].color if stops
+                else parse_color(props.get("draw:fill-color"))
+            )
+            if len(stops) >= 2:
+                style.gradient = Gradient(
+                    stops=tuple(stops),
+                    # libmspub inserts the angle as a plain double, so
+                    # librevenge stamps it with its default inch unit. The
+                    # value is degrees, the same quirk as rotation.
+                    angle=units.to_float(props.get("draw:angle"), 0.0) or 0.0,
+                    radial=radial,
+                )
             else:
-                style.fill = parse_color(props.get("draw:fill-color"))
-            style.approximated_fill = True
+                # One stop, or none we could read: nothing to ramp between.
+                style.approximated_fill = True
         elif fill_kind == "bitmap":
             payload = props.get("draw:fill-image")
             if payload:
@@ -315,6 +350,9 @@ class Document:
                 found.add(item.style.fill)
             if item.style.stroke:
                 found.add(item.style.stroke)
+            if item.style.gradient:
+                for stop in item.style.gradient.stops:
+                    found.add(stop.color)
             if isinstance(item, TextFrame):
                 for paragraph in item.story.paragraphs:
                     for span in paragraph.spans:
@@ -771,6 +809,27 @@ def _rotation(props: dict) -> float:
     discards the bogus suffix.
     """
     return units.to_float(props.get("librevenge:rotate"), 0.0) or 0.0
+
+
+def _gradient_stops(raw: list) -> List[GradientStop]:
+    """Read librevenge's gradient stop vector.
+
+    Each stop carries `svg:offset` as a percentage and `svg:stop-color` as
+    "#rrggbb". Stops whose colour will not parse are skipped rather than
+    guessed at, and the offsets are left exactly as reported -- Publisher's
+    shade ramps repeat an offset to make a hard edge, and evening them out
+    would smooth away the effect.
+    """
+    stops: List[GradientStop] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        color = parse_color(entry.get("svg:stop-color"))
+        if color is None:
+            continue
+        offset = units.percent(entry.get("svg:offset"), 0.0) or 0.0
+        stops.append(GradientStop(location=max(0.0, min(100.0, offset * 100.0)), color=color))
+    return stops
 
 
 def _line_spacing(props: dict) -> dict:

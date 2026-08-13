@@ -522,8 +522,19 @@ These are real and deliberate, not bugs to be surprised by later.
   re-linking by hand. Files where this fires are flagged `review`.
 - **Groups are flattened.** Children keep their absolute positions;
   nothing moves, but the grouping is gone.
-- **Gradients collapse to their first stop**, and elliptical arcs are
-  approximated with straight segments.
+- **Gradients are carried, with every stop.** They become real IDML
+  gradient resources, shared between shapes that use the same ramp, with
+  Publisher's angle passed through. Only a ramp with fewer than two usable
+  stops falls back to a flat colour.
+
+  Worth knowing why this mattered: keeping just the first stop is how a
+  background disappears rather than merely flattening. The ramps in the
+  sample corpus start white — `#ffffff → #ffeedd → #ffffff` for a panel,
+  `#913801 → #ffd17d` for the masthead ribbon — so the flat stand-in was
+  white on white paper. Publisher's shade ramps also repeat an offset to
+  make a hard edge, and those offsets are passed through as reported rather
+  than evened out, which would smooth the effect away.
+- **Elliptical arcs are approximated** with straight segments.
 - **Tables are flattened to paragraphs.** The copy survives, the grid
   does not. Flagged `review`.
 - **Fonts are referenced by name.** Affinity substitutes anything not
