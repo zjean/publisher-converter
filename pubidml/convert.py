@@ -590,6 +590,7 @@ def convert(
     pubdump: Path = PUBDUMP,
     codepage: Optional[str] = "auto",
     wrap_images: bool = True,
+    facing_pages: bool = False,
 ) -> Result:
     """Convert one .pub file to an .idml package.
 
@@ -599,7 +600,10 @@ def convert(
     source = Path(source)
     result = Result(source=source)
     try:
-        _convert(result, source, Path(destination), pubdump, codepage, wrap_images)
+        _convert(
+            result, source, Path(destination), pubdump, codepage,
+            wrap_images, facing_pages,
+        )
     except ConversionError as exc:
         result.error = str(exc)
         log.error("%s: %s", source.name, exc)
@@ -619,6 +623,7 @@ def _convert(
     pubdump: Path,
     codepage: Optional[str],
     wrap_images: bool,
+    facing_pages: bool,
 ) -> None:
     started = time.monotonic()
     log.info("converting %s -> %s", source, destination)
@@ -641,6 +646,7 @@ def _convert(
         document,
         image_dir_name=f"{destination.stem}_images",
         wrap_images=wrap_images,
+        facing_pages=facing_pages,
     )
     try:
         writer.write(destination)

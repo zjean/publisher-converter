@@ -204,6 +204,7 @@ The same flags apply on macOS; only the default paths differ.
 | `--report PATH` | where to write the CSV. Default `conversion-report.csv` inside the output folder |
 | `--codepage MODE` | `auto` (default) detects and repairs non-Latin text, `none` disables repair, or force a codec such as `cp1251`, `cp932` |
 | `--no-image-wrap` | keep the source's exact stacking instead of flowing text around images. Images will then cover text |
+| `--facing-pages` | lay the pages out as reader's spreads — `1 \| 2-3 \| 4-5` — instead of singly. Use it for a booklet; libmspub never reports whether the publication was set up facing, so it has to be asked for |
 | `--log-file PATH` | write the log here instead of the per-user log folder (`%LOCALAPPDATA%\pub2idml\logs` on Windows, `~/Library/Logs/pub2idml` on macOS) |
 | `--no-log` | do not write a log file |
 | `-v`, `--verbose` | debug-level detail in the log (not the console) |
@@ -422,8 +423,21 @@ These are real and deliberate, not bugs to be surprised by later.
 - **Margin and column guides are lost.** libmspub reports exactly two
   properties for a page, `svg:width` and `svg:height` — no margins, no
   guides, no baseline grid — so Affinity applies its own defaults.
-- **Facing pages are not set**, so a booklet or 2-up layout arrives as
-  single pages.
+- **Facing pages have to be asked for.** `--facing-pages` lays the document
+  out as reader's spreads — the cover alone as a recto, then `2-3`, `4-5`,
+  so odd numbers stay right of the spine — and declares `FacingPages` so
+  the reader agrees. Without it every page is its own spread, exactly as
+  before.
+
+  It cannot be detected: `parseDocumentChunk` in libmspub reads
+  `DOCUMENT_WIDTH` and `DOCUMENT_HEIGHT` and nothing else, so no
+  publication type, book fold or pages-per-sheet reaches the event stream.
+  The setting is presumably in the `.pub`, and could be found the same way
+  the margins are being pursued in `actions.md` — with a controlled pair of
+  files from Publisher — at which point the flag becomes a default rather
+  than a question. Master spreads stay one page wide either way; whether
+  Affinity applies a single-page master to a facing spread is worth a look
+  the first time you use this on a document with a running header.
 - **Text frame columns are carried.** Publisher offers a column count and
   one uniform spacing, which is exactly what IDML calls `TextColumnCount`
   and `TextColumnGutter`, so the mapping is direct. Affinity honours both

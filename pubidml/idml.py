@@ -256,11 +256,13 @@ class IdmlWriter:
         document: model.Document,
         image_dir_name: Optional[str] = None,
         wrap_images: bool = True,
+        facing_pages: bool = False,
     ):
         self.doc = document
         self.ids = _Ids()
         self.image_dir_name = image_dir_name
         self.wrap_images = wrap_images
+        self.facing_pages = facing_pages
         self.color_ids: Dict[model.Color, str] = {}
         self.fonts: List[str] = []
         # (relative path, bytes) pairs the caller must write next to the IDML
@@ -311,10 +313,10 @@ class IdmlWriter:
             master_parts.append(part_name)
             self._parts[part_name] = self._master_spread_part(master, story_parts)
 
-        for index, page in enumerate(self.doc.pages, start=1):
+        for index, group in enumerate(self._spread_groups(), start=1):
             spread_name = f"Spreads/Spread_spread{index}.xml"
             spread_parts.append(spread_name)
-            self._parts[spread_name] = self._spread_part(page, index, story_parts)
+            self._parts[spread_name] = self._spread_part(group, index, story_parts)
 
         self._parts["META-INF/container.xml"] = self._container_part()
         self._parts["META-INF/metadata.xml"] = self._metadata_part()
@@ -608,7 +610,7 @@ class IdmlWriter:
                 "PageHeight": fmt(first.height),
                 "PageWidth": fmt(first.width),
                 "PagesPerDocument": str(max(1, len(self.doc.pages))),
-                "FacingPages": "false",
+                "FacingPages": "true" if self.facing_pages else "false",
                 "PageOrientation": "Portrait" if first.height >= first.width else "Landscape",
             },
         )
@@ -640,15 +642,47 @@ class IdmlWriter:
 
     # -- spreads ----------------------------------------------------------
 
-    def _spread_part(self, page: model.Page, index: int, story_parts: List[str]) -> bytes:
+    def _spread_groups(self) -> List[List[int]]:
+        """Page indices per spread.
+
+        One page per spread unless the document is facing, in which case
+        the cover stands alone as a recto with nothing opposite it and the
+        rest pair up: 1 | 2 3 | 4 5. That is how a booklet reads, and it
+        keeps odd page numbers on the right of the spine throughout.
+        """
+        count = len(self.doc.pages)
+        if not self.facing_pages:
+            return [[index] for index in range(count)]
+
+        groups: List[List[int]] = []
+        if count:
+            groups.append([0])
+        for index in range(1, count, 2):
+            groups.append([i for i in (index, index + 1) if i < count])
+        return groups
+
+    def _page_offset_x(self, page_number: int, width: float) -> float:
+        """Where a page's left edge sits in its spread's coordinates.
+
+        A single-page spread is centred on the spread origin. Facing pages
+        put the spine at the origin instead: odd numbers are rectos and run
+        rightwards from it, even numbers are versos and hang to its left.
+        """
+        if not self.facing_pages:
+            return -width / 2.0
+        return 0.0 if page_number % 2 else -width
+
+    def _spread_part(
+        self, pages: List[int], index: int, story_parts: List[str]
+    ) -> bytes:
         root = ET.Element("idPkg:Spread", {"xmlns:idPkg": IDPKG, "DOMVersion": DOM_VERSION})
         spread = ET.SubElement(
             root,
             "Spread",
             {
                 "Self": f"spread{index}",
-                "PageCount": "1",
-                "BindingLocation": "0",
+                "PageCount": str(len(pages)),
+                "BindingLocation": "1" if len(pages) > 1 else "0",
                 "ShowMasterItems": "true",
                 "PageTransitionType": "None",
                 "PageTransitionDirection": "NotApplicable",
@@ -660,27 +694,38 @@ class IdmlWriter:
         )
         ET.SubElement(spread, "FlattenerPreference", {"LineArtAndTextResolution": "300"})
 
-        half_w, half_h = page.width / 2.0, page.height / 2.0
-        ET.SubElement(
-            spread,
-            "Page",
-            {
-                "Self": f"page{index}",
-                "Name": str(index),
-                "AppliedMaster": self.master_id(page.master) if page.master else "n",
-                "OverrideList": "",
-                "GeometricBounds": f"0 0 {fmt(page.height)} {fmt(page.width)}",
-                "ItemTransform": f"1 0 0 1 {fmt(-half_w)} {fmt(-half_h)}",
-                "AppliedTrapPreset": "TrapPreset/$ID/kDefaultTrapStyleName",
-                "GridStartingPoint": "TopOutside",
-                "UseMasterGrid": "true",
-            },
-        )
+        for position in pages:
+            page = self.doc.pages[position]
+            number = position + 1
+            offset_x = self._page_offset_x(number, page.width)
+            ET.SubElement(
+                spread,
+                "Page",
+                {
+                    "Self": f"page{number}",
+                    "Name": str(number),
+                    "AppliedMaster": self.master_id(page.master) if page.master else "n",
+                    "OverrideList": "",
+                    "GeometricBounds": f"0 0 {fmt(page.height)} {fmt(page.width)}",
+                    "ItemTransform": (
+                        f"1 0 0 1 {fmt(offset_x)} {fmt(-page.height / 2.0)}"
+                    ),
+                    "AppliedTrapPreset": "TrapPreset/$ID/kDefaultTrapStyleName",
+                    "GridStartingPoint": "TopOutside",
+                    "UseMasterGrid": "true",
+                },
+            )
 
-        # Groups are flattened: their children already carry absolute page
-        # coordinates, and a flat spread avoids nested-transform drift.
-        for item in _flatten(page.items):
-            self._emit_item(spread, item, page, story_parts)
+        # Page items are children of the spread, not of the page, so each
+        # one carries its page's offset itself.
+        for position in pages:
+            page = self.doc.pages[position]
+            offset_x = self._page_offset_x(position + 1, page.width)
+            # Groups are flattened: their children already carry absolute
+            # page coordinates, and a flat spread avoids nested-transform
+            # drift.
+            for item in _flatten(page.items):
+                self._emit_item(spread, item, page, story_parts, offset_x)
 
         return _serialise(root)
 
@@ -690,17 +735,18 @@ class IdmlWriter:
         item: model.Item,
         page: model.Page,
         story_parts: List[str],
+        offset_x: Optional[float] = None,
     ) -> None:
         if isinstance(item, model.TextFrame):
-            self._emit_text_frame(spread, item, page, story_parts)
+            self._emit_text_frame(spread, item, page, story_parts, offset_x)
         elif isinstance(item, model.Image):
-            self._emit_image(spread, item, page)
+            self._emit_image(spread, item, page, offset_x)
         elif isinstance(item, model.Ellipse):
-            self._emit_shape(spread, item, page, "Oval")
+            self._emit_shape(spread, item, page, "Oval", offset_x)
         elif isinstance(item, (model.Polygon, model.Path)):
-            self._emit_shape(spread, item, page, "Polygon")
+            self._emit_shape(spread, item, page, "Polygon", offset_x)
         elif isinstance(item, model.Rectangle):
-            self._emit_shape(spread, item, page, "Rectangle")
+            self._emit_shape(spread, item, page, "Rectangle", offset_x)
 
     def _frame_attributes(
         self,
@@ -708,8 +754,13 @@ class IdmlWriter:
         page: model.Page,
         object_style: str,
         self_id: Optional[str] = None,
+        offset_x: Optional[float] = None,
     ) -> dict:
-        centre_x = item.x + item.width / 2.0 - page.width / 2.0
+        # None means the page is centred on its spread origin, which is the
+        # single-page case and what every master spread is.
+        if offset_x is None:
+            offset_x = -page.width / 2.0
+        centre_x = item.x + item.width / 2.0 + offset_x
         centre_y = item.y + item.height / 2.0 - page.height / 2.0
         attributes = {
             "Self": self_id or self.ids.next(),
@@ -728,9 +779,16 @@ class IdmlWriter:
         return attributes
 
     def _emit_shape(
-        self, spread: ET.Element, item: model.Item, page: model.Page, tag: str
+        self,
+        spread: ET.Element,
+        item: model.Item,
+        page: model.Page,
+        tag: str,
+        offset_x: Optional[float] = None,
     ) -> None:
-        attributes = self._frame_attributes(item, page, "$ID/[None]")
+        attributes = self._frame_attributes(
+            item, page, "$ID/[None]", offset_x=offset_x
+        )
         attributes["ContentType"] = "Unassigned"
         element = ET.SubElement(spread, tag, attributes)
         properties = ET.SubElement(element, "Properties")
@@ -759,6 +817,7 @@ class IdmlWriter:
         frame: model.TextFrame,
         page: model.Page,
         story_parts: List[str],
+        offset_x: Optional[float] = None,
     ) -> None:
         link = self._chain_links.get(id(frame))
         if link is None:
@@ -769,7 +828,7 @@ class IdmlWriter:
             self_id, previous, following = link.self_id, link.previous, link.following
 
         attributes = self._frame_attributes(
-            frame, page, "$ID/[Normal Text Frame]", self_id
+            frame, page, "$ID/[Normal Text Frame]", self_id, offset_x
         )
         attributes.update(
             {
@@ -810,7 +869,13 @@ class IdmlWriter:
             story_parts.append(part_name)
             self._parts[part_name] = self._story_part(story_id, frame.story)
 
-    def _emit_image(self, spread: ET.Element, item: model.Image, page: model.Page) -> None:
+    def _emit_image(
+        self,
+        spread: ET.Element,
+        item: model.Image,
+        page: model.Page,
+        offset_x: Optional[float] = None,
+    ) -> None:
         # Anything not in the table has no IDML representation. Emitting it
         # anyway under the old "$ID/JPEG" default wrote, say, an .emf and
         # told Affinity it was a JPEG: the package opens, the artwork is
@@ -823,7 +888,9 @@ class IdmlWriter:
             )
             return
 
-        attributes = self._frame_attributes(item, page, "$ID/[Normal Graphics Frame]")
+        attributes = self._frame_attributes(
+            item, page, "$ID/[Normal Graphics Frame]", offset_x=offset_x
+        )
         attributes["ContentType"] = "GraphicType"
         # A picture frame's own fill would paint over the artwork.
         attributes["FillColor"] = "Swatch/None"

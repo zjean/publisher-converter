@@ -121,6 +121,14 @@ def run(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--facing-pages", action="store_true",
+        help=(
+            "lay the pages out as reader's spreads (1 | 2-3 | 4-5) rather "
+            "than singly; libmspub does not report whether the publication "
+            "was set up facing, so a booklet has to say so here"
+        ),
+    )
+    parser.add_argument(
         "--log-file", type=Path, default=None,
         help=(
             "where to write the diagnostic log "
@@ -191,6 +199,7 @@ def run(argv=None) -> int:
                     pool.submit(
                         convert.convert, source, destination,
                         codepage=codepage, wrap_images=not args.no_image_wrap,
+                        facing_pages=args.facing_pages,
                     ): source
                     for source, destination in jobs
                 }

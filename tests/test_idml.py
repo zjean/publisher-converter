@@ -345,6 +345,103 @@ class StructureTest(unittest.TestCase):
             self.assertIn(src, names, f"designmap references missing part {src}")
 
 
+class FacingPagesTest(unittest.TestCase):
+    """A booklet must arrive as spreads, not as a stack of single pages.
+
+    libmspub reads only DOCUMENT_WIDTH and DOCUMENT_HEIGHT, so nothing in
+    the event stream says whether the publication was set up facing. It has
+    to be asked for.
+    """
+
+    def _package(self, pages: int, facing: bool):
+        document = model.Document()
+        for _ in range(pages):
+            page = model.Page(width=400.0, height=600.0)
+            page.items.append(model.Rectangle(x=10.0, y=20.0, width=30.0, height=40.0))
+            document.pages.append(page)
+
+        root = Path(tempfile.mkdtemp())
+        destination = root / "doc.idml"
+        idml.IdmlWriter(
+            document, image_dir_name="doc_images", facing_pages=facing
+        ).write(destination)
+        return destination
+
+    @staticmethod
+    def _spreads(archive) -> list:
+        return [
+            ET.fromstring(archive.read(n))
+            for n in sorted(n for n in archive.namelist() if n.startswith("Spreads/"))
+        ]
+
+    def test_single_pages_stay_one_per_spread_by_default(self):
+        with zipfile.ZipFile(self._package(5, facing=False)) as archive:
+            spreads = self._spreads(archive)
+            counts = [next(s.iter("Spread")).get("PageCount") for s in spreads]
+            preferences = ET.fromstring(archive.read("Resources/Preferences.xml"))
+        self.assertEqual(counts, ["1"] * 5)
+        self.assertEqual(
+            next(preferences.iter("DocumentPreferences")).get("FacingPages"), "false"
+        )
+
+    def test_facing_pages_puts_the_cover_alone_then_pairs_the_rest(self):
+        # 1 | 2 3 | 4 5 -- the cover is a recto with nothing facing it.
+        with zipfile.ZipFile(self._package(5, facing=True)) as archive:
+            spreads = self._spreads(archive)
+            counts = [next(s.iter("Spread")).get("PageCount") for s in spreads]
+            names = [[p.get("Name") for p in s.iter("Page")] for s in spreads]
+        self.assertEqual(counts, ["1", "2", "2"])
+        self.assertEqual(names, [["1"], ["2", "3"], ["4", "5"]])
+
+    def test_the_preference_is_declared_so_the_reader_agrees(self):
+        with zipfile.ZipFile(self._package(4, facing=True)) as archive:
+            preferences = ET.fromstring(archive.read("Resources/Preferences.xml"))
+        self.assertEqual(
+            next(preferences.iter("DocumentPreferences")).get("FacingPages"), "true"
+        )
+
+    def test_an_even_page_sits_left_of_the_spine_and_an_odd_page_right(self):
+        with zipfile.ZipFile(self._package(3, facing=True)) as archive:
+            pages = [p for s in self._spreads(archive) for p in s.iter("Page")]
+        offsets = [p.get("ItemTransform").split()[4] for p in pages]
+        # page 1 recto, page 2 verso (a full page width left), page 3 recto
+        self.assertEqual(offsets, ["0", "-400", "0"])
+
+    def test_items_follow_their_page_across_the_spine(self):
+        with zipfile.ZipFile(self._package(3, facing=True)) as archive:
+            spreads = self._spreads(archive)
+        # Page 2 is the verso of spread 2; its rectangle must be a page
+        # width further left than the identically placed one on page 3.
+        verso, recto = [
+            float(r.get("ItemTransform").split()[4])
+            for r in spreads[1].iter("Rectangle")
+        ]
+        self.assertAlmostEqual(recto - verso, 400.0)
+
+    def test_geometry_without_facing_pages_is_untouched(self):
+        with zipfile.ZipFile(self._package(2, facing=False)) as archive:
+            spreads = self._spreads(archive)
+        for spread in spreads:
+            rectangle = next(spread.iter("Rectangle"))
+            # centred on the page, which is centred on the spread origin
+            self.assertAlmostEqual(
+                float(rectangle.get("ItemTransform").split()[4]),
+                10.0 + 15.0 - 200.0,
+            )
+
+    def test_a_facing_package_is_still_well_formed_and_fully_referenced(self):
+        path = self._package(5, facing=True)
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            for name in names:
+                if name.endswith(".xml"):
+                    ET.fromstring(archive.read(name))
+            designmap = ET.fromstring(archive.read("designmap.xml"))
+        referenced = {e.get("src") for e in designmap if e.get("src")}
+        for src in referenced:
+            self.assertIn(src, names)
+
+
 class LeadingTest(unittest.TestCase):
     """Publisher's line spacing has to reach IDML as leading.
 
