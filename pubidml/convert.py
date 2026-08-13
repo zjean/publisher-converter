@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from . import idml, logsetup, metafile, model, pubfile, textrepair
+from . import idml, logsetup, metafile, model, pubfile, textrepair, wmf
 
 log = logsetup.get_logger("convert")
 
@@ -183,6 +183,15 @@ class _DroppedArtwork:
     copies: int = 0
 
 
+@dataclass
+class _PartialArtwork:
+    """Artwork that converted, but not every drawing record in it."""
+
+    converted: int
+    total: int
+    copies: int = 0
+
+
 def _rasterise_metafiles(document: model.Document) -> None:
     """Turn metafile artwork into images, or drop it with an accurate warning.
 
@@ -191,19 +200,27 @@ def _rasterise_metafiles(document: model.Document) -> None:
     same loss 64 times buries everything else in the report.
     """
     dropped: Dict[bytes, _DroppedArtwork] = {}
+    partial: Dict[bytes, _PartialArtwork] = {}
     for page in document.pages:
-        page.items = _rasterise_items(page.items, dropped)
+        page.items = _rasterise_items(page.items, dropped, partial)
     # Masters are extracted before this runs -- they have to be, since
     # rasterisation can drop artwork and that would break the shape count
     # the attribution relies on -- so they need visiting separately.
     for master in document.masters:
-        master.items = _rasterise_items(master.items, dropped)
+        master.items = _rasterise_items(master.items, dropped, partial)
 
     for entry in dropped.values():
         copies = f", {entry.copies} copies" if entry.copies > 1 else ""
         document.warnings.append(
             f"{entry.kind} artwork dropped "
             f"({entry.drawing_records} drawing record(s){copies}): {entry.reason}"
+        )
+    for entry in partial.values():
+        copies = f", {entry.copies} copies" if entry.copies > 1 else ""
+        document.warnings.append(
+            f"WMF artwork partly converted ({entry.converted} of "
+            f"{entry.total} drawing record(s) became shapes{copies}): "
+            f"the rest have no IDML equivalent"
         )
 
 
@@ -220,7 +237,9 @@ def _drop_reason(info: metafile.MetafileInfo) -> str:
 
 
 def _rasterise_items(
-    items: List[model.Item], dropped: Dict[bytes, _DroppedArtwork]
+    items: List[model.Item],
+    dropped: Dict[bytes, _DroppedArtwork],
+    partial: Dict[bytes, _PartialArtwork],
 ) -> List[model.Item]:
     """Convert metafiles at any depth, returning the items that survive.
 
@@ -231,7 +250,7 @@ def _rasterise_items(
     survivors: List[model.Item] = []
     for item in items:
         if isinstance(item, model.Group):
-            item.children = _rasterise_items(item.children, dropped)
+            item.children = _rasterise_items(item.children, dropped, partial)
             survivors.append(item)
             continue
 
@@ -252,11 +271,35 @@ def _rasterise_items(
 
         # A bitmap in a metafile envelope needs no external tool, so it is
         # tried first: it works where nothing is installed, and it avoids
-        # resampling a photograph through SVG.
+        # resampling a photograph through SVG. It also has to come before
+        # the vector path, or a wrapped photograph would be traced as
+        # though it were line art.
         unwrapped = metafile.embedded_bitmap(item.data)
         if unwrapped:
             item.data, item.mime_type = unwrapped
             survivors.append(item)
+            continue
+
+        # WMF line art becomes real IDML paths. No external tool can do
+        # this, and vectors beat a raster in a layout anyway.
+        artwork = wmf.to_items(item.data, item.x, item.y, item.width, item.height)
+        if artwork:
+            survivors.append(model.Group(
+                x=item.x, y=item.y, width=item.width, height=item.height,
+                children=artwork.items,
+            ))
+            if artwork.unsupported:
+                # Counted by content, not by frame: one partly-converted
+                # logo repeated across a newsletter is one problem.
+                key = hashlib.sha1(item.data).digest()
+                entry = partial.get(key)
+                if entry is None:
+                    entry = _PartialArtwork(
+                        converted=artwork.converted,
+                        total=artwork.converted + artwork.unsupported,
+                    )
+                    partial[key] = entry
+                entry.copies += 1
             continue
 
         png = metafile.to_png(item.data, item.width, item.height)

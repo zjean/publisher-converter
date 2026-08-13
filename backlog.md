@@ -9,132 +9,26 @@ none of it has to be re-derived.
 
 ---
 
-## 1. Translate WMF drawing records into native IDML paths
+## 1. Translate WMF drawing records into native IDML paths — **done**
 
-### Why this matters
+Landed: `pubidml/wmf.py`, wired into `convert._rasterise_items`. The six
+drawing records become `model.Polygon` / `Rectangle` / `Ellipse` inside a
+`Group`, mapped from the metafile's logical window onto the placed frame.
 
-This is the largest remaining loss in the converter. It is also the one
-place where the honest reporting added in `6c8d0e5` makes the size of the
-gap visible:
+Recovered across the corpus: 384 shapes in each kerkbode file (64 copies
+of one 6-shape emblem) and 3,060 in `Lisa Hoogendijk.pub`, with zero
+unsupported records — the vocabulary really was closed. Every artwork
+warning in the corpus is gone.
 
-```
-1336 kerkbode.pub    WMF artwork dropped (4 drawing record(s), 64 copies)
-1337 kerkbode.pub    WMF artwork dropped (4 drawing record(s), 64 copies)
-1338 kerkbode.pub    WMF artwork dropped (4 drawing record(s), 64 copies)
-Lisa Hoogendijk.pub  17 distinct pieces of artwork, across 216 frames
-```
+Two approximations remain, both documented in the README: a
+`META_POLYPOLYGON` becomes one polygon per ring rather than a single
+subpathed shape with holes, and only the anisotropic window mapping is
+implemented. Extending `_path_from_anchors` to emit several
+`GeometryPathType` entries would fix the first properly.
 
-`emf2svg-conv` reads EMF only, ImageMagick delegates WMF to a LibreOffice
-nobody has installed, and the documented deployment is `pub2idml.exe` on
-Windows where none of those exist anyway. So no external tool will ever
-fix this in the real workflow.
-
-### Why vectors, not a raster
-
-The output is opened in Affinity's layout mode, where the goal is an
-editable layout. Emitting paths is also the *cheaper* option: the writer
-already turns `model.Polygon` and `model.Path` into IDML `PathGeometry`,
-whereas rasterising would mean writing a scanline rasteriser from
-scratch. Photographs are a different case and are already handled — see
-`metafile.embedded_bitmap`.
-
-### What is already known
-
-Established by decoding the real artwork; don't re-derive it.
-
-- The newsletter logo is 4056 bytes, byte-identical across all 64 frames,
-  a **standard (non-placeable) WMF**: `mtType=1`, `mtHeaderSize=9` words,
-  version `0x0300`, 37 records.
-- Its drawing content, decoded:
-  ```
-  BRUSH #ffffcc -> POLYGON 130 pts  x[-1141..755] y[-947..917]
-  BRUSH #000000 -> POLYGON 260 pts  x[-621..270]  y[-623..656]
-  plus 2 POLYPOLYGON records with solid black/white brushes
-  ```
-- **The record vocabulary is closed.** Every WMF record in every WMF in
-  the corpus, counted — 22 types, nothing else:
-
-  | Record | Uses | Role |
-  |---|---|---|
-  | `0x0324` META_POLYGON | 1237 | **draws** |
-  | `0x0325` META_POLYLINE | 807 | **draws** |
-  | `0x041B` META_RECTANGLE | 766 | **draws** |
-  | `0x0418` META_ELLIPSE | 480 | **draws** |
-  | `0x0538` META_POLYPOLYGON | 384 | **draws** |
-  | `0x0213` META_LINETO | 154 | **draws** |
-  | `0x012D` META_SELECTOBJECT | 7200 | object table |
-  | `0x02FA` META_CREATEPENINDIRECT | 1923 | object table |
-  | `0x01F0` META_DELETEOBJECT | 1844 | object table |
-  | `0x02FC` META_CREATEBRUSHINDIRECT | 1467 | object table |
-  | `0x0106` META_SETPOLYFILLMODE | 2108 | state |
-  | `0x001E` META_SAVEDC | 1056 | state |
-  | `0x0127` META_RESTOREDC | 1056 | state |
-  | `0x020C` META_SETWINDOWEXT | 473 | mapping |
-  | `0x020B` META_SETWINDOWORG | 323 | mapping |
-  | `0x0104` META_SETROP2 | 240 | state |
-  | `0x0102` META_SETBKMODE | 308 | state |
-  | `0x0201` META_SETBKCOLOR | 308 | state |
-  | `0x0209` META_SETTEXTCOLOR | 308 | state |
-  | `0x0214` META_MOVETO | 154 | state |
-  | `0x0103` META_SETMAPMODE | 47 | state |
-  | `0x0000` META_EOF | 408 | terminator |
-
-  So the whole job is **six drawing primitives**, and each already has a
-  model class waiting for it:
-
-  ```
-  META_POLYGON      -> model.Polygon
-  META_POLYLINE     -> model.Polygon(closed=False)
-  META_POLYPOLYGON  -> model.Path        (one subpath per polygon)
-  META_RECTANGLE    -> model.Rectangle
-  META_ELLIPSE      -> model.Ellipse
-  META_LINETO       -> model.Path        (with MOVETO as current position)
-  ```
-
-  Note what is *absent*: no text records at all (no `META_TEXTOUT` or
-  `META_EXTTEXTOUT`, no `META_CREATEFONTINDIRECT`), so no font handling is
-  needed; no arcs, chords or pies; no regions or clipping; and no bitmap
-  blits, which is what leaves item 4 below untestable.
-- **The coordinate mapping data is in the first two records.**
-  `SetWindowOrg` and `SetWindowExt` lead every one of these files, which
-  is why the polygon coordinates come out negative. Scale that logical
-  window onto the frame's placed rect.
-- `metafile._WMF_NON_DRAWING_RECORDS` already classifies state vs drawing
-  records, and `_inspect_wmf` already walks the record list correctly for
-  both the placeable and standard spellings. The walker is done; only the
-  interpretation is missing.
-
-### Approach
-
-Translate into the existing model rather than inventing anything, using
-the mapping table above. Fills and strokes come from the object table:
-`CreatePenIndirect` and `CreateBrushIndirect` append to it,
-`SelectObject` picks by index, `DeleteObject` clears a slot — so a small
-list plus a "currently selected pen/brush" pair is the whole of it.
-`SaveDC`/`RestoreDC` push and pop that state. A `Group` holds the result
-so the artwork stays one object in Affinity.
-
-Keep a counter of drawing records that were *not* translated, so the
-warning can say "converted 4 of 6 drawing records" rather than implying
-completeness. No silent caps.
-
-### Risks worth testing explicitly
-
-- Mapping modes: `META_SETMAPMODE` appears 47 times, so the mapping is not
-  always the default. `MM_ANISOTROPIC` and `MM_TEXT` need different
-  window/viewport arithmetic.
-- Fill modes: `ALTERNATE` against `WINDING` for self-intersecting polygons.
-  `META_SETPOLYFILLMODE` is the single most common state record here
-  (2108 uses), so it is clearly being changed deliberately.
-- `META_POLYPOLYGON` holds *all* the polygon point-counts before *any*
-  coordinates. Reading them interleaved is the obvious way to get this
-  silently wrong, and it will still produce plausible-looking output.
-- `META_SETROP2` (240 uses) selects a raster operation. Anything other
-  than `R2_COPYPEN` has no IDML equivalent and should be counted as
-  unsupported rather than quietly drawn as opaque.
-
-TDD it against the real 4056-byte blob plus synthetic records. The same
-machinery later covers EMF vector records, which are a cleaner format.
+Watch the file size: repeating one 920-point emblem 64 times took
+`1336 kerkbode.idml` from 110KB to 942KB. IDML has no symbol reuse for
+this, so it is inherent rather than a bug.
 
 ---
 

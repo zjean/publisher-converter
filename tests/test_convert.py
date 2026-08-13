@@ -197,6 +197,65 @@ class MetafileReportingTest(unittest.TestCase):
         self.assertEqual(images[0].data[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(document.warnings, [])
 
+    def test_wmf_line_art_becomes_editable_shapes(self):
+        from .test_wmf import UNIT_WINDOW, build, create_brush, polygon, select
+
+        art = build(
+            *UNIT_WINDOW,
+            create_brush(0, 0x0000FF),  # solid red
+            select(0),
+            polygon((0, 0), (100, 0), (100, 100)),
+        )
+        document = self._document(self._image(art, "image/wmf"))
+        convert._rasterise_metafiles(document)
+
+        shapes = [
+            i for i in model._walk(document.pages[0].items)
+            if isinstance(i, model.Polygon)
+        ]
+        self.assertEqual(len(shapes), 1)
+        self.assertEqual(shapes[0].style.fill, (255, 0, 0))
+        # Converted, so nothing to report.
+        self.assertEqual(document.warnings, [])
+
+    def test_the_shapes_are_grouped_so_the_artwork_stays_one_object(self):
+        from .test_wmf import UNIT_WINDOW, build, polygon
+
+        art = build(*UNIT_WINDOW, polygon((0, 0), (10, 0)), polygon((5, 5), (9, 9)))
+        document = self._document(self._image(art, "image/wmf"))
+        convert._rasterise_metafiles(document)
+
+        top = document.pages[0].items
+        self.assertEqual(len(top), 1)
+        self.assertIsInstance(top[0], model.Group)
+
+    def test_records_we_cannot_draw_are_reported_with_what_survived(self):
+        from .test_wmf import META_ARC, UNIT_WINDOW, build, polygon, record
+        import struct as _struct
+
+        art = build(
+            *UNIT_WINDOW,
+            polygon((0, 0), (10, 0), (10, 10)),
+            record(META_ARC, _struct.pack("<8h", *range(8))),
+        )
+        document = self._document(self._image(art, "image/wmf"))
+        convert._rasterise_metafiles(document)
+
+        self.assertEqual(len(document.warnings), 1, document.warnings)
+        warning = document.warnings[0]
+        self.assertIn("1", warning)
+        self.assertNotIn("dropped", warning)
+
+    def test_a_wmf_wrapping_a_bitmap_is_still_unwrapped_not_traced(self):
+        payload = test_metafile.dib(2, 2, bytes([10, 20, 30, 0] * 4))
+        document = self._document(
+            self._image(test_metafile.emf_with_dib(payload), "image/emf")
+        )
+        convert._rasterise_metafiles(document)
+        images = [i for i in document.pages[0].items if isinstance(i, model.Image)]
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0].mime_type, "image/png")
+
     def test_one_logo_used_many_times_is_reported_once(self):
         logo = test_metafile.wmf(
             (test_metafile.META_POLYGON, 528), (test_metafile.META_EOF, 6)

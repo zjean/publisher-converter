@@ -331,17 +331,26 @@ to PNG with no external tool, at their exact pixel dimensions — the two
 in the sample set are 1348x894 and 262x198, and both are 100% bitmap.
 This is the common case and it needs nothing installed.
 
-What is left is genuine *vector* clip-art. EMF of that kind is rasterised
-to PNG if two optional tools are present:
+What is left is genuine *vector* clip-art, and the two formats take
+different routes.
+
+**WMF is translated into IDML paths** — no external tool, and the result
+is editable vector artwork rather than a picture. That is tractable
+because the vocabulary is closed: every WMF record in the whole sample
+corpus is one of 22 types and only six of them draw (`META_POLYGON`,
+`META_POLYLINE`, `META_POLYPOLYGON`, `META_RECTANGLE`, `META_ELLIPSE`,
+`META_LINETO`), each mapping onto a shape the writer already emits. The
+rest set up the pen/brush object table, the coordinate window, or device
+state. Records outside that set are counted and reported, so a partial
+conversion says so instead of looking complete.
+
+**EMF line art is rasterised** to PNG if two optional tools are present:
 
 ```sh
 brew install libemf2svg imagemagick
 ```
 
-Without them it is dropped and the report says so. **WMF vector artwork is
-never converted**, installed tools or not, because `emf2svg-conv` reads
-EMF only — the report names that as the reason rather than blaming a
-conversion that was never attempted.
+Without them it is dropped and the report says so.
 
 Losses are reported per distinct artwork, not per frame. Publisher repeats
 one logo across every page, so a newsletter that used to produce 64
@@ -387,17 +396,23 @@ queue: the files worth a human's attention first.
 
 These are real and deliberate, not bugs to be surprised by later.
 
-- **WMF vector artwork is not converted.** `emf2svg-conv` reads EMF only
-  and nothing else is installed by default, so WMF clip-art is dropped and
-  reported (see below). This is the largest remaining gap: one newsletter
-  repeats a single logo across 64 frames, and one file in the sample set is
-  17 distinct pieces of WMF line art. Translating the common WMF drawing
-  records into native IDML paths would recover them as editable vectors
-  with no dependency, which is the natural next step.
-- **Metafile-wrapped bitmaps are unwrapped, vector envelopes are not.** A
-  pasted photograph arrives as a metafile whose only record blits an
-  uncompressed bitmap; that is extracted losslessly without any external
-  tool (see below). Only genuine vector clip-art needs the optional tools.
+- **WMF clip-art is translated, not rasterised, and two things are
+  approximated.** The drawing records become real IDML paths, so the
+  artwork arrives as editable vectors with no external tool — see below.
+  A `META_POLYPOLYGON` becomes one polygon per ring in paint order, since
+  the writer emits a single subpath per shape; WMF clip-art composites by
+  overpainting rather than by even-odd holes, so this reproduces the usual
+  case, but a genuine knockout hole will fill. And only the anisotropic
+  window mapping is implemented, which is what the corpus uses; a metafile
+  declaring no window extent is fitted to its frame from its own bounds.
+  Anything not translated is counted and named in the report rather than
+  quietly skipped.
+- **EMF vector artwork still needs the optional tools.** Only the WMF
+  records are translated. An EMF that is a wrapped bitmap is unwrapped
+  losslessly with no dependency, but genuine EMF line art still goes
+  through `emf2svg-conv` and ImageMagick, and is dropped with a warning
+  when they are absent. The same translator could be pointed at EMF
+  records, which are a cleaner format.
 - **CJK text is not repaired.** The code page detector (see below) works
   on alphabetic scripts, where letter frequency is a usable signal. For
   Chinese, Japanese and Korean it declines to guess rather than risk
