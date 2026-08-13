@@ -151,7 +151,9 @@ def run(argv=None) -> int:
             parser.error(f"unknown codec for --codepage: {args.codepage}")
 
     log_path = None
-    if not args.no_log:
+    if args.no_log:
+        logsetup.disable()
+    else:
         log_path = logsetup.configure(args.log_file, args.verbose)
         logsetup.install_excepthook()
         logsetup.log_environment(convert.PUBDUMP)

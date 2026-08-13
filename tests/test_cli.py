@@ -126,6 +126,45 @@ class CodepageValidationTest(unittest.TestCase):
             cli.convert.convert = original
 
 
+class NoLogTest(unittest.TestCase):
+    """--no-log must be quieter than the default, not louder."""
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp())
+        (self.work / "a.pub").write_bytes(b"stub")
+
+    def test_no_log_does_not_turn_console_warnings_on(self):
+        # With no handler attached, logging falls back to stderr, so
+        # --no-log used to start printing warnings the default run hid.
+        original = convert.convert
+        cli.convert.convert = lambda source, destination, **kw: convert.Result(
+            source=Path(source), output=Path(destination), pages=1, text_frames=1,
+            warnings=["something worth logging"],
+        )
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                cli.run([str(self.work), "-o", str(self.work / "out"),
+                         "--no-log", "-q"])
+        finally:
+            cli.convert.convert = original
+        self.assertEqual(err.getvalue(), "")
+
+    def test_warnings_still_reach_the_operator_without_quiet(self):
+        original = convert.convert
+        cli.convert.convert = lambda source, destination, **kw: convert.Result(
+            source=Path(source), output=Path(destination), pages=1, text_frames=1,
+            warnings=["something worth seeing"],
+        )
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                cli.run([str(self.work), "-o", str(self.work / "out"), "--no-log"])
+        finally:
+            cli.convert.convert = original
+        self.assertIn("something worth seeing", out.getvalue())
+
+
 class FindSourcesTest(unittest.TestCase):
     def setUp(self):
         self.work = Path(tempfile.mkdtemp())

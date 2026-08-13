@@ -166,17 +166,19 @@ UNC network paths (`\\server\share\...`) work.
 
 #### Options
 
+The same flags apply on macOS; only the default paths differ.
+
 | Option | Meaning |
 |---|---|
 | `source` | a `.pub` file, or a folder to search (required) |
-| `-o`, `--output PATH` | output folder; created if absent. Default `.\converted` |
+| `-o`, `--output PATH` | output folder; created if absent. Default `converted` beside the working directory |
 | `-j`, `--jobs N` | parallel conversions. Default: one per CPU core |
 | `--no-recursive` | only the given folder, do not descend into subfolders |
 | `--force` | reconvert files whose `.idml` already exists. Without it, those are skipped, so an interrupted run resumes cheaply |
-| `--report PATH` | where to write the CSV. Default `<output>\conversion-report.csv` |
+| `--report PATH` | where to write the CSV. Default `conversion-report.csv` inside the output folder |
 | `--codepage MODE` | `auto` (default) detects and repairs non-Latin text, `none` disables repair, or force a codec such as `cp1251`, `cp932` |
 | `--no-image-wrap` | keep the source's exact stacking instead of flowing text around images. Images will then cover text |
-| `--log-file PATH` | write the log here instead of `%LOCALAPPDATA%\pub2idml\logs` |
+| `--log-file PATH` | write the log here instead of the per-user log folder (`%LOCALAPPDATA%\pub2idml\logs` on Windows, `~/Library/Logs/pub2idml` on macOS) |
 | `--no-log` | do not write a log file |
 | `-v`, `--verbose` | debug-level detail in the log (not the console) |
 | `-q`, `--quiet` | print only the final summary, not each file |
@@ -231,6 +233,8 @@ The console stays a short summary; detail goes to the file. Options:
 
 ## Use
 
+Run `make` once to build `bin/pubdump`, then:
+
 ```sh
 # one file
 ./pub2idml "files/Cantico_dei_Cantici.pub" -o converted
@@ -240,7 +244,37 @@ The console stays a short summary; detail goes to the file. Options:
 
 # reconvert everything, 8 at a time
 ./pub2idml ~/Documents/publisher-archive -o ~/converted --force -j 8
+
+# summary only, no log file
+./pub2idml ~/Documents/publisher-archive -o ~/converted -q --no-log
 ```
+
+`./pub2idml` is a one-line shim for `python3 -m pubidml.cli`, so these
+are the same thing:
+
+```sh
+./pub2idml files -o converted
+python3 pub2idml.py files -o converted
+python3 -m pubidml.cli files -o converted      # from the repo root only
+```
+
+**It works from any directory.** The parser is located relative to the
+package rather than the working directory, so an absolute path is enough
+and nothing needs installing or adding to `PATH`:
+
+```sh
+python3 ~/prive/tools/affinity-converter/pub2idml.py \
+  ~/Documents/publisher-archive -o ~/Desktop/converted
+```
+
+The `python3 -m` form is the one exception — it needs the repo root as
+the working directory, because the package is not on `sys.path` from
+anywhere else. Use `pub2idml.py` from outside the repo.
+
+There is nothing to install beyond `make`: the Python half is standard
+library only, and **Microsoft Publisher is not required** on any
+platform. Every option is listed under
+[Options](#options) — the same flags apply here and on Windows.
 
 Output:
 

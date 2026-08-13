@@ -51,6 +51,18 @@ def _prune(directory: Path) -> None:
         pass
 
 
+def disable() -> None:
+    """Silence the logger rather than leaving it to Python's fallback.
+
+    With no handler attached, logging falls back to writing WARNING and
+    above straight to stderr -- so --no-log had the backwards effect of
+    turning console warnings on, and did it even under --quiet.
+    """
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.addHandler(logging.NullHandler())
+    logger.propagate = False
+
+
 def configure(log_file: Optional[Path] = None, verbose: bool = False) -> Optional[Path]:
     """Attach a file handler and return the path actually written to.
 
