@@ -774,18 +774,23 @@ class IdmlWriter:
         _rect_path(properties, frame.width, frame.height)
 
         top, right, bottom, left = frame.padding
-        ET.SubElement(
-            element,
-            "TextFramePreference",
-            {
-                "TextColumnCount": "1",
-                "VerticalJustification": _VERTICAL_JUSTIFICATION.get(
-                    frame.vertical_align, "TopAlign"
-                ),
-                "InsetSpacing": f"{fmt(top)} {fmt(left)} {fmt(bottom)} {fmt(right)}",
-                "AutoSizingType": "Off",
-            },
-        )
+        columns = max(1, frame.columns)
+        preference = {
+            "TextColumnCount": str(columns),
+            "VerticalJustification": _VERTICAL_JUSTIFICATION.get(
+                frame.vertical_align, "TopAlign"
+            ),
+            "InsetSpacing": f"{fmt(top)} {fmt(left)} {fmt(bottom)} {fmt(right)}",
+            "AutoSizingType": "Off",
+        }
+        if columns > 1:
+            # Stated explicitly, never left to the reader's default: InDesign's
+            # is 12pt against Publisher's 2mm, which would widen every gap and
+            # narrow every column. Publisher's column spacing is the space
+            # between columns only, the same thing IDML calls the gutter, so
+            # it does not overlap InsetSpacing above.
+            preference["TextColumnGutter"] = fmt(frame.column_gap)
+        ET.SubElement(element, "TextFramePreference", preference)
 
         # A chain's text belongs to the story, not to each frame that shows
         # it, so it is written once — at the head, the only link still

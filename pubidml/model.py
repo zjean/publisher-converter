@@ -167,6 +167,12 @@ class TextFrame(Item):
     story: Story = field(default_factory=Story)
     padding: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)  # t r b l
     vertical_align: str = "top"
+    # Publisher's per-box column settings. Equal widths and one uniform gap
+    # is all Publisher offers, which is exactly what IDML calls a column
+    # count and gutter. `column_gap` is in points and means nothing unless
+    # `columns` is above 1.
+    columns: int = 1
+    column_gap: float = 0.0
     # Set when this frame is one link in a threaded story; every frame
     # sharing the id shows one story between them, in the order recorded in
     # Document.text_chains. Only the first link carries the text.
@@ -554,6 +560,8 @@ class ModelBuilder:
             ),
             vertical_align=props.get("draw:textarea-vertical-align", "top"),
             rotation=_rotation(props),
+            columns=_column_count(props),
+            column_gap=units.to_points(props.get("fo:column-gap"), 0.0) or 0.0,
         )
         self._apply_box(frame, props)
         self._frame = frame
@@ -755,6 +763,19 @@ def _rotation(props: dict) -> float:
     discards the bogus suffix.
     """
     return units.to_float(props.get("librevenge:rotate"), 0.0) or 0.0
+
+
+def _column_count(props: dict) -> int:
+    """Read a text box's column count, defaulting to a single column.
+
+    libmspub inserts this as an int, but pubdump serialises every property
+    through getStr(), so it arrives as a string. It is only emitted when
+    the .pub actually recorded a count -- `fo:column-gap` turns up on
+    nearly every text object regardless, so the gap on its own is no
+    evidence of columns. Anything absent or nonsensical means one column.
+    """
+    count = units.to_float(props.get("fo:column-count"), 1.0)
+    return max(1, int(count if count is not None else 1))
 
 
 def _within_sane_bounds(item: Item) -> bool:

@@ -375,8 +375,31 @@ These are real and deliberate, not bugs to be surprised by later.
 - **Margin and column guides are lost.** libmspub reports exactly two
   properties for a page, `svg:width` and `svg:height` — no margins, no
   guides, no baseline grid — so Affinity applies its own defaults.
-- **Text frames become single-column** and **facing pages are not set**,
-  so a booklet or 2-up layout arrives as single pages.
+- **Facing pages are not set**, so a booklet or 2-up layout arrives as
+  single pages.
+- **Text frame columns are carried.** Publisher offers a column count and
+  one uniform spacing, which is exactly what IDML calls `TextColumnCount`
+  and `TextColumnGutter`, so the mapping is direct. Affinity honours both
+  on import, verified by opening `research/probe_columns.py`'s package.
+  The gutter is always written explicitly when there is more than one
+  column: InDesign's own default is 12pt against Publisher's 2mm, so
+  leaving it out would widen every gap and narrow every column.
+
+  Two details that look like bugs and are not. Affinity's UI rounds the
+  gutter to one decimal, so Publisher's 2mm shows as 5.7pt where the file
+  says 5.6664 — display only. And that figure is 5.6664 rather than the
+  exact 5.66929 because librevenge stringifies inch properties to four
+  decimals, so libmspub reports `0.0787in`; the 0.003pt shortfall is a
+  thousandth of a millimetre.
+
+  No `.pub` in the sample set has a multi-column box, so this path has no
+  corpus coverage. libmspub emits `fo:column-count` only when the file
+  recorded one, and across nine files and 300-odd text objects it never
+  appears, while `fo:column-gap` appears on nearly all of them — the gap
+  alone is no evidence of columns. Note too that a two-column Publisher
+  article may be one box with two columns *or* two linked boxes: identical
+  on the page, different structures, and the second is handled by story
+  threading below rather than by this.
 - **Story threading is inferred, not read.** librevenge's drawing
   interface cannot say "this frame continues that one", so libmspub hands
   the *complete* story to every frame in a linked chain — one sample

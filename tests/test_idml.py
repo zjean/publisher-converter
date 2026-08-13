@@ -340,6 +340,52 @@ class StructureTest(unittest.TestCase):
             self.assertIn(src, names, f"designmap references missing part {src}")
 
 
+class TextColumnTest(unittest.TestCase):
+    """Column count and gutter have to survive into TextFramePreference."""
+
+    def _preference(self, **props) -> dict:
+        base = {"svg:x": "1in", "svg:y": "1in", "svg:width": "6in", "svg:height": "4in"}
+        base.update(props)
+        document = support.document(
+            event("startTextObject", base),
+            event("openParagraph", {}),
+            event("openSpan", {"style:font-name": "Arial", "fo:font-size": "10pt"}),
+            event("insertText", text="text"),
+            event("closeSpan"),
+            event("closeParagraph"),
+            event("endTextObject"),
+        )
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            spread = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            root = ET.fromstring(archive.read(spread))
+        return dict(next(root.iter("TextFramePreference")).attrib)
+
+    def test_the_column_count_is_written(self):
+        preference = self._preference(**{"fo:column-count": "3"})
+        self.assertEqual(preference["TextColumnCount"], "3")
+
+    def test_the_gutter_is_written_whenever_there_are_columns(self):
+        # It has to be explicit: InDesign's own default gutter is 12pt,
+        # against Publisher's 2mm, so leaving it out would silently widen
+        # the gaps and narrow every column.
+        preference = self._preference(
+            **{"fo:column-count": "2", "fo:column-gap": "0.0787in"}
+        )
+        self.assertAlmostEqual(
+            float(preference["TextColumnGutter"]), 0.0787 * 72.0, places=3
+        )
+
+    def test_a_column_count_with_no_gap_still_pins_the_gutter(self):
+        preference = self._preference(**{"fo:column-count": "2"})
+        self.assertEqual(float(preference["TextColumnGutter"]), 0.0)
+
+    def test_a_single_column_frame_is_written_exactly_as_before(self):
+        preference = self._preference(**{"fo:column-gap": "0.0787in"})
+        self.assertEqual(preference["TextColumnCount"], "1")
+        self.assertNotIn("TextColumnGutter", preference)
+
+
 class ThreadedStoryTest(unittest.TestCase):
     """A threaded story must be written once and flowed through its frames."""
 

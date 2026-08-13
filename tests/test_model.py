@@ -155,6 +155,55 @@ class HostileStreamTest(unittest.TestCase):
         self.assertTrue(any("dropped" in w for w in doc.warnings))
 
 
+class TextColumnTest(unittest.TestCase):
+    """Publisher's per-box column settings, as libmspub reports them.
+
+    libmspub emits `fo:column-count` only when the .pub recorded one, but
+    `fo:column-gap` on essentially every text object — so the gap alone
+    says nothing about whether a box has columns.
+    """
+
+    def _frame(self, **props) -> model.TextFrame:
+        base = {"svg:x": "1in", "svg:y": "1in", "svg:width": "6in", "svg:height": "4in"}
+        base.update(props)
+        doc = support.document(
+            event("startTextObject", base),
+            event("openParagraph", {}),
+            event("openSpan", {"style:font-name": "Arial", "fo:font-size": "10pt"}),
+            event("insertText", text="text"),
+            event("closeSpan"),
+            event("closeParagraph"),
+            event("endTextObject"),
+        )
+        return doc.pages[0].items[0]
+
+    def test_a_column_count_is_recorded(self):
+        # pubdump serialises every property with getStr(), so an int
+        # property arrives as a string.
+        self.assertEqual(self._frame(**{"fo:column-count": "3"}).columns, 3)
+
+    def test_the_column_gap_is_converted_to_points(self):
+        frame = self._frame(**{"fo:column-count": "2", "fo:column-gap": "0.0787in"})
+        self.assertAlmostEqual(frame.column_gap, 0.0787 * 72.0, places=4)
+
+    def test_a_gap_without_a_count_leaves_the_box_single_column(self):
+        # Every text object in the sample corpus looks like this.
+        frame = self._frame(**{"fo:column-gap": "0.0787in"})
+        self.assertEqual(frame.columns, 1)
+
+    def test_a_plain_box_is_single_column_with_no_gap(self):
+        frame = self._frame()
+        self.assertEqual((frame.columns, frame.column_gap), (1, 0.0))
+
+    def test_a_degenerate_count_never_drops_below_one(self):
+        for value in ("0", "-2", "", "banana"):
+            with self.subTest(value=value):
+                self.assertEqual(self._frame(**{"fo:column-count": value}).columns, 1)
+
+    def test_an_integer_count_is_also_accepted(self):
+        self.assertEqual(self._frame(**{"fo:column-count": 4}).columns, 4)
+
+
 class ParseColorTest(unittest.TestCase):
     def test_valid_and_invalid_forms(self):
         self.assertEqual(model.parse_color("#ff8000"), (255, 128, 0))
