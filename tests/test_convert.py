@@ -546,3 +546,60 @@ class RealFileTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ContentCensusTest(unittest.TestCase):
+    """The report has to count what the output actually carries.
+
+    Tables became real tables rather than flattened paragraphs, and a
+    Table is not a TextFrame -- so without this the cell text vanished from
+    the character count while being present in the package.
+    """
+
+    def _result(self, *items) -> convert.Result:
+        document = model.Document(pages=[model.Page()])
+        document.pages[0].items.extend(items)
+        result = convert.Result(source=Path("x.pub"))
+        convert._count_content(document, result)
+        return result
+
+    @staticmethod
+    def _frame(text: str) -> model.TextFrame:
+        frame = model.TextFrame()
+        paragraph = model.Paragraph()
+        paragraph.spans.append(model.Span(text=text))
+        frame.story.paragraphs.append(paragraph)
+        return frame
+
+    @staticmethod
+    def _table(*texts: str) -> model.Table:
+        table = model.Table(column_widths=[10.0], row_heights=[10.0])
+        for index, text in enumerate(texts):
+            cell = model.TableCell(row=index, column=0)
+            paragraph = model.Paragraph()
+            paragraph.spans.append(model.Span(text=text))
+            cell.story.paragraphs.append(paragraph)
+            table.cells.append(cell)
+        return table
+
+    def test_a_frames_text_is_counted(self):
+        result = self._result(self._frame("hello"))
+        self.assertEqual((result.text_frames, result.characters), (1, 5))
+
+    def test_table_cell_text_is_counted_too(self):
+        result = self._result(self._table("ab", "cde"))
+        self.assertEqual(result.characters, 5)
+
+    def test_a_table_counts_as_a_frame_because_that_is_what_it_becomes(self):
+        result = self._result(self._table("x"))
+        self.assertEqual(result.text_frames, 1)
+
+    def test_images_and_shapes_are_counted_as_before(self):
+        result = self._result(
+            model.Image(), model.Rectangle(), model.Ellipse(), model.Polygon()
+        )
+        self.assertEqual((result.images, result.shapes), (1, 3))
+
+    def test_a_table_is_not_counted_as_a_shape(self):
+        result = self._result(self._table("x"))
+        self.assertEqual(result.shapes, 0)

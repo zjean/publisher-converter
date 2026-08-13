@@ -699,6 +699,35 @@ def convert(
     return result
 
 
+def _count_content(document: model.Document, result: Result) -> None:
+    """Tally what the package will carry, for the report.
+
+    A table counts as a frame because that is what it becomes in IDML -- a
+    text frame whose story holds the grid -- and its cell text counts as
+    text. Leaving it out understated one newsletter by 5,635 characters
+    that were present in the output.
+    """
+    def characters(story: model.Story) -> int:
+        return sum(
+            len(span.text)
+            for paragraph in story.paragraphs
+            for span in paragraph.spans
+        )
+
+    for item in document.all_items():
+        if isinstance(item, model.Table):
+            result.text_frames += 1
+            for cell in item.cells:
+                result.characters += characters(cell.story)
+        elif isinstance(item, model.TextFrame):
+            result.text_frames += 1
+            result.characters += characters(item.story)
+        elif isinstance(item, model.Image):
+            result.images += 1
+        elif isinstance(item, (model.Rectangle, model.Ellipse, model.Polygon, model.Path)):
+            result.shapes += 1
+
+
 def _convert(
     result: Result,
     source: Path,
@@ -744,16 +773,7 @@ def _convert(
     result.fonts = document.fonts
     result.warnings = list(document.warnings)
 
-    for item in document.all_items():
-        if isinstance(item, model.TextFrame):
-            result.text_frames += 1
-            for paragraph in item.story.paragraphs:
-                for span in paragraph.spans:
-                    result.characters += len(span.text)
-        elif isinstance(item, model.Image):
-            result.images += 1
-        elif isinstance(item, (model.Rectangle, model.Ellipse, model.Polygon, model.Path)):
-            result.shapes += 1
+    _count_content(document, result)
 
     log.info(
         "%s: ok in %.2fs - %d pages, %d frames, %d images, %d shapes, %d chars, fonts=%s",

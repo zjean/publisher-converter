@@ -535,8 +535,17 @@ These are real and deliberate, not bugs to be surprised by later.
   make a hard edge, and those offsets are passed through as reported rather
   than evened out, which would smooth the effect away.
 - **Elliptical arcs are approximated** with straight segments.
-- **Tables are flattened to paragraphs.** The copy survives, the grid
-  does not. Flagged `review`.
+- **Tables keep their grid.** libmspub describes a Publisher table
+  completely — a width per column, a height per row, and a row/column pair
+  plus any spans on every cell — so it becomes a real IDML table rather
+  than cells flowed into one frame as consecutive paragraphs. Cells that a
+  span covers are not emitted twice. An all-empty grid with no fill or
+  stroke is dropped, the same rule an empty text frame follows.
+
+  Cell *formatting* is not carried: no per-cell fill, no rule weights or
+  colours, no cell insets. libmspub reports none of those, so the grid
+  arrives with Affinity's default table styling and needs restyling if the
+  original was ruled or shaded.
 - **Fonts are referenced by name.** Affinity substitutes anything not
   installed — install the source fonts first, or expect reflow.
 - **libmspub sometimes reports a degenerate frame size.** One sample has

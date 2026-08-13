@@ -242,6 +242,34 @@ class Path(Item):
 
 
 @dataclass
+class TableCell:
+    """One cell. `row_span`/`column_span` are 1 unless it covers neighbours."""
+
+    row: int = 0
+    column: int = 0
+    row_span: int = 1
+    column_span: int = 1
+    story: Story = field(default_factory=Story)
+
+
+@dataclass
+class Table(Item):
+    """A real grid. libmspub reports widths, heights, coordinates and spans."""
+
+    column_widths: List[float] = field(default_factory=list)
+    row_heights: List[float] = field(default_factory=list)
+    cells: List[TableCell] = field(default_factory=list)
+
+    @property
+    def column_count(self) -> int:
+        return max(len(self.column_widths), 1)
+
+    @property
+    def row_count(self) -> int:
+        return max(len(self.row_heights), 1)
+
+
+@dataclass
 class Image(Item):
     data: bytes = b""
     mime_type: str = "image/png"
@@ -422,6 +450,7 @@ class ModelBuilder:
         self._page: Optional[Page] = None
         self._style = GraphicStyle()
         self._frame: Optional[TextFrame] = None
+        self._table: Optional[Table] = None
         self._paragraph: Optional[Paragraph] = None
         self._span: Optional[Span] = None
         self._group_stack: List[Group] = []
@@ -623,26 +652,75 @@ class ModelBuilder:
             return
         self._place(frame)
 
-    # Tables reuse the text-frame machinery: IDML tables are a large
-    # feature and Publisher uses them rarely, so the cells are flowed into
-    # a single frame as paragraphs. That keeps the copy rather than losing
-    # it, and the warning tells the operator the grid needs rebuilding.
+    # Tables keep their structure. libmspub describes them completely --
+    # column widths on the table, a height per row, and a row/column pair
+    # plus spans on every cell -- so nothing has to be inferred.
     def _on_startTableObject(self, props: dict) -> None:
-        self.doc.warnings.append(
-            "table flattened to paragraphs: cell structure not preserved"
+        table = Table(
+            column_widths=[
+                units.to_points(column.get("style:column-width"), 0.0) or 0.0
+                for column in (props.get("librevenge:table-columns") or [])
+                if isinstance(column, dict)
+            ],
         )
-        self._on_startTextObject(props)
+        self._apply_box(table, props)
+        self._table = table
 
     def _on_endTableObject(self) -> None:
-        self._on_endTextObject()
+        table, self._table = self._table, None
+        self._frame = None
+        self._paragraph = None
+        self._span = None
+        if table is None:
+            return
+        # An empty grid with no fill or stroke contributes nothing, the same
+        # rule an empty text frame follows.
+        if all(cell.story.is_empty() for cell in table.cells):
+            if not table.style.fill and not table.style.stroke:
+                return
+        if table.cells:
+            self._place(table)
+
+    def _on_openTableRow(self, props: dict) -> None:
+        if self._table is None:
+            return
+        self._table.row_heights.append(
+            units.to_points(props.get("librevenge:row-height"), 0.0) or 0.0
+        )
+
+    def _on_closeTableRow(self) -> None:
+        self._frame = None
 
     def _on_openTableCell(self, props: dict) -> None:
         self._paragraph = None
         self._span = None
+        if self._table is None:
+            return
+        cell = TableCell(
+            row=int(units.to_float(props.get("librevenge:row"), 0.0) or 0.0),
+            column=int(units.to_float(props.get("librevenge:column"), 0.0) or 0.0),
+            row_span=max(1, int(
+                units.to_float(props.get("table:number-rows-spanned"), 1.0) or 1.0
+            )),
+            column_span=max(1, int(
+                units.to_float(props.get("table:number-columns-spanned"), 1.0) or 1.0
+            )),
+        )
+        self._table.cells.append(cell)
+        # The paragraph and span handlers write into self._frame.story, so a
+        # throwaway frame sharing the cell's story routes the text into the
+        # cell without duplicating any of that machinery.
+        self._frame = TextFrame(story=cell.story)
 
     def _on_closeTableCell(self) -> None:
+        self._frame = None
         self._paragraph = None
         self._span = None
+
+    def _on_insertCoveredTableCell(self, props: dict) -> None:
+        # A cell hidden under a neighbour's span. The span already records
+        # it, so it is not a cell of its own.
+        return
 
     def _on_openParagraph(self, props: dict) -> None:
         if self._frame is None:

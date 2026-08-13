@@ -788,7 +788,9 @@ class IdmlWriter:
         story_parts: List[str],
         offset_x: Optional[float] = None,
     ) -> None:
-        if isinstance(item, model.TextFrame):
+        if isinstance(item, model.Table):
+            self._emit_table(spread, item, page, story_parts, offset_x)
+        elif isinstance(item, model.TextFrame):
             self._emit_text_frame(spread, item, page, story_parts, offset_x)
         elif isinstance(item, model.Image):
             self._emit_image(spread, item, page, offset_x)
@@ -923,6 +925,141 @@ class IdmlWriter:
             part_name = f"Stories/Story_{story_id}.xml"
             story_parts.append(part_name)
             self._parts[part_name] = self._story_part(story_id, frame.story)
+
+    def _emit_table(
+        self,
+        spread: ET.Element,
+        table: model.Table,
+        page: model.Page,
+        story_parts: List[str],
+        offset_x: Optional[float] = None,
+    ) -> None:
+        """A table is a frame whose story contains an IDML Table."""
+        story_id = self.ids.next("story")
+        attributes = self._frame_attributes(
+            table, page, "$ID/[Normal Text Frame]", None, offset_x
+        )
+        attributes.update(
+            {
+                "ContentType": "TextType",
+                "ParentStory": story_id,
+                "PreviousTextFrame": "n",
+                "NextTextFrame": "n",
+            }
+        )
+        element = ET.SubElement(spread, "TextFrame", attributes)
+        properties = ET.SubElement(element, "Properties")
+        _rect_path(properties, table.width, table.height)
+        ET.SubElement(
+            element,
+            "TextFramePreference",
+            {
+                "TextColumnCount": "1",
+                "VerticalJustification": "TopAlign",
+                "InsetSpacing": "0 0 0 0",
+                "AutoSizingType": "Off",
+            },
+        )
+
+        part_name = f"Stories/Story_{story_id}.xml"
+        story_parts.append(part_name)
+        self._parts[part_name] = self._table_story_part(story_id, table)
+
+    def _table_story_part(self, story_id: str, table: model.Table) -> bytes:
+        root = ET.Element("idPkg:Story", {"xmlns:idPkg": IDPKG, "DOMVersion": DOM_VERSION})
+        story = ET.SubElement(
+            root,
+            "Story",
+            {
+                "Self": story_id,
+                "AppliedTOCStyle": "n",
+                "TrackChanges": "false",
+                "StoryTitle": "",
+                "AppliedNamedGrid": "n",
+            },
+        )
+        ET.SubElement(
+            story,
+            "StoryPreference",
+            {
+                "OpticalMarginAlignment": "false",
+                "OpticalMarginSize": "12",
+                "FrameType": "TextFrameType",
+                "StoryOrientation": "Horizontal",
+                "StoryDirection": "LeftToRightDirection",
+            },
+        )
+        paragraph = ET.SubElement(
+            story,
+            "ParagraphStyleRange",
+            {"AppliedParagraphStyle": NO_PARAGRAPH_STYLE},
+        )
+        run = ET.SubElement(
+            paragraph, "CharacterStyleRange", {"AppliedCharacterStyle": NO_CHARACTER_STYLE}
+        )
+
+        table_id = self.ids.next("table")
+        element = ET.SubElement(
+            run,
+            "Table",
+            {
+                "Self": table_id,
+                "AppliedTableStyle": "TableStyle/$ID/[Basic Table]",
+                "TableDirection": "LeftToRightDirection",
+                "HeaderRowCount": "0",
+                "FooterRowCount": "0",
+                "BodyRowCount": str(table.row_count),
+                "ColumnCount": str(table.column_count),
+            },
+        )
+        # IDML wants every Row, then every Column, then the Cells.
+        for index in range(table.row_count):
+            height = (
+                table.row_heights[index] if index < len(table.row_heights) else 0.0
+            )
+            ET.SubElement(
+                element,
+                "Row",
+                {
+                    "Self": f"{table_id}Row{index}",
+                    "Name": str(index),
+                    "SingleRowHeight": fmt(height),
+                },
+            )
+        for index in range(table.column_count):
+            width = (
+                table.column_widths[index]
+                if index < len(table.column_widths)
+                else 0.0
+            )
+            ET.SubElement(
+                element,
+                "Column",
+                {
+                    "Self": f"{table_id}Column{index}",
+                    "Name": str(index),
+                    "SingleColumnWidth": fmt(width),
+                },
+            )
+        for cell in table.cells:
+            # A cell is named column first, then row.
+            node = ET.SubElement(
+                element,
+                "Cell",
+                {
+                    "Self": f"{table_id}i{cell.column}i{cell.row}",
+                    "Name": f"{cell.column}:{cell.row}",
+                    "AppliedCellStyle": "CellStyle/$ID/[None]",
+                    "RowSpan": str(max(1, cell.row_span)),
+                    "ColumnSpan": str(max(1, cell.column_span)),
+                },
+            )
+            paragraphs = cell.story.paragraphs or [model.Paragraph()]
+            for position, block in enumerate(paragraphs):
+                self._emit_paragraph(
+                    node, block, last=(position == len(paragraphs) - 1)
+                )
+        return _serialise(root)
 
     def _emit_image(
         self,

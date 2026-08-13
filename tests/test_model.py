@@ -347,3 +347,159 @@ class GradientTest(unittest.TestCase):
             ),
         )
         self.assertIn((255, 238, 221), doc.colors)
+
+
+def table_events(
+    columns: list, rows: list, *, x="1in", y="1in", width="5in", height="3in"
+) -> list:
+    """A table as libmspub reports one.
+
+    `columns` is a list of width strings; `rows` is a list of row specs,
+    each (height, cells) where a cell is (text, colspan, rowspan).
+    """
+    lines = [
+        event(
+            "startTableObject",
+            {
+                "svg:x": x, "svg:y": y, "svg:width": width, "svg:height": height,
+                "librevenge:table-columns": [
+                    {"style:column-width": w} for w in columns
+                ],
+            },
+        )
+    ]
+    for row_index, (height_value, cells) in enumerate(rows):
+        lines.append(event("openTableRow", {"librevenge:row-height": height_value}))
+        column = 0
+        for text, colspan, rowspan in cells:
+            props = {"librevenge:column": str(column), "librevenge:row": str(row_index)}
+            if colspan > 1:
+                props["table:number-columns-spanned"] = str(colspan)
+            if rowspan > 1:
+                props["table:number-rows-spanned"] = str(rowspan)
+            lines.append(event("openTableCell", props))
+            if text is not None:
+                lines += [
+                    event("openParagraph", {}),
+                    event("openSpan", {"fo:font-size": "10pt"}),
+                    event("insertText", text=text),
+                    event("closeSpan"),
+                    event("closeParagraph"),
+                ]
+            lines.append(event("closeTableCell"))
+            for covered in range(1, colspan):
+                lines.append(event(
+                    "insertCoveredTableCell",
+                    {"librevenge:column": str(column + covered),
+                     "librevenge:row": str(row_index)},
+                ))
+            column += colspan
+        lines.append(event("closeTableRow"))
+    lines.append(event("endTableObject"))
+    return lines
+
+
+class TableTest(unittest.TestCase):
+    """Publisher tables, which libmspub describes completely.
+
+    Column widths, row heights, cell coordinates and spans all arrive. They
+    used to be thrown away: every cell was flowed into one text frame as
+    consecutive paragraphs, so the copy survived and the grid did not.
+    """
+
+    def _table(self) -> model.Table:
+        doc = support.document(
+            *table_events(
+                ["2in", "1in"],
+                [
+                    ("0.5in", [("top left", 1, 1), ("top right", 1, 1)]),
+                    ("0.25in", [("spanning", 2, 1)]),
+                ],
+            )
+        )
+        return doc.pages[0].items[0]
+
+    def test_a_table_becomes_a_table_not_a_text_frame(self):
+        table = self._table()
+        self.assertIsInstance(table, model.Table)
+
+    def test_column_widths_are_converted_to_points(self):
+        self.assertEqual(self._table().column_widths, [144.0, 72.0])
+
+    def test_row_heights_are_converted_to_points(self):
+        self.assertEqual(self._table().row_heights, [36.0, 18.0])
+
+    def test_the_box_is_where_libmspub_put_it(self):
+        table = self._table()
+        self.assertEqual(
+            (table.x, table.y, table.width, table.height), (72.0, 72.0, 360.0, 216.0)
+        )
+
+    def test_each_cell_keeps_its_own_text(self):
+        cells = {(c.row, c.column): c for c in self._table().cells}
+        self.assertEqual(
+            [s.text for p in cells[(0, 0)].story.paragraphs for s in p.spans],
+            ["top left"],
+        )
+        self.assertEqual(
+            [s.text for p in cells[(0, 1)].story.paragraphs for s in p.spans],
+            ["top right"],
+        )
+
+    def test_a_span_is_recorded_and_covered_cells_are_not_cells(self):
+        table = self._table()
+        spanning = next(c for c in table.cells if c.row == 1)
+        self.assertEqual(spanning.column_span, 2)
+        self.assertEqual(spanning.column, 0)
+        # The covered cell must not turn up as a second cell in that row.
+        self.assertEqual(len([c for c in table.cells if c.row == 1]), 1)
+
+    def test_row_spans_are_recorded(self):
+        doc = support.document(
+            *table_events(
+                ["1in", "1in"],
+                [("0.5in", [("tall", 1, 2), ("beside", 1, 1)]),
+                 ("0.5in", [("under", 1, 1)])],
+            )
+        )
+        tall = next(c for c in doc.pages[0].items[0].cells if c.row == 0 and c.column == 0)
+        self.assertEqual(tall.row_span, 2)
+
+    def test_an_empty_cell_is_still_a_cell(self):
+        doc = support.document(
+            *table_events(["1in", "1in"], [("0.5in", [(None, 1, 1), ("x", 1, 1)])])
+        )
+        table = doc.pages[0].items[0]
+        self.assertEqual(len(table.cells), 2)
+        self.assertTrue(table.cells[0].story.is_empty())
+
+    def test_flattening_is_no_longer_reported(self):
+        doc = support.document(
+            *table_events(["1in"], [("0.5in", [("only", 1, 1)])])
+        )
+        self.assertEqual(
+            [w for w in doc.warnings if "flattened" in w], []
+        )
+
+
+class EmptyTableTest(unittest.TestCase):
+    """An empty grid contributes nothing, exactly as an empty frame does."""
+
+    def test_a_table_with_no_text_and_no_fill_is_dropped(self):
+        doc = support.document(
+            *table_events(["1in", "1in"], [("0.5in", [(None, 1, 1), (None, 1, 1)])])
+        )
+        self.assertEqual(doc.pages[0].items, [])
+
+    def test_a_table_with_any_text_is_kept(self):
+        doc = support.document(
+            *table_events(["1in", "1in"], [("0.5in", [(None, 1, 1), ("x", 1, 1)])])
+        )
+        self.assertEqual(len(doc.pages[0].items), 1)
+
+    def test_an_empty_table_with_a_fill_is_kept(self):
+        doc = support.document(
+            event("setStyle", {"draw:fill": "solid", "draw:fill-color": "#ff0000"}),
+            *table_events(["1in"], [("0.5in", [(None, 1, 1)])]),
+        )
+        self.assertEqual(len(doc.pages[0].items), 1)

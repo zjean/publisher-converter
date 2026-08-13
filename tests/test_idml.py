@@ -860,3 +860,102 @@ class GradientFillTest(unittest.TestCase):
         rectangle = next(spread.iter("Rectangle"))
         self.assertEqual(rectangle.get("FillColor"), "Color/C_010203")
         self.assertIsNone(rectangle.get("GradientFillAngle"))
+
+
+class TableOutputTest(unittest.TestCase):
+    """A model.Table has to become a real IDML Table inside its story."""
+
+    def _document(self) -> model.Document:
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        table = model.Table(
+            x=20.0, y=30.0, width=300.0, height=100.0,
+            column_widths=[100.0, 200.0],
+            row_heights=[40.0, 60.0],
+        )
+
+        def cell(row, column, text, **spans):
+            item = model.TableCell(row=row, column=column, **spans)
+            paragraph = model.Paragraph()
+            paragraph.spans.append(model.Span(text=text, size_pt=10.0))
+            item.story.paragraphs.append(paragraph)
+            return item
+
+        table.cells = [
+            cell(0, 0, "top left"),
+            cell(0, 1, "top right"),
+            cell(1, 0, "spanning", column_span=2),
+        ]
+        document.pages[0].items.append(table)
+        return document
+
+    def _parts(self):
+        path = write_package(self._document())
+        with zipfile.ZipFile(path) as archive:
+            story = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            spread = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            return (
+                ET.fromstring(archive.read(story)),
+                ET.fromstring(archive.read(spread)),
+            )
+
+    def test_the_story_holds_a_table(self):
+        story, _ = self._parts()
+        tables = list(story.iter("Table"))
+        self.assertEqual(len(tables), 1)
+        self.assertEqual(tables[0].get("ColumnCount"), "2")
+        self.assertEqual(tables[0].get("BodyRowCount"), "2")
+
+    def test_rows_and_columns_carry_their_measurements(self):
+        story, _ = self._parts()
+        table = next(story.iter("Table"))
+        self.assertEqual(
+            [r.get("SingleRowHeight") for r in table.iter("Row")], ["40", "60"]
+        )
+        self.assertEqual(
+            [c.get("SingleColumnWidth") for c in table.iter("Column")], ["100", "200"]
+        )
+
+    def test_cells_are_named_column_then_row(self):
+        story, _ = self._parts()
+        names = [c.get("Name") for c in next(story.iter("Table")).iter("Cell")]
+        self.assertEqual(names, ["0:0", "1:0", "0:1"])
+
+    def test_each_cell_carries_its_own_text(self):
+        story, _ = self._parts()
+        found = {}
+        for cell in next(story.iter("Table")).iter("Cell"):
+            found[cell.get("Name")] = "".join(
+                e.text or "" for e in cell.iter("Content")
+            )
+        self.assertEqual(found["0:0"], "top left")
+        self.assertEqual(found["1:0"], "top right")
+        self.assertEqual(found["0:1"], "spanning")
+
+    def test_a_span_is_written(self):
+        story, _ = self._parts()
+        spanning = next(
+            c for c in next(story.iter("Table")).iter("Cell") if c.get("Name") == "0:1"
+        )
+        self.assertEqual(spanning.get("ColumnSpan"), "2")
+        self.assertEqual(spanning.get("RowSpan"), "1")
+
+    def test_a_frame_on_the_page_holds_the_table_story(self):
+        story, spread = self._parts()
+        frames = list(spread.iter("TextFrame"))
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0].get("ParentStory"), story.find("Story").get("Self"))
+
+    def test_the_rows_come_before_the_columns_and_the_cells(self):
+        # IDML expects Row*, Column*, then Cell*.
+        story, _ = self._parts()
+        tags = [child.tag for child in next(story.iter("Table"))]
+        self.assertEqual(
+            tags, ["Row", "Row", "Column", "Column", "Cell", "Cell", "Cell"]
+        )
+
+    def test_the_package_is_well_formed(self):
+        path = write_package(self._document())
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                if name.endswith(".xml"):
+                    ET.fromstring(archive.read(name))

@@ -36,54 +36,45 @@ this, so it is inherent rather than a bug.
 
 ### Why this matters
 
-Surfaced by a conversion run of `1336 kerkbode.pub` after the metafile
-work landed. Everything else now collapses, which leaves the table
-warning as the only thing still crying wolf — 11 identical lines out of
-14 total:
+Less pressing than it was: the 11 identical "table flattened" lines that
+motivated this are gone, because tables are no longer flattened. What
+remains is a latent shape rather than a live problem — any warning emitted
+per-item rather than per-document will do the same thing again.
 
-```
-! table flattened to paragraphs: cell structure not preserved     x11
-! 4 repeated item(s) moved onto 4 master page(s) ...
-! WMF artwork dropped (4 drawing record(s), 64 copies): ...
-! 12 linked text frame(s) threaded into 2 story/stories: ...
-```
-
-This is exactly the pattern already fixed for metafiles in `6c8d0e5`,
-where 419 warnings across the corpus became 20. The table warning is
-emitted once per table in `model._on_startTableObject`, with no
-aggregation.
+The metafile path shows the pattern that works (`6c8d0e5`, where 419
+warnings across the corpus became 20): count by content, report once, and
+say how many copies were affected.
 
 ### Approach
 
-Two options, and the second is probably right:
-
-1. Aggregate at the source, as the metafile path does — count tables and
-   emit one warning when the document finishes.
-2. A general collapse step: fold identical warnings into one line with a
-   count, applied to every warning just before the report is written.
-
-Option 2 also covers anything added later, and is a few lines. But note
-that a purpose-written message reads better than a mechanical suffix —
-"11 tables flattened to paragraphs" beats "table flattened … (x11)" — so
-the general collapse may be worth pairing with a count placeholder the
-producer can fill in.
+Either aggregate at the source, as the metafile and threading passes now
+do, or add a general collapse step that folds identical warnings into one
+line with a count just before the report is written. The second covers
+anything added later and is a few lines, but a purpose-written message
+reads better than a mechanical suffix — "11 tables flattened" beats
+"table flattened … (x11)".
 
 Check `cli.py`'s report writer too: the CSV joins warnings with `; `, so
 whatever is done should shorten both the terminal output and the CSV.
 
 ---
 
-## 3. Real IDML tables instead of flattening
+## 3. Real IDML tables instead of flattening — **done**
 
-`1336 kerkbode.pub` alone contains 11 tables. Cells are currently flowed
-into a single frame as paragraphs: the copy survives, the grid does not
-(`model._on_startTableObject`, and the comment there explains the original
-trade-off).
+Landed in `model.Table` / `model.TableCell` and `idml._emit_table`. Nothing
+had to be inferred: libmspub reports a width per column, a height per row,
+and a row/column pair plus spans on every cell, and
+`insertCoveredTableCell` marks the cells a span hides.
 
-IDML has a full table model (`Table`, `Row`, `Column`, `Cell` inside the
-story), so this is faithful in principle but a genuinely large feature —
-worth scoping before starting. Item 2 above reduces the *noise* from this
-limitation; it does not fix the limitation.
+The corpus now carries 18 real tables across the three newsletters — the
+largest 41 rows by 5 columns, 182 cells, 19 of them spanning. Every
+counted field in the report is unchanged, which took extracting
+`convert._count_content`: a Table is not a TextFrame, so cell text had
+silently stopped being counted while being present in the package.
+
+Still not carried, because libmspub reports none of it: per-cell fill,
+rule weights and colours, and cell insets. A ruled or shaded table arrives
+with Affinity's default styling.
 
 ---
 
