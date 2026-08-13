@@ -38,6 +38,32 @@ Splitting at the JSON boundary keeps all binary-format handling in the
 one library that already solves it, and leaves document reconstruction
 in Python where it is easy to test and extend.
 
+## Why IDML and not Affinity's own format
+
+Affinity's native documents — `.afpub`, and the unified `.af` of the
+single Affinity app — are closed binary serialisations of Affinity's
+internal document model. There is no published specification and no
+supported way to author one from outside the app, and the format moves
+with each release, so anything reverse-engineered would need proving
+again every time Affinity updates.
+
+IDML is Adobe's *interchange* format, and interchange is the whole point
+of it: a ZIP of plain XML parts (`designmap.xml`, `Spreads/`, `Stories/`,
+`Resources/Styles.xml`), publicly specified, stable across versions, and
+imported natively by Affinity Publisher. `pubidml/idml.py` writes it with
+`zipfile` and string templates — which is why this tool needs no
+third-party Python packages at all.
+
+Two things follow, and both are visible elsewhere in this README. One
+manual step survives: open the `.idml` in Affinity and save as its own
+format, which is also what turns the `_images` sidecar into embedded
+artwork. And everything travels through InDesign's document model, so
+whatever Publisher expresses that IDML cannot — or that Affinity's IDML
+importer does not honour — is lost in the crossing. That is what
+*Known limitations* is a list of. Since Affinity's importer cannot be
+unit-tested, the answers come from probe packages built by the scripts
+in `research/` and read off by hand in Affinity.
+
 ## Install
 
 ### macOS
