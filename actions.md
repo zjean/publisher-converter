@@ -423,3 +423,151 @@ document that does.
 
 Worth filing at <https://bugs.documentfoundation.org/> against the
 libmspub component.
+
+---
+
+## 8. Identify the empty headline frames  ⏰ needs Publisher, before 1 Oct 2026
+
+### Why this matters
+
+Converting `1336 kerkbode.pub` loses most of its headlines. Everything
+else about that file now reconciles exactly, so this is the last unexplained
+content loss in the sample set, and it is the most visible one — a
+newsletter without its headings.
+
+The cause is upstream: libmspub reports the frames but hands over **no
+text for them**. They are then dropped, correctly by the rules the
+converter has, because an empty frame with no fill and no stroke
+contributes nothing (`model._on_endTextObject`). What is not known is
+*why* the text is missing, and that determines whether it is recoverable
+at all.
+
+### What is already known
+
+Established here; don't re-derive it.
+
+- **36 of 101 `startTextObject` events carry no `insertText` at all.** The
+  parser opens the object, sets its geometry, and closes it again.
+- **15 of those are headline-shaped**, on a page 421.0 x 595.0 pt (A5).
+  Most sit at the very top of a page, the rest between articles:
+
+  ```
+  page    x      y      w      h
+     3    6.3  418.3  392.8   33.4
+     3   37.3   30.6  346.3   32.0
+     4   45.4  285.1  336.0   41.8
+     5   24.6   34.6  373.4   32.4
+     5   14.8  313.9  380.8   32.5
+     5   15.1  478.9  372.5   28.9
+     7   21.5   34.7  356.2   36.1
+     7   21.5  277.8  371.3   32.9
+     9   38.6   37.8  347.1   31.1
+    11  102.5   -6.0  295.5   91.6
+    11   91.8   -1.6  331.2   47.8
+    15   38.1   41.9  337.5   40.8
+    19   35.2   45.0  350.6   39.7
+    24   30.4   27.6  360.2   26.2
+    26   36.3   33.7  352.3   34.9
+  ```
+
+- **Nothing else in the file is being lost.** The pipeline reconciles:
+  132 `drawPolygon` events are 59 real shapes plus 73 carrying pictures,
+  and text frames falling 86 -> 63 is entirely the page-number footer
+  being lifted onto four masters. The only other loss is 64 WMF ornaments
+  of 8.3 x 8.3 pt, all on page 8, which are not headers.
+- **No headline text is sitting unread in the file's text streams.** Every
+  string in the `.pub`, in both Latin-1 and UTF-16LE, was diffed against
+  the 1,427 distinct words the conversion delivers. The only unmatched
+  candidates are object names — `randillustratie`, `prlogo`,
+  `advertentie`, `websiteformulier` — not headline copy. So the text is
+  either somewhere the string scan cannot see it, or it is not stored as
+  text at all.
+
+Regenerate the table with:
+
+```sh
+python3 - <<'EOF'
+import json, subprocess
+src = "files/cgk/1336 kerkbode.pub"
+out = subprocess.run(["./bin/pubdump", src], capture_output=True).stdout
+page = 0; cur = None; had = False
+print("page    x      y      w      h")
+for line in out.decode("utf8", "replace").splitlines():
+    try: e = json.loads(line)
+    except Exception: continue
+    if e["e"] == "startPage": page += 1
+    elif e["e"] == "startTextObject": cur, had = e.get("p", {}), False
+    elif e["e"] == "insertText" and e.get("t", "").strip(): had = True
+    elif e["e"] == "endTextObject":
+        pt = lambda v: round(float(str(v).replace("in", "")) * 72, 1) if v else 0.0
+        if not had and cur and pt(cur.get("svg:width")) > 200:
+            print(f'{page:>4} {pt(cur.get("svg:x")):6.1f} {pt(cur.get("svg:y")):6.1f} '
+                  f'{pt(cur.get("svg:width")):6.1f} {pt(cur.get("svg:height")):6.1f}')
+        cur = None
+EOF
+```
+
+### Step 1 — look at one of them (on Windows, with Publisher, ~5 min)
+
+Open `1336 kerkbode.pub`. Go to **page 3** and look at the top of the
+page: the frame is 346 x 32 pt at 37, 31 — a little over half an inch
+down, spanning nearly the full text width. Page 5 has three of them and is
+the best page to compare on.
+
+Click the headline and note:
+
+1. **What kind of object is it?** The Publisher status bar and the ribbon
+   name it. The candidates that matter:
+   - a plain **text box** → the text should have come through, so this is
+     a libmspub bug worth reducing to a minimal file and reporting
+   - **WordArt** → the text lives in an Escher shape, not the Quill text
+     stream, which is why a string scan does not find it
+   - a **grouped** object, or a text box with a **fill or outline** → then
+     the frame should not have been dropped at all, and the bug is ours
+   - a **picture** of the headline → nothing to recover; it should be
+     arriving through the image path instead
+2. **The exact words**, verbatim including capitalisation. That is what
+   makes the next step possible.
+3. Whether the text is **rotated or on a path**, and whether the font is
+   anything unusual.
+
+### Step 2 — find the words in the file (on the Mac, ~2 min)
+
+With the exact headline text from step 1:
+
+```sh
+python3 - <<'EOF'
+needle = "PASTE THE HEADLINE HERE"
+raw = open("files/cgk/1336 kerkbode.pub", "rb").read()
+for enc in ("latin-1", "utf-16-le", "utf-8", "cp1252"):
+    hit = raw.find(needle.encode(enc, "ignore"))
+    print(f"{enc:<10} {'at 0x%x' % hit if hit >= 0 else 'not found'}")
+EOF
+```
+
+Then read the result:
+
+- **Found** → the text is in the file and libmspub is walking past it.
+  Which stream it lands in says where: compare the offset against the
+  `Contents`, `CONTENTS` (Quill) and `Escher/EscherStm` stream extents,
+  which `pubfile._read_stream` can already pull out. If it is in Quill,
+  the converter can reach it the same way it already reads master
+  structure and the field table — that is a real fix, on this machine.
+- **Not found in any encoding** → the headline is not stored as text.
+  Most likely WordArt, holding its own glyph outline or a compressed
+  copy. Recovering it would mean decoding that, which is a much larger
+  job; the honest interim is to *warn* rather than silently drop, so the
+  operator knows a headline needs retyping.
+
+### Step 3 — wire in whichever answer it is
+
+If the text is reachable, it joins `pubfile.py`, which exists for exactly
+this: things the file says that libmspub does not pass on. If it is not,
+add a warning where the empty frame is dropped — a wide, short, empty
+frame at the top of a page is a specific enough shape to report as a
+probable lost headline, and that is strictly better than the current
+silence.
+
+Either way, **stop dropping these silently**. That is the part that does
+not need Publisher, and it is what turned this into a surprise rather
+than a line in the report.
