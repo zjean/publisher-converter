@@ -33,12 +33,18 @@ def page(width: str = "8.5in", height: str = "11in") -> list:
     return [event("startPage", {"svg:width": width, "svg:height": height})]
 
 
-def text_frame(*runs: str, x: str = "1in", y: str = "1in") -> list:
+def text_frame(
+    *runs: str,
+    x: str = "1in",
+    y: str = "1in",
+    width: str = "3in",
+    height: str = "2in",
+) -> list:
     """A single text frame carrying one paragraph of one span per run."""
     lines = [
         event(
             "startTextObject",
-            {"svg:x": x, "svg:y": y, "svg:width": "3in", "svg:height": "2in"},
+            {"svg:x": x, "svg:y": y, "svg:width": width, "svg:height": height},
         ),
         event("openParagraph", {}),
         event("openSpan", {"style:font-name": "Arial", "fo:font-size": "12pt"}),
@@ -52,6 +58,14 @@ def text_frame(*runs: str, x: str = "1in", y: str = "1in") -> list:
 def document(*body: str) -> model.Document:
     """Wrap body events in a complete, well-terminated stream."""
     return build(*(page() + list(body) + [event("endPage"), event("endDocument")]))
+
+
+def paged_document(*bodies: list) -> model.Document:
+    """One page per body, so cross-page behaviour can be exercised."""
+    lines: list = []
+    for body in bodies:
+        lines += page() + list(body) + [event("endPage")]
+    return build(*(lines + [event("endDocument")]))
 
 
 def only_span(doc: model.Document) -> model.Span:

@@ -377,9 +377,21 @@ These are real and deliberate, not bugs to be surprised by later.
   guides, no baseline grid — so Affinity applies its own defaults.
 - **Text frames become single-column** and **facing pages are not set**,
   so a booklet or 2-up layout arrives as single pages.
-- **Story threading is not reconstructed.** Each Publisher text frame
-  becomes its own IDML story, so text that flowed from frame to frame no
-  longer reflows across them.
+- **Story threading is inferred, not read.** librevenge's drawing
+  interface cannot say "this frame continues that one", so libmspub hands
+  the *complete* story to every frame in a linked chain — one sample
+  carried the same 11,121-character article eight times, 73% of that
+  file's apparent text. Written through verbatim that puts the article on
+  the page once per frame, each one overset. The converter instead
+  recognises a chain by the one thing that distinguishes it from a
+  genuinely repeated label: the story does not fit the frame holding it,
+  which is *why* the boxes were linked. Those frames are threaded into a
+  single IDML story that reflows across them, in page order. A repeated
+  caption or a page-number field fits its frame and is left alone. Two
+  consequences worth knowing: a chain whose text happens to fit its first
+  frame is not detected and still arrives duplicated, and the link order
+  is page order, so an article that flowed against the page sequence needs
+  re-linking by hand. Files where this fires are flagged `review`.
 - **Groups are flattened.** Children keep their absolute positions;
   nothing moves, but the grouping is gone.
 - **Gradients collapse to their first stop**, and elliptical arcs are

@@ -405,6 +405,92 @@ def _apply_master_pages(
         )
 
 
+def _frame_text(frame: model.TextFrame) -> str:
+    return "".join(
+        span.text
+        for paragraph in frame.story.paragraphs
+        for span in paragraph.spans
+    )
+
+
+def _point_size(frame: model.TextFrame) -> float:
+    sizes = [
+        span.size_pt
+        for paragraph in frame.story.paragraphs
+        for span in paragraph.spans
+        if span.size_pt
+    ]
+    return (sum(sizes) / len(sizes)) if sizes else 10.0
+
+
+def _frame_capacity(frame: model.TextFrame, point_size: Optional[float] = None) -> float:
+    """Roughly how many characters the frame can show.
+
+    Average glyph advance ~0.5em and leading ~1.2em. Only the order of
+    magnitude matters to the callers, both of which are asking "does this
+    text plainly not fit?". `point_size` is passed in for a frame that
+    carries no text of its own to measure — a link continuing a chain.
+    """
+    if point_size is None:
+        point_size = _point_size(frame)
+    columns = frame.width / max(1e-6, 0.5 * point_size)
+    rows = frame.height / max(1e-6, 1.2 * point_size)
+    return max(0.0, columns * rows)
+
+
+def _thread_duplicate_stories(document: model.Document) -> None:
+    """Collapse a story duplicated across linked frames into one chain.
+
+    Publisher lets an article flow through a row of linked text boxes.
+    librevenge's drawing interface has no way to say "this frame continues
+    that one", so libmspub hands the *complete* story to every frame in the
+    chain -- one sample carries an 11,121-character article eight times, 73%
+    of that file's apparent text. Written through verbatim, the reader gets
+    the article once per frame, each one overset.
+
+    The frames are threaded instead: the first keeps the text and the rest
+    continue it, which is what IDML models natively.
+
+    Identical text alone is not enough to infer a chain -- a page-number
+    field repeats a single "#" across every page, and a running header
+    repeats its title. Those are genuine copies, and blanking all but the
+    first would erase them. What distinguishes a chain is that the story
+    cannot fit the frame holding it: that is *why* the boxes were linked.
+    So a group is threaded only when the text oversets even the roomiest
+    frame in it, which leaves repeated labels alone.
+    """
+    groups: dict = {}
+    for page in document.pages:
+        for item in model._walk(page.items):
+            if not isinstance(item, model.TextFrame):
+                continue
+            text = _frame_text(item)
+            if text.strip():
+                groups.setdefault(text, []).append(item)
+
+    for text, frames in groups.items():
+        if len(frames) < 2:
+            continue
+        if len(text) <= max(_frame_capacity(frame) for frame in frames):
+            continue
+
+        chain_id = f"chain{len(document.text_chains) + 1}"
+        document.text_chains[chain_id] = frames
+        for position, frame in enumerate(frames):
+            frame.chain_id = chain_id
+            if position:
+                # The text lives on the first link; the others continue it.
+                frame.story = model.Story()
+
+    if document.text_chains:
+        threaded = sum(len(c) for c in document.text_chains.values())
+        document.warnings.append(
+            f"{threaded} linked text frame(s) threaded into "
+            f"{len(document.text_chains)} story/stories: check where the text "
+            f"breaks between frames"
+        )
+
+
 def _check_overset_text(document: model.Document) -> None:
     """Flag text frames far too small to show the text they contain.
 
@@ -413,30 +499,30 @@ def _check_overset_text(document: model.Document) -> None:
     characters, which Affinity renders as an empty box. Guessing the
     intended geometry would be inventing layout, so the frame is left
     alone and the operator is told exactly which file needs a human.
+
+    A threaded story is measured against the whole chain, since that is
+    what has to hold it. Checking each link on its own reported a normal
+    linked article as a degenerate frame.
     """
     for page in document.pages:
         for item in model._walk(page.items):
             if not isinstance(item, model.TextFrame):
                 continue
-            characters = sum(
-                len(span.text)
-                for paragraph in item.story.paragraphs
-                for span in paragraph.spans
-            )
+            characters = len(_frame_text(item))
             if characters < 20:
                 continue
 
-            sizes = [
-                span.size_pt
-                for paragraph in item.story.paragraphs
-                for span in paragraph.spans
-                if span.size_pt
-            ]
-            point_size = (sum(sizes) / len(sizes)) if sizes else 10.0
-            # Rough capacity: average glyph advance ~0.5em, leading ~1.2em.
-            columns = item.width / max(1e-6, 0.5 * point_size)
-            rows = item.height / max(1e-6, 1.2 * point_size)
-            capacity = max(0.0, columns * rows)
+            if item.chain_id:
+                # Only the head of a chain holds text, so this runs once per
+                # chain — measured against every link's room, at the head's
+                # type size since the others have no text left to measure.
+                size = _point_size(item)
+                capacity = sum(
+                    _frame_capacity(frame, size)
+                    for frame in document.text_chains[item.chain_id]
+                )
+            else:
+                capacity = _frame_capacity(item)
 
             if characters > 10 * max(capacity, 1.0):
                 document.warnings.append(
@@ -493,6 +579,10 @@ def _convert(
     textrepair.repair_document(document, codepage)
     _apply_master_pages(document, pubfile.read_structure(source))
     _rasterise_metafiles(document)
+    # After the master pass: threading empties the continuation frames, and
+    # a run of identical empty frames is exactly what master lifting looks
+    # for, so doing this first would sweep the chain onto a master spread.
+    _thread_duplicate_stories(document)
     _check_overset_text(document)
 
     writer = idml.IdmlWriter(

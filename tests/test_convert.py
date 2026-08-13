@@ -173,6 +173,117 @@ class RasteriseWalkTest(unittest.TestCase):
         self.assertIn(outer, survivors)
 
 
+class ThreadDuplicateStoriesTest(unittest.TestCase):
+    """Linked Publisher text boxes arrive as one story duplicated per frame.
+
+    librevenge's drawing interface has no notion of a threaded frame, so
+    libmspub hands the complete story to every frame in the chain. Writing
+    those through verbatim puts the same article on the page N times.
+    """
+
+    LONG = "word " * 300  # 1500 chars: far past a 3x2in frame at 12pt
+
+    def _chain_of(self, count: int, text: str, **frame) -> model.Document:
+        pages = [support.text_frame(text, **frame) for _ in range(count)]
+        return support.paged_document(*pages)
+
+    def _frames(self, document: model.Document):
+        return [
+            item
+            for page in document.pages
+            for item in model._walk(page.items)
+            if isinstance(item, model.TextFrame)
+        ]
+
+    def test_a_duplicated_overset_story_becomes_one_chain(self):
+        document = self._chain_of(3, self.LONG)
+        convert._thread_duplicate_stories(document)
+
+        frames = self._frames(document)
+        chain_ids = {frame.chain_id for frame in frames}
+        self.assertEqual(len(chain_ids), 1)
+        self.assertNotIn(None, chain_ids)
+        self.assertEqual([len(c) for c in document.text_chains.values()], [3])
+
+    def test_only_the_first_frame_of_a_chain_keeps_the_text(self):
+        document = self._chain_of(3, self.LONG)
+        convert._thread_duplicate_stories(document)
+
+        first, *rest = self._frames(document)
+        self.assertFalse(first.story.is_empty())
+        for frame in rest:
+            self.assertTrue(frame.story.is_empty())
+
+    def test_chain_order_follows_the_page_order_of_the_frames(self):
+        document = self._chain_of(4, self.LONG)
+        convert._thread_duplicate_stories(document)
+
+        chain = next(iter(document.text_chains.values()))
+        self.assertEqual(chain, self._frames(document))
+
+    def test_a_repeated_label_that_fits_its_frame_is_left_alone(self):
+        # The page-number field is the motivating case: one sample repeats a
+        # single "#" across 27 frames. Threading those would move 26 of them
+        # into a chain and blank the page numbers.
+        document = self._chain_of(5, "#")
+        convert._thread_duplicate_stories(document)
+
+        frames = self._frames(document)
+        self.assertEqual({frame.chain_id for frame in frames}, {None})
+        for frame in frames:
+            self.assertFalse(frame.story.is_empty())
+
+    def test_a_story_appearing_once_is_never_threaded(self):
+        document = self._chain_of(1, self.LONG)
+        convert._thread_duplicate_stories(document)
+
+        self.assertEqual(self._frames(document)[0].chain_id, None)
+        self.assertEqual(document.text_chains, {})
+
+    def test_distinct_stories_are_not_merged(self):
+        document = support.paged_document(
+            support.text_frame(self.LONG),
+            support.text_frame(self.LONG.replace("word", "other")),
+        )
+        convert._thread_duplicate_stories(document)
+
+        self.assertEqual({f.chain_id for f in self._frames(document)}, {None})
+
+    def test_master_frames_are_not_drawn_into_a_page_chain(self):
+        document = self._chain_of(2, self.LONG)
+        master = model.Master(name="A")
+        master.items.append(self._frames(document)[0].__class__(
+            width=216.0, height=144.0, story=document.pages[0].items[0].story
+        ))
+        document.masters.append(master)
+        convert._thread_duplicate_stories(document)
+
+        chain = next(iter(document.text_chains.values()))
+        self.assertEqual(len(chain), 2)
+        self.assertNotIn(master.items[0], chain)
+
+    def test_a_threaded_chain_no_longer_reports_a_too_small_frame(self):
+        # The combined capacity of the chain is what has to hold the story,
+        # so the per-frame warning was misreading a threaded article as a
+        # degenerate frame size.
+        document = self._chain_of(8, self.LONG)
+        convert._thread_duplicate_stories(document)
+        convert._check_overset_text(document)
+
+        self.assertEqual(
+            [w for w in document.warnings if "too small" in w], []
+        )
+
+    def test_a_genuinely_degenerate_frame_is_still_reported(self):
+        document = support.document(
+            *support.text_frame(self.LONG, width="0.08in", height="0.08in")
+        )
+        convert._thread_duplicate_stories(document)
+        convert._check_overset_text(document)
+
+        self.assertEqual(len([w for w in document.warnings if "too small" in w]), 1)
+
+
 @needs_parser
 class RealFileTest(unittest.TestCase):
     """End-to-end against the actual libmspub parser."""

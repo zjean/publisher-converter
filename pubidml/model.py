@@ -15,7 +15,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from . import metafile, units
 
@@ -167,6 +167,10 @@ class TextFrame(Item):
     story: Story = field(default_factory=Story)
     padding: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)  # t r b l
     vertical_align: str = "top"
+    # Set when this frame is one link in a threaded story; every frame
+    # sharing the id shows one story between them, in the order recorded in
+    # Document.text_chains. Only the first link carries the text.
+    chain_id: Optional[str] = None
 
 
 @dataclass
@@ -262,6 +266,8 @@ class Document:
     masters: List["Master"] = field(default_factory=list)
     title: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
+    # chain id -> the frames of one threaded story, in reading order.
+    text_chains: Dict[str, List[TextFrame]] = field(default_factory=dict)
     # True once the parser's endDocument event has been seen. A stream that
     # is cut on a line boundary otherwise replays as a syntactically perfect
     # but silently short document, which would be reported as a success.

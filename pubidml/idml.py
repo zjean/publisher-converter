@@ -33,7 +33,7 @@ import math
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, NamedTuple, Optional
 from urllib.parse import quote
 
 from . import imagemeta, model
@@ -223,6 +223,16 @@ class _Ids:
         return f"{prefix}{self._n}"
 
 
+class _ChainLink(NamedTuple):
+    """One frame's place in a threaded story."""
+
+    story_id: str
+    self_id: str
+    previous: str  # a frame Self id, or "n" at the head
+    following: str  # a frame Self id, or "n" at the tail
+    head: bool  # the link that carries the text
+
+
 class IdmlWriter:
     """Renders a `model.Document` into an IDML package on disk.
 
@@ -246,6 +256,11 @@ class IdmlWriter:
         # (relative path, bytes) pairs the caller must write next to the IDML
         self.image_files: List[tuple] = []
         self._parts: Dict[str, bytes] = {}
+        # id(frame) -> _ChainLink, for the frames of a threaded story. Keyed
+        # by identity, not equality: the continuation links of a chain hold no
+        # text and often share their geometry, so as dataclasses they compare
+        # equal to one another and a lookup by value would conflate them.
+        self._chain_links: Dict[int, _ChainLink] = {}
 
     # -- public API -------------------------------------------------------
 
@@ -274,6 +289,7 @@ class IdmlWriter:
 
     def _build(self) -> None:
         self._collect_resources()
+        self._plan_text_chains()
 
         spread_parts: List[str] = []
         story_parts: List[str] = []
@@ -305,6 +321,29 @@ class IdmlWriter:
     @staticmethod
     def master_id(name: str) -> str:
         return f"master{name}"
+
+    def _plan_text_chains(self) -> None:
+        """Assign ids for threaded stories before any spread is written.
+
+        A chain runs across pages, so a frame has to name a successor that
+        lives in a spread part not yet built. Allocating the whole chain's
+        ids up front is what makes those forward references possible.
+        """
+        for chain_id, frames in self.doc.text_chains.items():
+            story_id = self.ids.next("story")
+            frame_ids = [self.ids.next() for _ in frames]
+            for position, frame in enumerate(frames):
+                self._chain_links[id(frame)] = _ChainLink(
+                    story_id=story_id,
+                    self_id=frame_ids[position],
+                    previous=frame_ids[position - 1] if position else "n",
+                    following=(
+                        frame_ids[position + 1]
+                        if position + 1 < len(frame_ids)
+                        else "n"
+                    ),
+                    head=position == 0,
+                )
 
     def _collect_resources(self) -> None:
         self.fonts = self.doc.fonts
@@ -653,11 +692,17 @@ class IdmlWriter:
         elif isinstance(item, model.Rectangle):
             self._emit_shape(spread, item, page, "Rectangle")
 
-    def _frame_attributes(self, item: model.Item, page: model.Page, object_style: str) -> dict:
+    def _frame_attributes(
+        self,
+        item: model.Item,
+        page: model.Page,
+        object_style: str,
+        self_id: Optional[str] = None,
+    ) -> dict:
         centre_x = item.x + item.width / 2.0 - page.width / 2.0
         centre_y = item.y + item.height / 2.0 - page.height / 2.0
         attributes = {
-            "Self": self.ids.next(),
+            "Self": self_id or self.ids.next(),
             "ItemTransform": _matrix(item.rotation, centre_x, centre_y),
             "AppliedObjectStyle": f"ObjectStyle/{object_style}",
             "FillColor": self._color_ref(item.style.fill),
@@ -705,14 +750,23 @@ class IdmlWriter:
         page: model.Page,
         story_parts: List[str],
     ) -> None:
-        story_id = self.ids.next("story")
-        attributes = self._frame_attributes(frame, page, "$ID/[Normal Text Frame]")
+        link = self._chain_links.get(id(frame))
+        if link is None:
+            story_id = self.ids.next("story")
+            self_id, previous, following = None, "n", "n"
+        else:
+            story_id = link.story_id
+            self_id, previous, following = link.self_id, link.previous, link.following
+
+        attributes = self._frame_attributes(
+            frame, page, "$ID/[Normal Text Frame]", self_id
+        )
         attributes.update(
             {
                 "ContentType": "TextType",
                 "ParentStory": story_id,
-                "PreviousTextFrame": "n",
-                "NextTextFrame": "n",
+                "PreviousTextFrame": previous,
+                "NextTextFrame": following,
             }
         )
         element = ET.SubElement(spread, "TextFrame", attributes)
@@ -733,9 +787,13 @@ class IdmlWriter:
             },
         )
 
-        part_name = f"Stories/Story_{story_id}.xml"
-        story_parts.append(part_name)
-        self._parts[part_name] = self._story_part(story_id, frame.story)
+        # A chain's text belongs to the story, not to each frame that shows
+        # it, so it is written once — at the head, the only link still
+        # holding the paragraphs.
+        if link is None or link.head:
+            part_name = f"Stories/Story_{story_id}.xml"
+            story_parts.append(part_name)
+            self._parts[part_name] = self._story_part(story_id, frame.story)
 
     def _emit_image(self, spread: ET.Element, item: model.Image, page: model.Page) -> None:
         # Anything not in the table has no IDML representation. Emitting it

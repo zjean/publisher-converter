@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from pubidml import idml, model
+from pubidml import convert, idml, model
 
 from . import support
 from .support import event
@@ -338,6 +338,90 @@ class StructureTest(unittest.TestCase):
         self.assertTrue(referenced)
         for src in referenced:
             self.assertIn(src, names, f"designmap references missing part {src}")
+
+
+class ThreadedStoryTest(unittest.TestCase):
+    """A threaded story must be written once and flowed through its frames."""
+
+    LONG = "word " * 300
+
+    def _threaded_package(self, count: int = 4):
+        document = support.paged_document(
+            *[support.text_frame(self.LONG) for _ in range(count)]
+        )
+        convert._thread_duplicate_stories(document)
+        return write_package(document)
+
+    @staticmethod
+    def _text_frames(archive) -> list:
+        """Every TextFrame in the package, in spread order."""
+        frames = []
+        for name in sorted(
+            n for n in archive.namelist() if n.startswith("Spreads/")
+        ):
+            spread = ET.fromstring(archive.read(name))
+            frames += spread.iter("TextFrame")
+        return frames
+
+    def test_the_chain_shares_a_single_story(self):
+        with zipfile.ZipFile(self._threaded_package()) as archive:
+            frames = self._text_frames(archive)
+            stories = {f.get("ParentStory") for f in frames}
+        self.assertEqual(len(frames), 4)
+        self.assertEqual(len(stories), 1)
+
+    def test_the_text_is_written_exactly_once(self):
+        with zipfile.ZipFile(self._threaded_package()) as archive:
+            parts = [n for n in archive.namelist() if n.startswith("Stories/")]
+            carrying = [
+                n for n in parts if b"word" in archive.read(n)
+            ]
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(len(carrying), 1)
+
+    def test_the_frames_are_linked_head_to_tail(self):
+        with zipfile.ZipFile(self._threaded_package()) as archive:
+            frames = self._text_frames(archive)
+
+        selves = [f.get("Self") for f in frames]
+        previous = [f.get("PreviousTextFrame") for f in frames]
+        following = [f.get("NextTextFrame") for f in frames]
+
+        self.assertEqual(previous, ["n"] + selves[:-1])
+        self.assertEqual(following, selves[1:] + ["n"])
+
+    def test_every_link_reference_resolves_to_a_frame_in_the_package(self):
+        with zipfile.ZipFile(self._threaded_package()) as archive:
+            frames = self._text_frames(archive)
+        known = {f.get("Self") for f in frames}
+        for frame in frames:
+            for attribute in ("PreviousTextFrame", "NextTextFrame"):
+                reference = frame.get(attribute)
+                if reference != "n":
+                    self.assertIn(reference, known)
+
+    def test_the_designmap_still_lists_the_shared_story(self):
+        path = self._threaded_package()
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            designmap = ET.fromstring(archive.read("designmap.xml"))
+            story_part = next(n for n in names if n.startswith("Stories/"))
+        referenced = {e.get("src") for e in designmap if e.get("src") is not None}
+        self.assertIn(story_part, referenced)
+
+    def test_an_unthreaded_document_is_written_as_before(self):
+        document = support.paged_document(
+            support.text_frame("one"), support.text_frame("two")
+        )
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            frames = self._text_frames(archive)
+            parts = [n for n in archive.namelist() if n.startswith("Stories/")]
+        self.assertEqual(len(parts), 2)
+        self.assertEqual({f.get("ParentStory") for f in frames}.__len__(), 2)
+        for frame in frames:
+            self.assertEqual(frame.get("PreviousTextFrame"), "n")
+            self.assertEqual(frame.get("NextTextFrame"), "n")
 
 
 if __name__ == "__main__":
