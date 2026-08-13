@@ -205,8 +205,22 @@ def _rect_path(parent: ET.Element, width: float, height: float) -> None:
 
 
 def _path_from_anchors(parent: ET.Element, anchors, closed: bool) -> None:
-    """Emit a PathGeometry from (x, y, left_handle, right_handle) tuples."""
+    """Emit a PathGeometry holding one outline."""
+    _path_from_subpaths(parent, [(anchors, closed)])
+
+
+def _path_from_subpaths(parent: ET.Element, subpaths) -> None:
+    """Emit a PathGeometry holding one outline per subpath.
+
+    A compound path is several GeometryPathType entries inside a single
+    PathGeometry, which is how IDML represents disjoint outlines.
+    """
     geometry = ET.SubElement(parent, "PathGeometry")
+    for anchors, closed in subpaths:
+        _geometry_path(geometry, anchors, closed)
+
+
+def _geometry_path(geometry: ET.Element, anchors, closed: bool) -> None:
     path = ET.SubElement(
         geometry, "GeometryPathType", {"PathOpen": "false" if closed else "true"}
     )
@@ -803,9 +817,9 @@ class IdmlWriter:
         elif isinstance(item, model.Path) and item.ops:
             offset_x = item.x + item.width / 2.0
             offset_y = item.y + item.height / 2.0
-            anchors, closed = _anchors_from_ops(item.ops, offset_x, offset_y)
-            if anchors:
-                _path_from_anchors(properties, anchors, closed=closed)
+            subpaths = _subpaths_from_ops(item.ops, offset_x, offset_y)
+            if subpaths:
+                _path_from_subpaths(properties, subpaths)
             else:
                 _rect_path(properties, item.width, item.height)
         else:
@@ -1120,19 +1134,33 @@ def _flatten(items: List[model.Item]) -> List[model.Item]:
     return output
 
 
-def _anchors_from_ops(ops: List[tuple], offset_x: float, offset_y: float):
-    """Convert normalised path operations into IDML path points.
+def _subpaths_from_ops(ops: List[tuple], offset_x: float, offset_y: float):
+    """Split normalised path operations into subpaths of IDML path points.
 
     IDML expresses curves as anchors with incoming/outgoing direction
     handles rather than as separate segment records, so cubic control
     points are folded onto the anchors they belong to.
+
+    Every "M" starts a new subpath, and each is emitted separately. Running
+    them together is not a harmless simplification: libmspub reports most
+    Publisher paths as disconnected edges -- 50 of the 56 in the sample
+    corpus -- and welding two horizontal rules into one outline drew a
+    filled bowtie across the page instead of two lines.
     """
+    subpaths: List[tuple] = []
     anchors: List[list] = []
     closed = False
+
+    def finish() -> None:
+        nonlocal anchors, closed
+        if len(anchors) >= 2:
+            subpaths.append(([tuple(a) for a in anchors], closed))
+        anchors, closed = [], False
 
     for op in ops:
         kind = op[0]
         if kind == "M":
+            finish()
             anchors.append([op[1] - offset_x, op[2] - offset_y, None, None])
         elif kind == "L":
             anchors.append([op[1] - offset_x, op[2] - offset_y, None, None])
@@ -1149,6 +1177,5 @@ def _anchors_from_ops(ops: List[tuple], offset_x: float, offset_y: float):
         elif kind == "Z":
             closed = True
 
-    if len(anchors) < 2:
-        return [], closed
-    return [tuple(a) for a in anchors], closed
+    finish()
+    return subpaths

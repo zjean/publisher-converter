@@ -413,6 +413,16 @@ These are real and deliberate, not bugs to be surprised by later.
   through `emf2svg-conv` and ImageMagick, and is dropped with a warning
   when they are absent. The same translator could be pointed at EMF
   records, which are a cleaner format.
+- **Some Publisher paths arrive as disconnected edges and cannot be
+  filled.** libmspub reports most paths as several subpaths — 50 of the 56
+  in the sample corpus — and where each is a bare two-point segment, a fill
+  has no area to cover and the shape draws nothing. Each subpath is written
+  as its own outline, which is what the path data says; joining them would
+  invent geometry, and doing so used to draw a filled bowtie across the
+  page. Files where this happens are flagged `review` with a count, because
+  something was drawn there in Publisher and it needs redrawing by hand.
+  In the newsletters these sit in the headline bands, so they may well be
+  the same objects as the empty headline frames — `actions.md` item 8.
 - **CJK text is not repaired.** The code page detector (see below) works
   on alphabetic scripts, where letter frequency is a usable signal. For
   Chinese, Japanese and Korean it declines to guess rather than risk

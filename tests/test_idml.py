@@ -345,6 +345,92 @@ class StructureTest(unittest.TestCase):
             self.assertIn(src, names, f"designmap references missing part {src}")
 
 
+class SubpathTest(unittest.TestCase):
+    """A path with several subpaths must not be welded into one outline.
+
+    libmspub reports most Publisher paths as disconnected edges -- 50 of
+    the 56 paths in the sample corpus have more than one subpath. Joining
+    them end to end turned two horizontal rules into a filled bowtie
+    stretched across the page, which is worse than drawing nothing.
+    """
+
+    # Two horizontal rules, 31.5pt apart, exactly as libmspub reports the
+    # ones on page 4 of 1336 kerkbode.pub.
+    TWO_RULES = [
+        ("M", 172.4, 292.1), ("L", 342.9, 292.1), ("Z",), ("Z",),
+        ("M", 174.4, 323.6), ("L", 345.0, 323.6), ("Z",),
+    ]
+
+    def _geometry(self, ops: list, **style) -> ET.Element:
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        xs = [op[1] for op in ops if len(op) > 1]
+        ys = [op[2] for op in ops if len(op) > 2]
+        document.pages[0].items.append(
+            model.Path(
+                x=min(xs), y=min(ys),
+                width=max(xs) - min(xs), height=max(ys) - min(ys),
+                ops=ops, style=model.GraphicStyle(**style),
+            )
+        )
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            return ET.fromstring(archive.read(name))
+
+    def test_each_subpath_gets_its_own_geometry(self):
+        spread = self._geometry(self.TWO_RULES, fill=(0, 0, 0))
+        self.assertEqual(len(list(spread.iter("GeometryPathType"))), 2)
+
+    def test_the_subpaths_are_not_welded_into_one_outline(self):
+        spread = self._geometry(self.TWO_RULES, fill=(0, 0, 0))
+        for path in spread.iter("GeometryPathType"):
+            points = list(path.iter("PathPointType"))
+            self.assertEqual(len(points), 2, "a rule has two ends, not four")
+
+    def test_the_second_rule_keeps_its_own_vertical_position(self):
+        # Welding put the second rule's start where the first one's end
+        # belonged, which is precisely what crossed the outline over.
+        spread = self._geometry(self.TWO_RULES, fill=(0, 0, 0))
+        rules = [
+            [p.get("Anchor").split()[1] for p in path.iter("PathPointType")]
+            for path in spread.iter("GeometryPathType")
+        ]
+        for anchors in rules:
+            self.assertEqual(len(set(anchors)), 1, "a horizontal rule is level")
+        self.assertNotEqual(rules[0][0], rules[1][0])
+
+    def test_a_single_subpath_is_written_exactly_as_before(self):
+        ops = [("M", 10.0, 10.0), ("L", 40.0, 10.0), ("L", 40.0, 30.0), ("Z",)]
+        spread = self._geometry(ops, fill=(1, 2, 3))
+        paths = list(spread.iter("GeometryPathType"))
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(len(list(paths[0].iter("PathPointType"))), 3)
+        self.assertEqual(paths[0].get("PathOpen"), "false")
+
+    def test_an_open_subpath_stays_open(self):
+        ops = [("M", 10.0, 10.0), ("L", 40.0, 10.0)]
+        spread = self._geometry(ops, stroke=(0, 0, 0))
+        self.assertEqual(
+            next(spread.iter("GeometryPathType")).get("PathOpen"), "true"
+        )
+
+    def test_curves_keep_their_handles_within_a_subpath(self):
+        ops = [
+            ("M", 0.0, 0.0),
+            ("C", 10.0, 0.0, 20.0, 10.0, 20.0, 20.0),
+            ("Z",),
+            ("M", 40.0, 40.0),
+            ("L", 60.0, 40.0),
+        ]
+        spread = self._geometry(ops, fill=(0, 0, 0))
+        paths = list(spread.iter("GeometryPathType"))
+        self.assertEqual(len(paths), 2)
+        first = list(paths[0].iter("PathPointType"))
+        self.assertEqual(len(first), 2)
+        # The curve's control point must not collapse onto the anchor.
+        self.assertNotEqual(first[0].get("RightDirection"), first[0].get("Anchor"))
+
+
 class FacingPagesTest(unittest.TestCase):
     """A booklet must arrive as spreads, not as a stack of single pages.
 

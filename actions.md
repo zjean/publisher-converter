@@ -483,6 +483,34 @@ Established here; don't re-derive it.
   either somewhere the string scan cannot see it, or it is not stored as
   text at all.
 
+- **There is a second symptom in the same bands, and it may be the same
+  object.** Each of these files also carries 15 paths that libmspub reports
+  as two disconnected two-point edges with a fill and no stroke. They sit
+  in the headline bands, they are headline-sized (110–225pt wide, 20–32pt
+  tall), and they enclose no area, so they draw nothing. Until recently
+  they were welded into a single outline, which drew a filled bowtie across
+  the page — that is fixed, and they are now reported instead.
+
+  On page 4 of `1336 kerkbode.pub` the path is at (172.4, 292.1),
+  172.6 x 31.5pt, filled black:
+
+  ```
+  M(172.4, 292.1) L(342.9, 292.1) Z    <- top edge
+  M(174.4, 323.6) L(345.0, 323.6) Z    <- bottom edge
+  ```
+
+  Page 1 has a pair of these at (34.6, 20.4), 338.9 x 163.2pt — one filled
+  brown, one stroked darker — which is masthead-sized.
+
+  Two readings fit and they cannot be told apart from here. Either these
+  are the *outline* of a filled shape that libmspub emitted as loose edges,
+  in which case joining top-edge to reversed-bottom-edge recovers a filled
+  band; or they are guide geometry belonging to something else — WordArt has
+  exactly this shape, a top and bottom guide — in which case they were never
+  meant to be visible and the missing thing is the text. **Whatever object
+  you click in step 1 should settle this too**, so note whether the headline
+  sits on a coloured band or is simply coloured text.
+
 Regenerate the table with:
 
 ```sh

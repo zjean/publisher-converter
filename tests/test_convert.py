@@ -307,6 +307,60 @@ class MetafileReportingTest(unittest.TestCase):
         self.assertIn("2", document.warnings[0])
 
 
+class DegeneratePathTest(unittest.TestCase):
+    """A filled path made only of 2-point edges cannot draw anything.
+
+    libmspub reports most Publisher paths as disconnected edges. Joining
+    them used to produce a filled bowtie across the page; keeping them
+    apart is correct but leaves a shape with no area, so the artwork is
+    absent either way and the operator should be told rather than left to
+    spot it.
+    """
+
+    def _document(self, ops: list, **style) -> model.Document:
+        document = model.Document(pages=[model.Page()])
+        document.pages[0].items.append(
+            model.Path(
+                x=10.0, y=10.0, width=100.0, height=30.0,
+                ops=ops, style=model.GraphicStyle(**style),
+            )
+        )
+        return document
+
+    TWO_RULES = [
+        ("M", 10.0, 10.0), ("L", 110.0, 10.0), ("Z",),
+        ("M", 10.0, 40.0), ("L", 110.0, 40.0), ("Z",),
+    ]
+
+    def test_a_fill_only_path_of_bare_edges_is_reported(self):
+        document = self._document(self.TWO_RULES, fill=(0, 0, 0))
+        convert._check_unrenderable_paths(document)
+        self.assertEqual(len(document.warnings), 1, document.warnings)
+        self.assertIn("no area", document.warnings[0])
+
+    def test_several_are_collapsed_into_one_line(self):
+        document = self._document(self.TWO_RULES, fill=(0, 0, 0))
+        for _ in range(4):
+            document.pages[0].items.append(document.pages[0].items[0])
+        convert._check_unrenderable_paths(document)
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("5", document.warnings[0])
+
+    def test_a_stroked_path_of_bare_edges_draws_fine(self):
+        document = self._document(self.TWO_RULES, stroke=(0, 0, 0), stroke_width=1.0)
+        convert._check_unrenderable_paths(document)
+        self.assertEqual(document.warnings, [])
+
+    def test_a_path_with_real_area_is_not_reported(self):
+        ops = [
+            ("M", 10.0, 10.0), ("L", 110.0, 10.0),
+            ("L", 110.0, 40.0), ("Z",),
+        ]
+        document = self._document(ops, fill=(0, 0, 0))
+        convert._check_unrenderable_paths(document)
+        self.assertEqual(document.warnings, [])
+
+
 class ThreadDuplicateStoriesTest(unittest.TestCase):
     """Linked Publisher text boxes arrive as one story duplicated per frame.
 

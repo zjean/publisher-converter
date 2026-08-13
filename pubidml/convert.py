@@ -586,6 +586,46 @@ def _thread_duplicate_stories(document: model.Document) -> None:
         )
 
 
+def _check_unrenderable_paths(document: model.Document) -> None:
+    """Report filled paths whose outlines enclose nothing.
+
+    libmspub reports most Publisher paths as disconnected edges -- 50 of
+    the 56 in the sample corpus. Where every one of those edges is a bare
+    two-point segment, a fill has no area to cover and the shape draws
+    nothing at all. Joining the edges instead would invent geometry, and
+    used to draw a filled bowtie across the page, so they are kept apart
+    and the loss is named.
+    """
+    unrenderable = 0
+    for page in document.pages:
+        for item in model._walk(page.items):
+            if not isinstance(item, model.Path) or not item.ops:
+                continue
+            # A stroke draws the edges themselves, so the shape is visible.
+            if item.style.stroke is not None or item.style.fill is None:
+                continue
+            lengths = []
+            current = 0
+            for op in item.ops:
+                if op[0] == "M":
+                    if current:
+                        lengths.append(current)
+                    current = 1
+                elif op[0] in ("L", "C", "Q"):
+                    current += 1
+            if current:
+                lengths.append(current)
+            if lengths and all(length <= 2 for length in lengths):
+                unrenderable += 1
+
+    if unrenderable:
+        document.warnings.append(
+            f"{unrenderable} filled path(s) enclose no area and draw nothing: "
+            f"libmspub reported them as disconnected two-point edges, so "
+            f"whatever they outlined needs redrawing"
+        )
+
+
 def _check_overset_text(document: model.Document) -> None:
     """Flag text frames far too small to show the text they contain.
 
@@ -683,6 +723,7 @@ def _convert(
     # a run of identical empty frames is exactly what master lifting looks
     # for, so doing this first would sweep the chain onto a master spread.
     _thread_duplicate_stories(document)
+    _check_unrenderable_paths(document)
     _check_overset_text(document)
 
     writer = idml.IdmlWriter(
