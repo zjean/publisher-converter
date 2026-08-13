@@ -80,6 +80,16 @@ _URI_PATH_SAFE = "/!$&'()*+,;=:@"
 NO_PARAGRAPH_STYLE = "ParagraphStyle/$ID/[No paragraph style]"
 NO_CHARACTER_STYLE = "CharacterStyle/$ID/[No character style]"
 
+# InDesign's Auto leading is 120% of the type size, and that is also what
+# Publisher calls one "space" of line spacing. Equating the two is what
+# makes the most common case right by construction: libmspub omits the
+# property entirely at 1 sp, so single-spaced text is written with no
+# leading at all and picks up Auto -- the same 120%.
+SINGLE_LINE_SPACING = 1.2
+
+# The point size IDML assumes for a run that does not state one.
+DEFAULT_POINT_SIZE = 12.0
+
 
 def _pkg(tag: str) -> str:
     return f"{{{IDPKG}}}{tag}"
@@ -966,13 +976,15 @@ class IdmlWriter:
 
         spans = paragraph.spans or [model.Span()]
         for span in spans:
-            self._emit_span(range_element, span)
+            self._emit_span(range_element, span, _leading_for(paragraph, span))
 
         # IDML marks the end of a paragraph with an explicit break.
         if not last:
             ET.SubElement(range_element, "Br")
 
-    def _emit_span(self, parent: ET.Element, span: model.Span) -> None:
+    def _emit_span(
+        self, parent: ET.Element, span: model.Span, leading: Optional[float] = None
+    ) -> None:
         attributes = {"AppliedCharacterStyle": NO_CHARACTER_STYLE}
         if span.size_pt:
             attributes["PointSize"] = fmt(span.size_pt)
@@ -988,8 +1000,16 @@ class IdmlWriter:
 
         element = ET.SubElement(parent, "CharacterStyleRange", attributes)
 
-        if span.font:
+        # Leading is a character property in IDML, not a paragraph one, so a
+        # paragraph mixing type sizes gets a value per run and InDesign uses
+        # the largest on each line -- which is what Publisher does too.
+        properties = None
+        if leading is not None:
             properties = ET.SubElement(element, "Properties")
+            ET.SubElement(properties, "Leading", {"type": "unit"}).text = fmt(leading)
+        if span.font:
+            if properties is None:
+                properties = ET.SubElement(element, "Properties")
             applied = ET.SubElement(properties, "AppliedFont", {"type": "string"})
             applied.text = span.font
         if span.bold or span.italic:
@@ -1006,6 +1026,21 @@ class IdmlWriter:
             if segment:
                 content = ET.SubElement(element, "Content")
                 content.text = segment
+
+
+def _leading_for(paragraph: model.Paragraph, span: model.Span) -> Optional[float]:
+    """The leading in points for one run, or None to leave it on Auto.
+
+    Publisher's exact point spacing maps straight across. Its "spaces"
+    figure is proportional, so it is resolved against the run's own type
+    size -- 0.9 spaces of 10pt type is 0.9 x 1.2 x 10 = 10.8pt.
+    """
+    if paragraph.line_spacing_pt is not None:
+        return paragraph.line_spacing_pt
+    if paragraph.line_spacing_multiple is None:
+        return None
+    size = span.size_pt or DEFAULT_POINT_SIZE
+    return paragraph.line_spacing_multiple * SINGLE_LINE_SPACING * size
 
 
 def _flatten(items: List[model.Item]) -> List[model.Item]:

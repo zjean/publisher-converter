@@ -133,7 +133,12 @@ class Paragraph:
     margin_left: float = 0.0
     margin_right: float = 0.0
     first_line_indent: float = 0.0
-    line_height: Optional[str] = None
+    # Publisher expresses line spacing either as a multiple of single line
+    # spacing (its "spaces" unit) or as an exact point value. At most one of
+    # these is set; both unset means single spacing, which libmspub reports
+    # by omitting the property altogether.
+    line_spacing_multiple: Optional[float] = None
+    line_spacing_pt: Optional[float] = None
     list_level: int = 0
     list_ordered: bool = False
     spans: List[Span] = field(default_factory=list)
@@ -611,7 +616,7 @@ class ModelBuilder:
             margin_left=units.to_points(props.get("fo:margin-left"), 0.0) or 0.0,
             margin_right=units.to_points(props.get("fo:margin-right"), 0.0) or 0.0,
             first_line_indent=units.to_points(props.get("fo:text-indent"), 0.0) or 0.0,
-            line_height=props.get("fo:line-height"),
+            **_line_spacing(props),
             list_level=len(self._list_stack),
             list_ordered=bool(self._list_stack and self._list_stack[-1]),
         )
@@ -766,6 +771,36 @@ def _rotation(props: dict) -> float:
     discards the bogus suffix.
     """
     return units.to_float(props.get("librevenge:rotate"), 0.0) or 0.0
+
+
+def _line_spacing(props: dict) -> dict:
+    """Publisher's line spacing, split by which unit it came in.
+
+    MSPUBCollector inserts Publisher's "spaces" figure as a percentage and
+    its point figure as points:
+
+        if (type == LINE_SPACING_SP)      insert(.., n, RVNG_PERCENT)
+        else if (type == LINE_SPACING_PT) insert(.., n, RVNG_POINT)
+
+    So "90.0000%" is nine tenths of *single line spacing*, not 90% of the
+    type size -- a distinction worth 20% of the leading. libmspub also
+    skips the property at exactly 1 sp, so absence means single spacing.
+    """
+    raw = props.get("fo:line-height")
+    if raw is None:
+        return {}
+
+    text = str(raw).strip()
+    if text.endswith("%"):
+        multiple = units.percent(text)
+        return {} if multiple is None else {"line_spacing_multiple": multiple}
+
+    # Only an explicit point value is meaningful: librevenge treats a bare
+    # number as inches, which line spacing never is.
+    if not text.lower().endswith("pt"):
+        return {}
+    points = units.to_points(text)
+    return {} if points is None else {"line_spacing_pt": points}
 
 
 def _column_count(props: dict) -> int:

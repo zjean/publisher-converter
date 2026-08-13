@@ -447,6 +447,25 @@ These are real and deliberate, not bugs to be surprised by later.
   article may be one box with two columns *or* two linked boxes: identical
   on the page, different structures, and the second is handled by story
   threading below rather than by this.
+- **Line spacing is converted, resting on one equivalence.** Publisher
+  measures it either in "spaces" — multiples of single line spacing — or in
+  points. libmspub reports the first as a *percentage* and the second as
+  points, so `90%` means 0.9 spaces and **not** 90% of the type size; the
+  difference is a fifth of the leading. Points map straight to IDML
+  leading. Spaces are proportional, so they are resolved against each run's
+  own type size, taking single spacing to be IDML's own Auto leading of
+  120%: 0.9 spaces of 10pt type gives 10.8pt.
+
+  That equivalence is what makes the commonest case right by construction.
+  libmspub omits the property at exactly 1 sp, so single-spaced text is
+  written with no leading at all and inherits Auto — the same 120%.
+
+  Two consequences. Leading is a character property in IDML, not a
+  paragraph one, so a paragraph mixing type sizes gets a value per run and
+  the largest on each line wins, which is what Publisher does too. And a
+  run whose size libmspub never reported is assumed to be 12pt, IDML's
+  default — which is also the size it will be rendered at, so the leading
+  stays proportionally correct even there.
 - **Story threading is inferred, not read.** librevenge's drawing
   interface cannot say "this frame continues that one", so libmspub hands
   the *complete* story to every frame in a linked chain — one sample

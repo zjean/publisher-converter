@@ -345,6 +345,88 @@ class StructureTest(unittest.TestCase):
             self.assertIn(src, names, f"designmap references missing part {src}")
 
 
+class LeadingTest(unittest.TestCase):
+    """Publisher's line spacing has to reach IDML as leading.
+
+    It was parsed into the model and then read by nobody, so every
+    document arrived on Affinity's default leading regardless of what
+    Publisher said.
+    """
+
+    def _story(self, paragraph_props: dict, *spans: dict) -> ET.Element:
+        lines = [
+            event("startTextObject", {"svg:width": "6in", "svg:height": "4in"}),
+            event("openParagraph", paragraph_props),
+        ]
+        for span in spans:
+            lines += [
+                event("openSpan", span),
+                event("insertText", text="some text"),
+                event("closeSpan"),
+            ]
+        lines += [event("closeParagraph"), event("endTextObject")]
+
+        path = write_package(support.document(*lines))
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            return ET.fromstring(archive.read(name))
+
+    @staticmethod
+    def _leadings(story: ET.Element) -> list:
+        return [
+            (e.get("type"), e.text)
+            for e in story.iter("Leading")
+        ]
+
+    def test_a_multiple_of_single_spacing_becomes_absolute_leading(self):
+        # 0.9 spaces on 10pt type. Single spacing is IDML's own auto-leading
+        # default of 120%, so 0.9 x 1.2 x 10 = 10.8pt.
+        story = self._story({"fo:line-height": "90.0000%"}, {"fo:font-size": "10pt"})
+        self.assertEqual(self._leadings(story), [("unit", "10.8")])
+
+    def test_an_exact_point_value_is_passed_straight_through(self):
+        story = self._story({"fo:line-height": "10.5000pt"}, {"fo:font-size": "10pt"})
+        self.assertEqual(self._leadings(story), [("unit", "10.5")])
+
+    def test_single_spacing_is_left_to_the_reader_default(self):
+        # libmspub omits the property at 1 sp, and IDML's Auto leading is
+        # 120% -- single spacing. Writing nothing is therefore correct, and
+        # keeps the leading proportional if the type size is changed later.
+        story = self._story({}, {"fo:font-size": "10pt"})
+        self.assertEqual(self._leadings(story), [])
+
+    def test_wider_spacing_scales_with_the_type_size(self):
+        story = self._story({"fo:line-height": "150.0000%"}, {"fo:font-size": "10pt"})
+        self.assertEqual(self._leadings(story), [("unit", "18")])
+
+    def test_each_run_gets_the_leading_of_its_own_type_size(self):
+        # Leading is a character property in IDML, and a paragraph can mix
+        # sizes; InDesign then uses the largest on the line.
+        story = self._story(
+            {"fo:line-height": "90.0000%"},
+            {"fo:font-size": "10pt"},
+            {"fo:font-size": "20pt"},
+        )
+        self.assertEqual(
+            self._leadings(story), [("unit", "10.8"), ("unit", "21.6")]
+        )
+
+    def test_a_run_with_no_size_uses_the_idml_default_of_twelve_points(self):
+        story = self._story({"fo:line-height": "90.0000%"}, {})
+        self.assertEqual(self._leadings(story), [("unit", "12.96")])
+
+    def test_leading_and_a_font_share_one_properties_element(self):
+        story = self._story(
+            {"fo:line-height": "90.0000%"},
+            {"fo:font-size": "10pt", "style:font-name": "Arial"},
+        )
+        properties = list(story.iter("Properties"))
+        self.assertEqual(len(properties), 1)
+        tags = [child.tag for child in properties[0]]
+        self.assertIn("Leading", tags)
+        self.assertIn("AppliedFont", tags)
+
+
 class TextColumnTest(unittest.TestCase):
     """Column count and gutter have to survive into TextFramePreference."""
 

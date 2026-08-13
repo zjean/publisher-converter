@@ -204,6 +204,61 @@ class TextColumnTest(unittest.TestCase):
         self.assertEqual(self._frame(**{"fo:column-count": 4}).columns, 4)
 
 
+class LineSpacingTest(unittest.TestCase):
+    """Publisher's line spacing, as libmspub reports it.
+
+    MSPUBCollector inserts Publisher's raw "spaces" figure as a *percent*
+    and its point figure as points:
+
+        if (type == LINE_SPACING_SP)  insert("fo:line-height", n, RVNG_PERCENT)
+        else if (type == LINE_SPACING_PT) insert("fo:line-height", n, RVNG_POINT)
+
+    So "90.0000%" means 0.9 spaces -- nine tenths of single line spacing --
+    and not 90% of the font size. It also skips the property entirely at
+    exactly 1 sp, so absence means single spacing.
+    """
+
+    def _paragraph(self, **props) -> model.Paragraph:
+        doc = support.document(
+            event("startTextObject", {"svg:width": "3in", "svg:height": "2in"}),
+            event("openParagraph", props),
+            event("openSpan", {"fo:font-size": "10pt"}),
+            event("insertText", text="text"),
+            event("closeSpan"),
+            event("closeParagraph"),
+            event("endTextObject"),
+        )
+        return doc.pages[0].items[0].story.paragraphs[0]
+
+    def test_a_percentage_is_read_as_a_multiple_of_single_spacing(self):
+        paragraph = self._paragraph(**{"fo:line-height": "90.0000%"})
+        self.assertAlmostEqual(paragraph.line_spacing_multiple, 0.9)
+        self.assertIsNone(paragraph.line_spacing_pt)
+
+    def test_a_point_value_is_read_as_exact_leading(self):
+        paragraph = self._paragraph(**{"fo:line-height": "10.5000pt"})
+        self.assertAlmostEqual(paragraph.line_spacing_pt, 10.5)
+        self.assertIsNone(paragraph.line_spacing_multiple)
+
+    def test_absence_means_single_spacing_and_is_left_unset(self):
+        paragraph = self._paragraph()
+        self.assertIsNone(paragraph.line_spacing_multiple)
+        self.assertIsNone(paragraph.line_spacing_pt)
+
+    def test_wider_spacing_is_read_faithfully(self):
+        for value, expected in (("150.0000%", 1.5), ("200.0000%", 2.0), ("25.0000%", 0.25)):
+            with self.subTest(value=value):
+                paragraph = self._paragraph(**{"fo:line-height": value})
+                self.assertAlmostEqual(paragraph.line_spacing_multiple, expected)
+
+    def test_nonsense_is_ignored_rather_than_guessed(self):
+        for value in ("", "banana", "%"):
+            with self.subTest(value=value):
+                paragraph = self._paragraph(**{"fo:line-height": value})
+                self.assertIsNone(paragraph.line_spacing_multiple)
+                self.assertIsNone(paragraph.line_spacing_pt)
+
+
 class ParseColorTest(unittest.TestCase):
     def test_valid_and_invalid_forms(self):
         self.assertEqual(model.parse_color("#ff8000"), (255, 128, 0))
