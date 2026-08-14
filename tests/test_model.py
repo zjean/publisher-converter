@@ -349,6 +349,128 @@ class GradientTest(unittest.TestCase):
         self.assertIn((255, 238, 221), doc.colors)
 
 
+class GradientOpacityTest(unittest.TestCase):
+    """A see-through ramp, which IDML can only state for a whole object."""
+
+    def _stops(self, *opacities):
+        return [
+            {"svg:offset": f"{i * 50}.0000%", "svg:stop-color": "#a8bad4",
+             "svg:stop-opacity": opacity}
+            for i, opacity in enumerate(opacities)
+        ]
+
+    def _style(self, stops, **extra) -> model.GraphicStyle:
+        props = {"draw:fill": "gradient", "draw:angle": "0in",
+                 "svg:linearGradient": stops}
+        props.update(extra)
+        doc = support.document(
+            event("setStyle", props),
+            event(
+                "drawRectangle",
+                {"svg:x": "1in", "svg:y": "1in", "svg:width": "2in", "svg:height": "1in"},
+            ),
+        )
+        return doc.pages[0].items[0].style
+
+    def test_each_stops_opacity_is_read(self):
+        style = self._style(self._stops("60.0000%", "60.0000%"))
+        self.assertEqual([s.opacity for s in style.gradient.stops], [0.6, 0.6])
+
+    def test_a_ramp_that_agrees_becomes_the_objects_opacity(self):
+        # Every see-through gradient in the corpus is this case.
+        style = self._style(self._stops("60.0000%", "60.0000%"))
+        self.assertAlmostEqual(style.fill_opacity, 0.6)
+        self.assertFalse(style.uneven_stop_opacity)
+
+    def test_an_opaque_ramp_leaves_the_opacity_alone(self):
+        style = self._style(self._stops("100.0000%", "100.0000%"))
+        self.assertAlmostEqual(style.fill_opacity, 1.0)
+
+    def test_stops_that_disagree_are_flagged_rather_than_averaged(self):
+        style = self._style(self._stops("100.0000%", "60.0000%"))
+        self.assertTrue(style.uneven_stop_opacity)
+        self.assertAlmostEqual(style.fill_opacity, 1.0)
+
+    def test_the_shapes_own_opacity_still_applies_on_top(self):
+        style = self._style(
+            self._stops("50.0000%", "50.0000%"), **{"draw:opacity": "50.0000%"}
+        )
+        self.assertAlmostEqual(style.fill_opacity, 0.25)
+
+    def test_a_single_stop_ramp_still_carries_its_transparency(self):
+        # The flat fallback fill should be as see-through as the stop was.
+        style = self._style(self._stops("60.0000%"))
+        self.assertIsNone(style.gradient)
+        self.assertAlmostEqual(style.fill_opacity, 0.6)
+
+
+class ShadowTest(unittest.TestCase):
+    """Publisher's shadow, which libmspub reports in full and we dropped."""
+
+    SHADOW = {
+        "draw:shadow": "visible",
+        "draw:shadow-color": "#c0c0c0",
+        "draw:shadow-offset-x": "0.0278in",
+        "draw:shadow-offset-y": "0.0417in",
+        "draw:shadow-opacity": "50.0000%",
+    }
+
+    def _style(self, **props) -> model.GraphicStyle:
+        style = {"draw:fill": "solid", "draw:fill-color": "#ffffff"}
+        style.update(props)
+        doc = support.document(
+            event("setStyle", style),
+            event(
+                "drawRectangle",
+                {"svg:x": "1in", "svg:y": "1in", "svg:width": "2in", "svg:height": "1in"},
+            ),
+        )
+        return doc.pages[0].items[0].style
+
+    def test_colour_offsets_and_opacity_are_all_read(self):
+        shadow = self._style(**self.SHADOW).shadow
+        self.assertIsNotNone(shadow)
+        self.assertEqual(shadow.color, (0xC0, 0xC0, 0xC0))
+        self.assertAlmostEqual(shadow.offset_x, 2.0016)
+        self.assertAlmostEqual(shadow.offset_y, 3.0024)
+        self.assertAlmostEqual(shadow.opacity, 0.5)
+
+    def test_a_shape_with_no_shadow_has_none(self):
+        self.assertIsNone(self._style().shadow)
+
+    def test_a_hidden_shadow_is_not_carried(self):
+        props = dict(self.SHADOW, **{"draw:shadow": "hidden"})
+        self.assertIsNone(self._style(**props).shadow)
+
+    def test_a_shadow_with_no_offset_at_all_is_not_one(self):
+        # Publisher would be hiding it exactly behind its own shape.
+        props = dict(
+            self.SHADOW,
+            **{"draw:shadow-offset-x": "0in", "draw:shadow-offset-y": "0in"},
+        )
+        self.assertIsNone(self._style(**props).shadow)
+
+    def test_a_shadow_without_a_colour_is_not_carried(self):
+        props = dict(self.SHADOW)
+        del props["draw:shadow-color"]
+        self.assertIsNone(self._style(**props).shadow)
+
+    def test_a_negative_offset_survives(self):
+        props = dict(self.SHADOW, **{"draw:shadow-offset-x": "-0.0278in"})
+        self.assertAlmostEqual(self._style(**props).shadow.offset_x, -2.0016)
+
+    def test_the_shadow_colour_reaches_the_documents_colour_table(self):
+        # Or _color_ref falls back and the shadow comes out black.
+        doc = support.document(
+            event("setStyle", dict({"draw:fill": "solid"}, **self.SHADOW)),
+            event(
+                "drawRectangle",
+                {"svg:x": "1in", "svg:y": "1in", "svg:width": "2in", "svg:height": "1in"},
+            ),
+        )
+        self.assertIn((0xC0, 0xC0, 0xC0), doc.colors)
+
+
 def table_events(
     columns: list, rows: list, *, x="1in", y="1in", width="5in", height="3in"
 ) -> list:

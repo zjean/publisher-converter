@@ -33,6 +33,48 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
         0x0E  non-empty string -> this page is a master
         0x0D  seqnum of the master this page applies
         0x02  the page's own shape list
+
+    Table chunk (chunk type 0x10)
+      bare U32 length, then blocks:
+        0x66  row count            0x67  column count
+        0x68  total width (EMU)    0x69  total height (EMU)
+        0x6B  seqnum of this table's cells chunk
+        0x6D  array of one container per column and then per row, each
+              giving 0x01 the running offset and 0x02 the size, in EMU
+
+    Cells chunk (chunk type 0x63)
+      bare U32 length, then blocks:
+        0x01  cell count
+        0x02  array of one container per cell, each giving
+                0x01/0x02  first and last row      0x03/0x04  ditto columns
+                0x0A-0x0D  left, top, right and bottom inset, in EMU
+                0x07       1 or 2, uniform across a table -- unidentified
+                0x09/0x0E  cached extents -- unidentified
+              A field left out is absent, not defaulted: one table in the
+              corpus writes 0x0A-0x0D as 36576 EMU on every cell, which is
+              Publisher's own 0.04in default, so the writer states the
+              value it means and omission is zero.
+
+    EscherStm stream, from libmspub 0.1.5 MSPUBParser.cpp again
+      OfficeArt records: U16 version|instance<<4, U16 type, U32 length.
+      A version of 0xF means a container, whose children follow inline.
+      Publisher differs from OfficeArt in two ways, both of which desync a
+      naive walk: a DGG (0xF000) or DG (0xF002) container is followed by
+      four bytes of tail, and a CLIENT_ANCHOR (0xF010) or CLIENT_DATA
+      (0xF011) repeats its own length before its contents.
+
+        0xF004  shape container, holding
+          0xF010  anchor, an (U16 id, U32 value) list:
+                    0x2001-0x2004 xs, ys, xe, ye in EMU, measured from
+                    the centre of the page (Coordinate::getXIn)
+          0xF00B/0xF121/0xF122  property tables: `instance` six-byte
+                    entries of (U16 opid, U32 value), then the payload of
+                    every entry whose opid has 0x8000 set, in order. The
+                    property id is the low fourteen bits.
+                      0x0004  rotation, degrees in 16.16 fixed point
+                      0x00C0  WordArt text, UTF-16LE
+                      0x00C3  WordArt point size, 16.16 fixed point
+                      0x00C5  WordArt font name, UTF-16LE
 """
 
 from __future__ import annotations
@@ -64,6 +106,39 @@ _THIS_MASTER_NAME, _APPLIED_MASTER_NAME, _PAGE_SHAPES = 0x0E, 0x0D, 0x02
 _SHAPE_SEQNUM = 0x70
 _PAGE_CHUNK = 0x43
 
+_TABLE_CHUNK, _CELLS_CHUNK = 0x10, 0x63
+_TABLE_ROW_COUNT, _TABLE_COLUMN_COUNT = 0x66, 0x67
+_TABLE_CELLS_SEQNUM = 0x6B
+_TABLE_ROWCOL_ARRAY, _TABLE_ROWCOL_SIZE = 0x6D, 0x02
+_CELL_ARRAY = 0x02
+# Every entry of an array carries id 0, which is how libmspub tells an
+# entry from anything else the array happens to hold.
+_ARRAY_ENTRY = 0x00
+_CELL_FIRST_ROW, _CELL_FIRST_COLUMN = 0x01, 0x03
+# Left, top, right, bottom -- the order the same file format uses for a
+# text frame's own margins, where Escher numbers them 0x81 to 0x84. Only
+# one table in the corpus sets two sides differently, so the corpus cannot
+# tell this apart from left/right/top/bottom on its own.
+_CELL_INSETS = (0x0A, 0x0B, 0x0C, 0x0D)
+_EMU_PER_POINT = 12700.0
+
+_ESCHER_STREAM = "EscherStm"
+_SHAPE_CONTAINER = 0xF004
+_CLIENT_ANCHOR = 0xF010
+_PROPERTY_RECORDS = frozenset({0xF00B, 0xF121, 0xF122})
+# Publisher's own departures from OfficeArt's record layout.
+_ESCHER_TAIL = {0xF000: 4, 0xF002: 4}
+_ESCHER_EXTRA_HEADER = {0xF010: 4, 0xF011: 4}
+_ANCHOR_SIDES = (0x2001, 0x2002, 0x2003, 0x2004)
+_PROP_ROTATION = 0x0004
+_PROP_WORDART_TEXT, _PROP_WORDART_SIZE, _PROP_WORDART_FONT = 0x00C0, 0x00C3, 0x00C5
+_FIXED_16_16 = 65536.0
+# WordArt stretches its glyphs to fill the shape, so the band is not a
+# fixed multiple of the size the file states: across the 39 sized shapes in
+# the corpus it runs 1.02 to 1.59, averaging this. Only ever used for a
+# shape that states no size at all, and reported when it is.
+_BAND_TO_SIZE = 1.33
+
 # Sequence numbers libmspub hard-codes as dummy pages and never emits
 # (MSPUBParser::getPageTypeBySeqNum).
 _DUMMY_PAGE_SEQNUMS = frozenset({0x10D, 0x110, 0x113, 0x117})
@@ -82,6 +157,38 @@ class PageStructure:
 
 
 @dataclass
+class TableStructure:
+    """One table's cell insets, in points, keyed by first row and column.
+
+    First row and column is what libmspub reports as a cell's position, so
+    a spanning cell is keyed by the corner it starts in either way.
+    """
+
+    insets: Dict[tuple, tuple] = field(default_factory=dict)
+
+
+@dataclass
+class WordArt:
+    """A WordArt shape: its words, and the band they are stretched into.
+
+    `centre_x`/`centre_y` are measured from the centre of the page, which
+    is the only frame of reference the Escher stream uses, and `width` and
+    `height` describe the band before `rotation` turns it.
+    """
+
+    text: str
+    font: Optional[str] = None
+    size: Optional[float] = None
+    centre_x: float = 0.0
+    centre_y: float = 0.0
+    width: float = 0.0
+    height: float = 0.0
+    rotation: float = 0.0
+    #: True when the file stated no size and one was taken from the band.
+    fitted: bool = False
+
+
+@dataclass
 class FileStructure:
     """What the file says that libmspub does not pass on."""
 
@@ -93,12 +200,58 @@ class FileStructure:
     #: document with none cannot contain a page-number field, so every
     #: '#' in it is literal text.
     has_fields: bool = False
+    #: Tables by grid signature. Nothing in the event stream identifies
+    #: which chunk a table came from, so its own measurements are the only
+    #: way back to it; a signature two tables share maps to None, because
+    #: then there is no telling which of them is on screen.
+    tables: Dict[tuple, Optional[TableStructure]] = field(default_factory=dict)
+    #: Every WordArt shape in the file. libmspub reports neither their text
+    #: nor an id for them, so they are matched by where they sit.
+    wordart: List[WordArt] = field(default_factory=list)
+
+    def wordart_near(
+        self, centre_x: float, centre_y: float, tolerance: float = 0.5
+    ) -> Optional[WordArt]:
+        """The one WordArt shape centred here, if exactly one is.
+
+        Both sides measure the same EMU by different routes, so they agree
+        to a fraction of a point rather than exactly; a nearest match
+        inside a tolerance avoids turning that into a rounding cliff. Two
+        candidates equally close is an ambiguity, not a match.
+        """
+        near = [
+            art for art in self.wordart
+            if abs(art.centre_x - centre_x) <= tolerance
+            and abs(art.centre_y - centre_y) <= tolerance
+        ]
+        return near[0] if len(near) == 1 else None
 
     def master_for(self, page_index: int) -> Optional[PageStructure]:
         if not 0 <= page_index < len(self.pages):
             return None
         applied = self.pages[page_index].applied_master
         return self.masters.get(applied) if applied is not None else None
+
+    def cell_insets(
+        self, column_widths: List[float], row_heights: List[float]
+    ) -> Optional[Dict[tuple, tuple]]:
+        """Insets by (row, column) for the table with this grid, if known."""
+        found = self.tables.get(table_signature(column_widths, row_heights))
+        return found.insets if found is not None else None
+
+
+def table_signature(column_widths: List[float], row_heights: List[float]) -> tuple:
+    """Identify a table by the grid it draws, in points.
+
+    Both halves measure the same EMU, but libmspub's arrive by way of
+    four-decimal inches, so they agree to about a fortieth of a point and
+    no further. A tenth is finer than any two tables in the corpus are
+    apart and coarse enough to survive that rounding.
+    """
+    return (
+        tuple(round(width, 1) for width in column_widths),
+        tuple(round(height, 1) for height in row_heights),
+    )
 
 
 # -- OLE compound file ----------------------------------------------------
@@ -224,6 +377,39 @@ def _parse_block(buf: bytes, pos: int, skip_hierarchical: bool = False):
     return block, pos
 
 
+def _blocks(buf: bytes, pos: int, end: int):
+    """Every block between two offsets, stopping on anything malformed.
+
+    A block whose payload is cut off by the end of the file ends the walk
+    rather than the read: the caller has usually collected something worth
+    keeping by then, and a damaged table must not cost a document its
+    master pages.
+    """
+    end = min(end, len(buf))
+    while pos + 2 <= end:
+        before = pos
+        try:
+            block, pos = _parse_block(buf, pos, skip_hierarchical=True)
+        except struct.error:
+            return
+        if pos <= before:
+            return
+        yield block
+
+
+def _chunk_blocks(contents: bytes, offset: int):
+    """A chunk's own blocks. Every chunk opens with a U32 covering itself."""
+    if offset < 0 or offset + 4 > len(contents):
+        return iter(())
+    length = struct.unpack_from("<I", contents, offset)[0]
+    return _blocks(contents, offset + 4, offset + length)
+
+
+def _children(contents: bytes, block: "_Block"):
+    """The blocks inside a container, whose payload also opens with a U32."""
+    return _blocks(contents, block.data_offset + 4, block.end)
+
+
 def _chunk_references(contents: bytes):
     trailer_offset = struct.unpack_from("<I", contents, 0x1A)[0]
     pos = trailer_offset + 4
@@ -261,28 +447,226 @@ def _chunk_references(contents: bytes):
 
 def _page_structure(contents: bytes, seq: int, offset: int) -> PageStructure:
     page = PageStructure(seq=seq)
-    length = struct.unpack_from("<I", contents, offset)[0]
-    end = min(offset + length, len(contents))
-    pos = offset + 4
-    while pos < end:
-        before = pos
-        block, pos = _parse_block(contents, pos, skip_hierarchical=True)
-        if pos <= before:
-            break
+    for block in _chunk_blocks(contents, offset):
         if block.id == _THIS_MASTER_NAME and any(block.string):
             page.is_master = True
         elif block.id == _APPLIED_MASTER_NAME:
             page.applied_master = block.data
         elif block.id == _PAGE_SHAPES:
-            sub = block.data_offset + 4
-            while sub < block.end:
-                entry, after = _parse_block(contents, sub, skip_hierarchical=True)
-                if after <= sub:
-                    break
-                if entry.type == _SHAPE_SEQNUM:
-                    page.shape_count += 1
-                sub = after
+            page.shape_count += sum(
+                1
+                for entry in _children(contents, block)
+                if entry.type == _SHAPE_SEQNUM
+            )
     return page
+
+
+def _table_grid(contents: bytes, offset: int):
+    """One table chunk's fields and its grid, in points.
+
+    The row/column array runs every column and then every row, the same
+    split libmspub makes, and both are sizes rather than positions.
+    """
+    fields: Dict[int, int] = {}
+    sizes: List[int] = []
+    for block in _chunk_blocks(contents, offset):
+        if block.id == _TABLE_ROWCOL_ARRAY:
+            for entry in _children(contents, block):
+                if entry.id != _ARRAY_ENTRY:
+                    continue
+                sizes += [
+                    sub.data
+                    for sub in _children(contents, entry)
+                    if sub.id == _TABLE_ROWCOL_SIZE
+                ]
+        else:
+            fields[block.id] = block.data
+
+    rows = fields.get(_TABLE_ROW_COUNT, 0)
+    columns = fields.get(_TABLE_COLUMN_COUNT, 0)
+    if not rows or not columns or len(sizes) < rows + columns:
+        return None, None
+    widths = [size / _EMU_PER_POINT for size in sizes[:columns]]
+    heights = [size / _EMU_PER_POINT for size in sizes[columns:columns + rows]]
+    return fields, table_signature(widths, heights)
+
+
+def _table_cells(contents: bytes, offset: int) -> TableStructure:
+    """One cells chunk: what each cell says about its own insets."""
+    table = TableStructure()
+    for block in _chunk_blocks(contents, offset):
+        if block.id != _CELL_ARRAY:
+            continue
+        for record in _children(contents, block):
+            if record.id != _ARRAY_ENTRY:
+                continue
+            cell = {sub.id: sub.data for sub in _children(contents, record)}
+            position = (
+                cell.get(_CELL_FIRST_ROW, 0),
+                cell.get(_CELL_FIRST_COLUMN, 0),
+            )
+            table.insets[position] = tuple(
+                cell.get(side, 0) / _EMU_PER_POINT for side in _CELL_INSETS
+            )
+    return table
+
+
+def _read_tables(contents: bytes, refs) -> Dict[tuple, Optional[TableStructure]]:
+    """Cell insets for every table in the file, keyed by grid signature."""
+    cells_at = {seq: offset for seq, kind, offset in refs if kind == _CELLS_CHUNK}
+    tables: Dict[tuple, Optional[TableStructure]] = {}
+    for _seq, kind, offset in refs:
+        if kind != _TABLE_CHUNK:
+            continue
+        fields, signature = _table_grid(contents, offset)
+        if signature is None:
+            continue
+        cells_offset = cells_at.get(fields.get(_TABLE_CELLS_SEQNUM))
+        if cells_offset is None:
+            continue
+        table = _table_cells(contents, cells_offset)
+        # Two tables drawing the same grid are only usable while they agree
+        # about their cells; where they differ, neither is.
+        if tables.setdefault(signature, table) != table:
+            tables[signature] = None
+    return tables
+
+
+# -- Escher (OfficeArt) ---------------------------------------------------
+
+def _escher_records(buf: bytes, start: int, end: int):
+    """Every record at one level, as (version, instance, type, from, to)."""
+    pos = start
+    while pos + 8 <= end:
+        version_instance, rec_type, length = struct.unpack_from("<HHI", buf, pos)
+        # The length covers the repeated length of the records that carry
+        # one, so the contents end is measured from the header, not the body.
+        body = pos + 8 + _ESCHER_EXTRA_HEADER.get(rec_type, 0)
+        contents_end = min(pos + 8 + length, end)
+        yield version_instance & 0x0F, version_instance >> 4, rec_type, body, contents_end
+        if rec_type == 0 and length == 0:
+            return  # padding rather than a record, and so is everything after
+        pos = contents_end + _ESCHER_TAIL.get(rec_type, 0)
+
+
+def _escher_shapes(buf: bytes, start: int, end: int):
+    """Every shape container, at whatever depth it sits."""
+    for version, _instance, rec_type, body, contents_end in _escher_records(
+        buf, start, end
+    ):
+        if rec_type == _SHAPE_CONTAINER:
+            yield body, contents_end
+        elif version == 0x0F:
+            yield from _escher_shapes(buf, body, contents_end)
+
+
+def _escher_values(buf: bytes, start: int, end: int) -> Dict[int, int]:
+    """An (id, value) list, which is how every non-property record reads."""
+    out: Dict[int, int] = {}
+    pos = start
+    while pos + 6 <= end:
+        key, value = struct.unpack_from("<HI", buf, pos)
+        out[key] = value
+        pos += 6
+    return out
+
+
+def _escher_properties(buf: bytes, start: int, end: int, count: int) -> dict:
+    """A property table: the entries, then the payload of the complex ones.
+
+    An entry's top bit flags a complex value and the next one a blip
+    reference, so the property id is the low fourteen bits. libmspub keeps
+    the flags inside its own constants instead, which is why its
+    FILL_SHADE_COMPLEX reads 0xC197 rather than 0x0197.
+    """
+    entries, pos = [], start
+    for _ in range(count):
+        if pos + 6 > end:
+            break
+        entries.append(struct.unpack_from("<HI", buf, pos))
+        pos += 6
+    out: dict = {}
+    for opid, value in entries:
+        if opid & 0x8000:
+            out[opid & 0x3FFF] = buf[pos:pos + value]
+            pos += value
+        else:
+            out[opid & 0x3FFF] = value
+    return out
+
+
+def _signed(value: int) -> int:
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+def _escher_text(blob) -> Optional[str]:
+    if not isinstance(blob, bytes) or not blob:
+        return None
+    text = blob.decode("utf-16-le", "replace").rstrip("\x00").strip()
+    return text or None
+
+
+def _read_wordart(data: bytes) -> List[WordArt]:
+    """Every WordArt shape in the file, with its words and its band.
+
+    libmspub reads the Escher stream for a shape's geometry and fill and
+    walks past this: WordArt text, font and size are properties it has no
+    constants for, so a Publisher headline set in WordArt arrives as an
+    empty frame beside a pair of guide edges that enclose no area. Both
+    halves are in here.
+    """
+    escher = _read_stream(data, _ESCHER_STREAM)
+    return _wordart_shapes(escher) if escher else []
+
+
+def _wordart_shapes(escher: bytes) -> List[WordArt]:
+    """The WordArt shapes in an Escher stream."""
+    found: List[WordArt] = []
+    for body, end in _escher_shapes(escher, 0, len(escher)):
+        text = font = None
+        size = rotation = None
+        box = None
+        for _version, instance, rec_type, sub_body, sub_end in _escher_records(
+            escher, body, end
+        ):
+            if rec_type in _PROPERTY_RECORDS:
+                props = _escher_properties(escher, sub_body, sub_end, instance)
+                text = _escher_text(props.get(_PROP_WORDART_TEXT)) or text
+                font = _escher_text(props.get(_PROP_WORDART_FONT)) or font
+                if isinstance(props.get(_PROP_WORDART_SIZE), int):
+                    size = props[_PROP_WORDART_SIZE] / _FIXED_16_16
+                if isinstance(props.get(_PROP_ROTATION), int):
+                    rotation = _signed(props[_PROP_ROTATION]) / _FIXED_16_16
+            elif rec_type == _CLIENT_ANCHOR:
+                anchor = _escher_values(escher, sub_body, sub_end)
+                if all(side in anchor for side in _ANCHOR_SIDES):
+                    box = [
+                        _signed(anchor[side]) / _EMU_PER_POINT
+                        for side in _ANCHOR_SIDES
+                    ]
+
+        # A shape with no anchor cannot be placed, and one with no text is
+        # an ordinary shape libmspub has already reported.
+        if text is None or box is None:
+            continue
+        width, height = box[2] - box[0], box[3] - box[1]
+        if width <= 0 or height <= 0:
+            continue
+        fitted = size is None
+        found.append(
+            WordArt(
+                text=text,
+                font=font,
+                size=(height / _BAND_TO_SIZE) if fitted else size,
+                centre_x=(box[0] + box[2]) / 2.0,
+                centre_y=(box[1] + box[3]) / 2.0,
+                width=width,
+                height=height,
+                rotation=rotation or 0.0,
+                fitted=fitted,
+            )
+        )
+    return found
 
 
 def _has_field_table(data: bytes) -> bool:
@@ -307,15 +691,20 @@ def _has_field_table(data: bytes) -> bool:
 
 
 def read_structure(source: Path) -> Optional[FileStructure]:
-    """Master pages and field presence, or None if anything is unreadable."""
+    """Masters, field presence and cell insets, or None if unreadable."""
     try:
         data = Path(source).read_bytes()
         contents = _read_stream(data, "Contents")
         if not contents:
             return None
 
-        structure = FileStructure(has_fields=_has_field_table(data))
-        for seq, kind, offset in _chunk_references(contents):
+        refs = _chunk_references(contents)
+        structure = FileStructure(
+            has_fields=_has_field_table(data),
+            tables=_read_tables(contents, refs),
+            wordart=_read_wordart(data),
+        )
+        for seq, kind, offset in refs:
             if kind != _PAGE_CHUNK:
                 continue
             page = _page_structure(contents, seq, offset)

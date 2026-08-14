@@ -426,191 +426,185 @@ libmspub component.
 
 ---
 
-## 8. Identify the empty headline frames  ⏰ needs Publisher, before 1 Oct 2026
+## 8. The empty headline frames — **answered, and fixed**
+
+They were WordArt, and the words were in the file all along.
+
+### What they turned out to be
+
+`1336 kerkbode.pub` lost most of its headlines because a WordArt object
+arrives as two things, neither of them the headline:
+
+- an **empty text frame** — libmspub opens the text object, sets its
+  geometry and closes it again with no `insertText` at all, so it is
+  dropped for having no text, no fill and no stroke;
+- a **filled path of two disconnected two-point edges**, which encloses no
+  area and draws nothing. These are the guides the glyphs are stretched
+  between, which is why joining them into a filled quad invented shapes
+  (commit d43cdfe, reverted in 197368d).
+
+The two are the same object: in `1336` the 15 empty frames, the 15
+degenerate paths and the 15 WordArt shapes are one set of 15, and each
+guide path sits inside the frame that reported it.
+
+### Where the words were
+
+In the **Escher stream**, as shape properties libmspub has no constants
+for and never reads:
+
+```
+0x00C0  gtextUNICODE   the text, UTF-16LE
+0x00C3  gtextSize      point size, 16.16 fixed point
+0x00C5  gtextFont      font name, UTF-16LE
+0x0004  rotation       degrees, 16.16 fixed point
+```
+
+The earlier string scan missed them for a reason worth remembering: it
+diffed *words* against the 1,427 the conversion already delivered, and
+headline words like `Kerkdiensten` also appear in body copy, so they were
+filtered as matches. Two further details had to be right before the
+records could even be walked — a DGG or DG container is followed by four
+bytes of tail, and a property id is the low fourteen bits of its entry, the
+top two being a complex flag and a blip flag. Without the tail the walk
+desyncs after the first container and finds nothing at all, which is
+exactly what the first attempt here did.
+
+### What now happens
+
+`pubfile._read_wordart` reads every WordArt shape and
+`convert._recover_wordart` replaces its guide path with a text frame
+carrying the words, in the band the anchor gives, at the stated size, in
+the colour and with the shadow libmspub reported for the same shape. 46
+headlines across the corpus, every one of them previously lost.
+
+### What is left
+
+- **Two shapes state no point size** (a drop cap and the masthead), because
+  WordArt fits glyphs to the shape rather than setting a size. They are
+  sized from the band using the ratio the 39 sized shapes measure — 1.33,
+  spread 1.02 to 1.59 — and the report says so. Nothing more precise is
+  available without laying out the font.
+- **Two shapes in `Cantico_dei_Cantici.pub` cannot be placed.** libmspub
+  reports no shape at all where the file puts them, so there is no guide
+  path to replace and no confirmation of where the words went. They are
+  named in the report instead: `'I venerdì 2006 di Avvento'` and `'Il
+  Cantico dei Cantici'`. Placing them on the strength of the .pub alone is
+  possible — the anchor gives a band — but it would be the only content in
+  the converter put on the page without the event stream agreeing, and the
+  first version of this feature is not the place to start.
+- **WordArt is not WordArt any more.** Arched, stretched and outlined type
+  has no IDML equivalent; the headline arrives as straight text and the
+  file is flagged `review`.
+
+---
+
+## 9. Make a styled table  ⏰ needs Publisher, before 1 Oct 2026
 
 ### Why this matters
 
-Converting `1336 kerkbode.pub` loses most of its headlines. Everything
-else about that file now reconciles exactly, so this is the last unexplained
-content loss in the sample set, and it is the most visible one — a
-newsletter without its headings.
-
-The cause is upstream: libmspub reports the frames but hands over **no
-text for them**. They are then dropped, correctly by the rules the
-converter has, because an empty frame with no fill and no stroke
-contributes nothing (`model._on_endTextObject`). What is not known is
-*why* the text is missing, and that determines whether it is recoverable
-at all.
+A Publisher table now converts as a real IDML table, with its grid, its
+spans and its per-cell insets. What still cannot be carried is per-cell
+**fill and ruling** — and, unusually for this list, not because the file
+is unreadable. There is simply nothing to read: **no table in any of the
+nine sample files records either**, so there is no case to decode against.
+One deliberately formatted table would settle it, and the reader it plugs
+into is already written.
 
 ### What is already known
 
-Established here; don't re-derive it.
+- libmspub reads four fields of a cell record — the first and last row and
+  column — and skips the rest, its own source marking them
+  `// TODO: 0x09 - 0x0e: width/height of content + margins?`. Upstream
+  master is identical to the 0.1.5 release here, so nobody has taken it
+  further.
+- The whole vocabulary the corpus uses is now known: a table chunk (type
+  `0x10`) carries the row and column counts, the total size, the seqnum of
+  its cells chunk and the row/column size array; a cells chunk (type
+  `0x63`) carries one record per cell holding `0x01`-`0x04` bounds,
+  `0x0A`-`0x0D` insets, and `0x07`, `0x09` and `0x0E`.
+- **Omitted means absent, not defaulted.** One table writes its insets as
+  36576 EMU — Publisher's own 0.04in default — explicitly on all four
+  sides of all 21 cells, so the writer states the value it means.
+  Therefore the absence of any fill or line field across all 1,260 cell
+  records in the corpus says those tables are genuinely unstyled, rather
+  than styled somewhere this does not look.
+- A table's own fill and border are **not** affected: libmspub draws those
+  as an ordinary shape behind the table, and they already convert.
+- Two fields remain unidentified. `0x07` holds 1 or 2, is uniform across
+  every table that has it, and is absent from the rest — consistent with
+  vertical alignment, whose enumeration in this format is top(0),
+  middle(1), bottom(2), but consistent with other per-table switches too.
+  It sits on 869 of the 974 cells converted, so a wrong guess would move
+  text in nearly all of them; that is why it is not converted. `0x0E`
+  holds exactly an eighth or a quarter of an inch and correlates with
+  nothing in the grid.
 
-- **36 of 101 `startTextObject` events carry no `insertText` at all.** The
-  parser opens the object, sets its geometry, and closes it again.
-- **15 of those are headline-shaped**, on a page 421.0 x 595.0 pt (A5).
-  Most sit at the very top of a page, the rest between articles:
+### Step 1 — produce the sample files (on Windows, with Publisher, ~10 min)
 
-  ```
-  page    x      y      w      h
-     3    6.3  418.3  392.8   33.4
-     3   37.3   30.6  346.3   32.0
-     4   45.4  285.1  336.0   41.8
-     5   24.6   34.6  373.4   32.4
-     5   14.8  313.9  380.8   32.5
-     5   15.1  478.9  372.5   28.9
-     7   21.5   34.7  356.2   36.1
-     7   21.5  277.8  371.3   32.9
-     9   38.6   37.8  347.1   31.1
-    11  102.5   -6.0  295.5   91.6
-    11   91.8   -1.6  331.2   47.8
-    15   38.1   41.9  337.5   40.8
-    19   35.2   45.0  350.6   39.7
-    24   30.4   27.6  360.2   26.2
-    26   36.3   33.7  352.3   34.9
-  ```
+Three small files, each a single 3 x 3 table on one page, otherwise
+identical.
 
-- **Nothing else in the file is being lost.** The pipeline reconciles:
-  132 `drawPolygon` events are 59 real shapes plus 73 carrying pictures,
-  and text frames falling 86 -> 63 is entirely the page-number footer
-  being lifted onto four masters. The only other loss is 64 WMF ornaments
-  of 8.3 x 8.3 pt, all on page 8, which are not headers.
-- **No headline text is sitting unread in the file's text streams.** Every
-  string in the `.pub`, in both Latin-1 and UTF-16LE, was diffed against
-  the 1,427 distinct words the conversion delivers. The only unmatched
-  candidates are object names — `randillustratie`, `prlogo`,
-  `advertentie`, `websiteformulier` — not headline copy. So the text is
-  either somewhere the string scan cannot see it, or it is not stored as
-  text at all.
+1. **The control.** Insert a 3 x 3 table, type `1` to `9` in the cells,
+   change nothing else. Save as `table-plain.pub`.
+2. **The styled one.** Same table, then, using whichever fill and border
+   controls that Publisher version offers — the ribbon's table Design tab
+   in 2010 and later, **Format → Borders and Shading** before that:
+   - shade cell R1C1 solid red and R1C2 solid yellow, leaving R1C3
+     unshaded;
+   - give cell R2C1 a 4pt blue border on **all** sides, and R2C2 a 4pt
+     blue border on its **top edge only**;
+   - leave row 3 untouched.
+   Save as `table-styled.pub`.
+   Two shades and two border shapes, because one of each cannot tell a
+   colour apart from a weight, nor a per-cell record from a per-edge one.
+3. **The alignment one.** Same table as the control, but make every row
+   1 inch tall (drag the row edges) and set the cells' *vertical*
+   alignment — the control lives on the ribbon's table Layout tab in 2010
+   and later, and under **Format → Align Text Vertically** before that —
+   to top down column 1, centre down column 2 and bottom down column 3.
+   Save as `table-valign.pub`.
+   This is the file that identifies `0x07`, and it needs the tall rows or
+   the difference is invisible.
+4. Copy all three to `files/table-samples/` on the Mac.
 
-- **There is a second symptom in the same bands, and it may be the same
-  object.** Each of these files also carries 15 paths that libmspub reports
-  as two disconnected two-point edges with a fill and no stroke. They sit
-  in the headline bands, they are headline-sized (110–225pt wide, 20–32pt
-  tall), and they enclose no area, so they draw nothing. Until recently
-  they were welded into a single outline, which drew a filled bowtie across
-  the page — that is fixed, and they are now reported instead.
-
-  On page 4 of `1336 kerkbode.pub` the path is at (172.4, 292.1),
-  172.6 x 31.5pt, filled black:
-
-  ```
-  M(172.4, 292.1) L(342.9, 292.1) Z    <- top edge
-  M(174.4, 323.6) L(345.0, 323.6) Z    <- bottom edge
-  ```
-
-  Page 1 has a pair of these at (34.6, 20.4), 338.9 x 163.2pt — one filled
-  brown, one stroked darker — which is masthead-sized.
-
-  Two readings fitted, and **one has since been ruled out by experiment.**
-  Either these were the *outline* of a filled shape libmspub emitted as
-  loose edges — in which case joining top-edge to reversed-bottom-edge
-  recovers a band — or they are guide geometry belonging to something else,
-  WordArt having exactly this shape in a top and bottom guide, in which
-  case they were never meant to be visible.
-
-  The join was implemented and tried. It produced coherent,
-  non-self-crossing quads in banner colours, page one's a deliberately
-  slanted 318 x 74 pt parallelogram with a stroked twin — so the geometry
-  was no help in telling the two apart. Opened in Affinity, the result was
-  **shapes that are not in the source document**, so it was reverted
-  (commit d43cdfe, reverted immediately after).
-
-  So these are guide geometry, not artwork, and that is a genuine
-  narrowing: **whatever the headline objects are, they carry their own
-  geometry and their own text, and libmspub hands over neither.** WordArt
-  fits that exactly. Step 1 below is now the only way to confirm it, and
-  the answer decides whether the text is recoverable from the file or
-  whether the honest end state is a warning naming each lost headline.
-
-  Do not re-try the join. It is disproven, and it silently adds filled
-  shapes on top of the page.
-
-Regenerate the table with:
+### Step 2 — read the records (on the Mac, ~1 min)
 
 ```sh
-python3 - <<'EOF'
-import json, subprocess
-src = "files/cgk/1336 kerkbode.pub"
-out = subprocess.run(["./bin/pubdump", src], capture_output=True).stdout
-page = 0; cur = None; had = False
-print("page    x      y      w      h")
-for line in out.decode("utf8", "replace").splitlines():
-    try: e = json.loads(line)
-    except Exception: continue
-    if e["e"] == "startPage": page += 1
-    elif e["e"] == "startTextObject": cur, had = e.get("p", {}), False
-    elif e["e"] == "insertText" and e.get("t", "").strip(): had = True
-    elif e["e"] == "endTextObject":
-        pt = lambda v: round(float(str(v).replace("in", "")) * 72, 1) if v else 0.0
-        if not had and cur and pt(cur.get("svg:width")) > 200:
-            print(f'{page:>4} {pt(cur.get("svg:x")):6.1f} {pt(cur.get("svg:y")):6.1f} '
-                  f'{pt(cur.get("svg:width")):6.1f} {pt(cur.get("svg:height")):6.1f}')
-        cur = None
-EOF
+cd ~/prive/tools/affinity-converter
+python3 research/table_cells.py files/table-samples/*.pub
 ```
 
-### Step 1 — look at one of them (on Windows, with Publisher, ~5 min)
+It prints every table's grid and every field of every cell record, named
+where the meaning is settled and as a bare id where it is not, which is
+exactly the comparison needed.
 
-Open `1336 kerkbode.pub`. Go to **page 3** and look at the top of the
-page: the frame is 346 x 32 pt at 37, 31 — a little over half an inch
-down, spanning nearly the full text width. Page 5 has three of them and is
-the best page to compare on.
+### Step 3 — read the result
 
-Click the headline and note:
+- Diff `table-plain.pub` against `table-styled.pub`. The fields that
+  appear only in the styled one are fill and ruling. Expect the fill to be
+  an index into the document palette rather than an RGB triple — that is
+  how shape fills are stored, and `model` already resolves palette indices
+  for those.
+- R1C1 against R1C2 separates the *colour* from the fact of being filled.
+  R2C1 against R2C2 says whether ruling is one field per cell or one per
+  edge: if R2C2 carries a single field where R2C1 carries four, it is per
+  edge, which is also what IDML wants — `Cell` takes
+  `TopEdgeStrokeWeight` and `TopEdgeStrokeColor` and a set for each side.
+- In `table-valign.pub`, if `0x07` reads 0-or-absent, 1 and 2 down the
+  three columns, it is vertical alignment and maps straight onto IDML's
+  `VerticalJustification` (`TopAlign`, `CenterAlign`, `BottomAlign`). If
+  it does not move at all, it is something else and stays unconverted.
 
-1. **What kind of object is it?** The Publisher status bar and the ribbon
-   name it. The candidates that matter:
-   - a plain **text box** → the text should have come through, so this is
-     a libmspub bug worth reducing to a minimal file and reporting
-   - **WordArt** → the text lives in an Escher shape, not the Quill text
-     stream, which is why a string scan does not find it
-   - a **grouped** object, or a text box with a **fill or outline** → then
-     the frame should not have been dropped at all, and the bug is ours
-   - a **picture** of the headline → nothing to recover; it should be
-     arriving through the image path instead
-2. **The exact words**, verbatim including capitalisation. That is what
-   makes the next step possible.
-3. Whether the text is **rotated or on a path**, and whether the font is
-   anything unusual.
+### Step 4 — wire it in
 
-### Step 2 — find the words in the file (on the Mac, ~2 min)
+`pubfile._table_cells` already walks every field of every record and
+returns a per-cell structure keyed to the table; carrying fill and ruling
+means adding fields to `TableStructure`, widening `model.TableCell`
+alongside `insets`, and writing the matching attributes in
+`idml._table_story_part`, next to the inset attributes. The matching, the
+plumbing and the tests are all in place — the sample is the only missing
+piece.
 
-With the exact headline text from step 1:
-
-```sh
-python3 - <<'EOF'
-needle = "PASTE THE HEADLINE HERE"
-raw = open("files/cgk/1336 kerkbode.pub", "rb").read()
-for enc in ("latin-1", "utf-16-le", "utf-8", "cp1252"):
-    hit = raw.find(needle.encode(enc, "ignore"))
-    print(f"{enc:<10} {'at 0x%x' % hit if hit >= 0 else 'not found'}")
-EOF
-```
-
-Then read the result:
-
-- **Found** → the text is in the file and libmspub is walking past it.
-  Which stream it lands in says where: compare the offset against the
-  `Contents`, `CONTENTS` (Quill) and `Escher/EscherStm` stream extents,
-  which `pubfile._read_stream` can already pull out. If it is in Quill,
-  the converter can reach it the same way it already reads master
-  structure and the field table — that is a real fix, on this machine.
-- **Not found in any encoding** → the headline is not stored as text.
-  Most likely WordArt, holding its own glyph outline or a compressed
-  copy. Recovering it would mean decoding that, which is a much larger
-  job; the honest interim is to *warn* rather than silently drop, so the
-  operator knows a headline needs retyping.
-
-### Step 3 — wire in whichever answer it is
-
-If the text is reachable, it joins `pubfile.py`, which exists for exactly
-this: things the file says that libmspub does not pass on. If it is not,
-add a warning where the empty frame is dropped — a wide, short, empty
-frame at the top of a page is a specific enough shape to report as a
-probable lost headline, and that is strictly better than the current
-silence.
-
-Either way, **stop dropping these silently**. That is the part that does
-not need Publisher, and it is what turned this into a surprise rather
-than a line in the report.
+While in Publisher, also answer `research/probe_cell_insets.py` on the
+Affinity side: it builds a table whose rows differ only in their insets,
+and no one has yet confirmed that Affinity honours them on import.

@@ -413,16 +413,46 @@ These are real and deliberate, not bugs to be surprised by later.
   through `emf2svg-conv` and ImageMagick, and is dropped with a warning
   when they are absent. The same translator could be pointed at EMF
   records, which are a cleaner format.
-- **Some Publisher paths arrive as disconnected edges and cannot be
-  filled.** libmspub reports most paths as several subpaths — 50 of the 56
-  in the sample corpus — and where each is a bare two-point segment, a fill
-  has no area to cover and the shape draws nothing. Each subpath is written
-  as its own outline, which is what the path data says; joining them would
-  invent geometry, and doing so used to draw a filled bowtie across the
-  page. Files where this happens are flagged `review` with a count, because
-  something was drawn there in Publisher and it needs redrawing by hand.
-  In the newsletters these sit in the headline bands, so they may well be
-  the same objects as the empty headline frames — `actions.md` item 8.
+- **WordArt headlines are recovered from the file.** A Publisher headline
+  set in WordArt used to vanish twice over. libmspub reports the object as
+  an *empty* text frame, which is dropped for having no text, no fill and
+  no stroke; and it reports the two guide edges the glyphs are stretched
+  between as a filled path that encloses no area and draws nothing. The
+  words themselves are in the Escher stream, in properties libmspub has no
+  constants for, and that is where `pubfile` now reads them: the text, the
+  font, the point size and the rotation.
+
+  The guide path is then replaced by a text frame carrying the words. The
+  band and the rotation come from the shape's own anchor, the colour and
+  any shadow from what libmspub already reported for the same shape, and
+  the two halves are tied together by the only thing they share — the
+  centre of that band, which both sides put in the same place to a
+  fraction of a point. Across the corpus that is 46 headlines, every one of
+  which was previously lost: *Meditatie*, *Kerkdiensten*,
+  *Dankbetuigingen*, and the slanted *Kerkbode* masthead at its own
+  −12.19°.
+
+  What cannot come across is WordArt itself, since IDML has no warped or
+  stretched type, so the headline arrives as straight text in its band and
+  is flagged `review`. Two shapes in the corpus state no point size —
+  WordArt fits the glyphs to the shape — and those are sized from the band
+  by the ratio the sized shapes measure (1.33, spread 1.02 to 1.59), which
+  the warning says out loud.
+
+  A WordArt shape libmspub reported *nothing* for cannot be placed this
+  way: without a shape in the event stream there is nothing to confirm
+  where the words went, and putting them on the page on the strength of
+  the .pub alone is how invented content gets in. Two shapes in
+  `Cantico_dei_Cantici.pub` are in that position, and the report names
+  their words so they can be retyped.
+- **A filled path of disconnected edges that is *not* WordArt still cannot
+  be filled.** libmspub reports most paths as several subpaths — 50 of the
+  56 in the sample corpus — and where each is a bare two-point segment, a
+  fill has no area to cover. Each subpath is written as its own outline,
+  which is what the path data says; joining them would invent geometry, and
+  doing so used to draw a filled bowtie across the page. Every case in the
+  corpus turned out to be WordArt guides and is now recovered as text
+  above; anything left is counted and flagged `review`.
 - **CJK text is not repaired.** The code page detector (see below) works
   on alphabetic scripts, where letter frequency is a usable signal. For
   Chinese, Japanese and Korean it declines to guess rather than risk
@@ -534,6 +564,28 @@ These are real and deliberate, not bugs to be surprised by later.
   white on white paper. Publisher's shade ramps also repeat an offset to
   make a hard edge, and those offsets are passed through as reported rather
   than evened out, which would smooth the effect away.
+
+  **A see-through ramp is carried as far as IDML allows.** An IDML gradient
+  stop has a colour and a position and no opacity, so transparency can only
+  be stated for the object as a whole. That is exact whenever the stops
+  agree, which is every case in the corpus — 42 shapes, all of them a
+  two-stop ramp with both stops at 60% and no stroke to fade along with the
+  fill. A ramp whose stops *differ* in opacity cannot be carried at all,
+  and is flagged rather than averaged into something the file never said.
+- **Transparency is opacity, not a tint.** A shape's own `draw:opacity`
+  used to be written as `FillTint`, which is a different thing: a tint
+  mixes the colour with the paper, so a 78% fill came out pale rather than
+  see-through and looked right only over white. It is now a
+  `BlendingSetting`, IDML's real opacity. This applies to the whole object
+  including its stroke, where Publisher's applies to the fill; every
+  transparent shape in the corpus is unstroked, so the two coincide.
+- **Shadows are carried.** libmspub reports a Publisher shadow in full —
+  colour, both offsets and opacity — and all of it used to be dropped,
+  flattening 15 shapes in each newsletter. It becomes an IDML
+  `DropShadowSetting` with no blur, no spread and no noise, because
+  Publisher's shadow is a flat offset copy and a reader's own defaults
+  would soften it. IDML states the offset twice, as X/Y and as an angle
+  with a distance; both are written and they agree.
 - **Elliptical arcs are approximated** with straight segments.
 - **Tables keep their grid.** libmspub describes a Publisher table
   completely — a width per column, a height per row, and a row/column pair
@@ -542,10 +594,53 @@ These are real and deliberate, not bugs to be surprised by later.
   span covers are not emitted twice. An all-empty grid with no fill or
   stroke is dropped, the same rule an empty text frame follows.
 
-  Cell *formatting* is not carried: no per-cell fill, no rule weights or
-  colours, no cell insets. libmspub reports none of those, so the grid
-  arrives with Affinity's default table styling and needs restyling if the
-  original was ruled or shaded.
+  **Cell insets are carried**, read out of the .pub rather than from
+  libmspub, which stops at a cell's row and column and marks the rest of
+  the record "width/height of content + margins?" in a comment. The file
+  gives four insets per cell in EMU, and the table's own grid — a width
+  per column and a height per row, both also in the file — is what ties a
+  cells chunk back to the table the event stream is showing. Across the
+  newsletters that is 18 tables and 974 cells, every one matched.
+
+  This matters most where the padding is small. The newsletters build
+  their two-column look from layout tables whose gutter column is an
+  eighth of an inch — 9pt — so a reader's own default inset applied to
+  both sides of it leaves nothing to set text in. A cell the .pub did not
+  describe is left without inset attributes rather than written as zero,
+  so the default still applies wherever we genuinely do not know.
+
+  Affinity honours all four, and honours a zero: checked on Affinity
+  Publisher for macOS with `research/probe_cell_insets.py`, whose rows
+  differ only in their insets. The uninset row sits tight against every
+  edge rather than picking up a default, a 24pt inset moves the text by
+  24pt, and the 9pt gutter column still sets text.
+
+  What that probe also showed, unasked, is that **the cell rules are
+  Affinity's, not Publisher's.** We reference `TableStyle/$ID/[Basic
+  Table]` without defining it, so the reader supplies its own, and the
+  one Affinity supplies draws a line around every cell. Whether a
+  Publisher table with no ruling recorded should print no lines or
+  Publisher's own default lines is unsettled — but letting the reader
+  decide is the one answer that is certainly not the file's. `actions.md`
+  §9 settles it with the same sample.
+
+  Cell *fill and ruling* are still not carried, and this is a property of
+  the corpus rather than a gap in the reader: no table in any sample file
+  records either. Every cell record holds only its row and column bounds,
+  its insets, and two cached extents, and a field the file leaves out is
+  absent rather than defaulted — one table writes its insets as
+  Publisher's own 0.04in default on all four sides explicitly, so the
+  writer states what it means. A ruled or shaded table therefore still
+  needs a sample before it can be read; `actions.md` says how to make
+  one. A table's *own* fill and border do arrive, as the rectangle
+  libmspub draws behind it.
+
+  Two fields in each cell record remain unidentified and are not
+  converted: one holding 1 or 2, uniform across a table — plausibly
+  vertical alignment, whose enumeration in this format is top, middle,
+  bottom — and one holding an eighth or a quarter of an inch. Guessing at
+  the first would move the text in 869 of the 974 cells converted, so it
+  waits for the same sample.
 - **Fonts are referenced by name.** Affinity substitutes anything not
   installed — install the source fonts first, or expect reflow.
 - **libmspub sometimes reports a degenerate frame size.** One sample has

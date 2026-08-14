@@ -831,8 +831,6 @@ class IdmlWriter:
             attributes["GradientFillAngle"] = fmt(gradient.angle)
         if item.style.stroke is not None:
             attributes["AppliedStrokeStyle"] = "StrokeStyle/$ID/Solid"
-        if item.style.fill_opacity < 1.0:
-            attributes["FillTint"] = fmt(item.style.fill_opacity * 100)
         return attributes
 
     def _emit_shape(
@@ -867,6 +865,82 @@ class IdmlWriter:
                 _rect_path(properties, item.width, item.height)
         else:
             _rect_path(properties, item.width, item.height)
+
+        self._emit_transparency(element, item.style)
+
+    def _emit_transparency(
+        self, element: ET.Element, style: model.GraphicStyle
+    ) -> None:
+        """Opacity and shadow, both of which live in one IDML element.
+
+        Opacity used to be written as `FillTint`, which is not what it
+        means: a tint mixes the colour with the paper, so a 78% fill came
+        out pale rather than see-through and looked right only over white.
+        `BlendingSetting` is the real thing. It applies to the whole object
+        rather than to its fill alone, which is exact for every
+        transparency in the corpus -- all 46 of them, the 42 see-through
+        gradients and the four faded fills, are on shapes with no stroke.
+        """
+        opacity = style.fill_opacity
+        shadow = style.shadow
+        if opacity >= 1.0 and shadow is None:
+            return
+
+        setting = ET.SubElement(element, "TransparencySetting")
+        if opacity < 1.0:
+            ET.SubElement(
+                setting,
+                "BlendingSetting",
+                {
+                    "BlendMode": "Normal",
+                    "Opacity": fmt(max(0.0, opacity) * 100),
+                    "KnockoutGroup": "false",
+                    "IsolateBlending": "false",
+                },
+            )
+        self._emit_shadow(setting, shadow)
+
+    def _emit_shadow(
+        self, setting: ET.Element, shadow: Optional[model.Shadow]
+    ) -> None:
+        """Publisher's offset shadow, as an IDML drop shadow.
+
+        Publisher's is a flat copy of the shape in one colour: no blur, no
+        spread, no noise, so those are written as zero rather than left to
+        a default that would soften it.
+
+        IDML states the offset twice, once as X/Y and once as an angle with
+        a distance, and InDesign keeps the two in step. Which of them a
+        reader believes is its own business, so both are written and they
+        agree: the angle is where the light is, which is opposite the way
+        the shadow falls, and 135 degrees with both offsets positive is
+        InDesign's own default -- light from the top left, shadow to the
+        bottom right.
+        """
+        if shadow is None:
+            return
+        ET.SubElement(
+            setting,
+            "DropShadowSetting",
+            {
+                "Mode": "Drop",
+                "BlendMode": "Normal",
+                "Opacity": fmt(shadow.opacity * 100),
+                "XOffset": fmt(shadow.offset_x),
+                "YOffset": fmt(shadow.offset_y),
+                "Angle": fmt(
+                    math.degrees(math.atan2(shadow.offset_y, -shadow.offset_x)) % 360.0
+                ),
+                "Distance": fmt(math.hypot(shadow.offset_x, shadow.offset_y)),
+                "Size": "0",
+                "Spread": "0",
+                "Noise": "0",
+                "UseGlobalLight": "false",
+                "KnockedOut": "false",
+                "HonorOtherEffects": "false",
+                "EffectColor": self._color_ref(shadow.color, "Color/Black"),
+            },
+        )
 
     def _emit_text_frame(
         self,
@@ -917,6 +991,7 @@ class IdmlWriter:
             # it does not overlap InsetSpacing above.
             preference["TextColumnGutter"] = fmt(frame.column_gap)
         ET.SubElement(element, "TextFramePreference", preference)
+        self._emit_transparency(element, frame.style)
 
         # A chain's text belongs to the story, not to each frame that shows
         # it, so it is written once — at the head, the only link still
@@ -1043,17 +1118,26 @@ class IdmlWriter:
             )
         for cell in table.cells:
             # A cell is named column first, then row.
-            node = ET.SubElement(
-                element,
-                "Cell",
-                {
-                    "Self": f"{table_id}i{cell.column}i{cell.row}",
-                    "Name": f"{cell.column}:{cell.row}",
-                    "AppliedCellStyle": "CellStyle/$ID/[None]",
-                    "RowSpan": str(max(1, cell.row_span)),
-                    "ColumnSpan": str(max(1, cell.column_span)),
-                },
-            )
+            attributes = {
+                "Self": f"{table_id}i{cell.column}i{cell.row}",
+                "Name": f"{cell.column}:{cell.row}",
+                "AppliedCellStyle": "CellStyle/$ID/[None]",
+                "RowSpan": str(max(1, cell.row_span)),
+                "ColumnSpan": str(max(1, cell.column_span)),
+            }
+            # Left unwritten where Publisher said nothing, so a cell whose
+            # padding we do not know keeps whatever the reader defaults to
+            # rather than being flattened to nothing.
+            if cell.insets is not None:
+                attributes.update(
+                    {
+                        "LeftInset": fmt(cell.insets.left),
+                        "TopInset": fmt(cell.insets.top),
+                        "RightInset": fmt(cell.insets.right),
+                        "BottomInset": fmt(cell.insets.bottom),
+                    }
+                )
+            node = ET.SubElement(element, "Cell", attributes)
             paragraphs = cell.story.paragraphs or [model.Paragraph()]
             for position, block in enumerate(paragraphs):
                 self._emit_paragraph(
@@ -1112,6 +1196,11 @@ class IdmlWriter:
                 "TextWrapOffset",
                 {"Top": "0", "Left": "0", "Bottom": "0", "Right": "0"},
             )
+
+        # On the frame rather than the Image inside it: Publisher shadows
+        # the picture as placed, and a shadow on the content would sit
+        # under the frame's own clipping.
+        self._emit_transparency(rectangle, item.style)
 
         index = len(self.image_files) + 1
         filename = f"{self.image_dir_name}/image{index}{model.extension_for(item.mime_type)}"

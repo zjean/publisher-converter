@@ -46,6 +46,10 @@ class GradientStop:
 
     location: float
     color: Color
+    #: 0-1. An IDML gradient stop has no opacity of its own, so this is
+    #: only carryable when every stop on the ramp agrees -- see
+    #: GraphicStyle.from_props.
+    opacity: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,20 @@ class Gradient:
     stops: Tuple[GradientStop, ...]
     angle: float = 0.0
     radial: bool = False
+
+
+@dataclass(frozen=True)
+class Shadow:
+    """Publisher's shadow: a flat offset copy in one colour, no blur.
+
+    `offset_x`/`offset_y` are in points, positive right and down, which is
+    how librevenge reports them and how IDML reads them.
+    """
+
+    color: Color
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    opacity: float = 1.0
 
 
 @dataclass
@@ -73,6 +91,10 @@ class GraphicStyle:
     # True only when a gradient could *not* be represented and the flat
     # first stop stands in for it.
     approximated_fill: bool = False
+    # True when a gradient's stops differ in opacity, which IDML cannot
+    # state at all: object opacity is the only transparency it has for a
+    # fill, and that is one number for the whole ramp.
+    uneven_stop_opacity: bool = False
     # Publisher pictures never arrive as drawGraphicObject. libmspub
     # reports them as a bitmap fill on the shape that follows, so the
     # image payload has to be carried on the graphic style.
@@ -80,11 +102,15 @@ class GraphicStyle:
     fill_image_mime: str = "image/png"
     fill_image_rotation: float = 0.0
     fill_image_luminance: Optional[float] = None
+    shadow: Optional[Shadow] = None
 
     @classmethod
     def from_props(cls, props: dict) -> "GraphicStyle":
         style = cls()
 
+        # A gradient's own transparency, folded into the fill's opacity
+        # below rather than assigned here, which `draw:opacity` overwrites.
+        stop_opacity = 1.0
         fill_kind = props.get("draw:fill", "none")
         if fill_kind == "solid":
             style.fill = parse_color(props.get("draw:fill-color"))
@@ -109,6 +135,16 @@ class GraphicStyle:
             else:
                 # One stop, or none we could read: nothing to ramp between.
                 style.approximated_fill = True
+            # An IDML gradient stop carries a colour and a position and no
+            # opacity, so a see-through ramp can only be stated as the
+            # whole object being see-through. That is exact while every
+            # stop agrees -- which is every case in the corpus, all 42 of
+            # them a two-stop ramp at 60% -- and impossible otherwise.
+            shared = {stop.opacity for stop in stops}
+            if len(shared) == 1:
+                stop_opacity = shared.pop()
+            elif shared:
+                style.uneven_stop_opacity = True
         elif fill_kind == "bitmap":
             payload = props.get("draw:fill-image")
             if payload:
@@ -121,12 +157,29 @@ class GraphicStyle:
             style.fill_image_luminance = units.percent(props.get("draw:luminance"))
             style.fill = parse_color(props.get("draw:fill-color"))
 
-        style.fill_opacity = units.percent(props.get("draw:opacity"), 1.0) or 1.0
+        style.fill_opacity = (
+            units.percent(props.get("draw:opacity"), 1.0) or 1.0
+        ) * stop_opacity
 
         if props.get("draw:stroke", "none") != "none":
             style.stroke = parse_color(props.get("svg:stroke-color"))
             style.stroke_width = units.to_points(props.get("svg:stroke-width"), 0.0) or 0.0
             style.stroke_opacity = units.percent(props.get("svg:stroke-opacity"), 1.0) or 1.0
+
+        # A shadow without a colour cannot be drawn, and a shadow with no
+        # offset at all is not one -- Publisher would be hiding it exactly
+        # behind the shape it belongs to.
+        if props.get("draw:shadow") == "visible":
+            color = parse_color(props.get("draw:shadow-color"))
+            offset_x = units.to_points(props.get("draw:shadow-offset-x"), 0.0) or 0.0
+            offset_y = units.to_points(props.get("draw:shadow-offset-y"), 0.0) or 0.0
+            if color is not None and (offset_x or offset_y):
+                style.shadow = Shadow(
+                    color=color,
+                    offset_x=offset_x,
+                    offset_y=offset_y,
+                    opacity=units.percent(props.get("draw:shadow-opacity"), 1.0) or 1.0,
+                )
 
         return style
 
@@ -242,6 +295,16 @@ class Path(Item):
 
 
 @dataclass
+class CellInsets:
+    """Padding between a cell's edges and its text, in points."""
+
+    left: float = 0.0
+    top: float = 0.0
+    right: float = 0.0
+    bottom: float = 0.0
+
+
+@dataclass
 class TableCell:
     """One cell. `row_span`/`column_span` are 1 unless it covers neighbours."""
 
@@ -250,6 +313,10 @@ class TableCell:
     row_span: int = 1
     column_span: int = 1
     story: Story = field(default_factory=Story)
+    #: None where the .pub was not read, which is not the same as zero:
+    #: a cell with no insets of its own leaves Affinity's default in
+    #: place, and Publisher's are consistently tighter than that.
+    insets: Optional[CellInsets] = None
 
 
 @dataclass
@@ -381,6 +448,8 @@ class Document:
             if item.style.gradient:
                 for stop in item.style.gradient.stops:
                     found.add(stop.color)
+            if item.style.shadow:
+                found.add(item.style.shadow.color)
             if isinstance(item, TextFrame):
                 for paragraph in item.story.paragraphs:
                     for span in paragraph.spans:
@@ -906,7 +975,15 @@ def _gradient_stops(raw: list) -> List[GradientStop]:
         if color is None:
             continue
         offset = units.percent(entry.get("svg:offset"), 0.0) or 0.0
-        stops.append(GradientStop(location=max(0.0, min(100.0, offset * 100.0)), color=color))
+        opacity = units.percent(entry.get("svg:stop-opacity"), 1.0)
+        opacity = 1.0 if opacity is None else max(0.0, min(1.0, opacity))
+        stops.append(
+            GradientStop(
+                location=max(0.0, min(100.0, offset * 100.0)),
+                color=color,
+                opacity=opacity,
+            )
+        )
     return stops
 
 

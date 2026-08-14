@@ -959,3 +959,175 @@ class TableOutputTest(unittest.TestCase):
             for name in archive.namelist():
                 if name.endswith(".xml"):
                     ET.fromstring(archive.read(name))
+
+
+class ShadowOutputTest(unittest.TestCase):
+    """Publisher's shadow, as an IDML drop shadow on the page item."""
+
+    def _spread(self, *items) -> ET.Element:
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        document.pages[0].items.extend(items)
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            return ET.fromstring(archive.read(name))
+
+    def _rectangle(self, shadow) -> model.Rectangle:
+        return model.Rectangle(
+            x=10.0, y=20.0, width=100.0, height=50.0,
+            style=model.GraphicStyle(fill=(255, 255, 255), shadow=shadow),
+        )
+
+    def _setting(self, shadow) -> ET.Element:
+        spread = self._spread(self._rectangle(shadow))
+        settings = list(spread.iter("DropShadowSetting"))
+        self.assertEqual(len(settings), 1)
+        return settings[0]
+
+    def test_a_shape_without_a_shadow_says_nothing_about_one(self):
+        spread = self._spread(self._rectangle(None))
+        self.assertEqual(list(spread.iter("TransparencySetting")), [])
+        self.assertEqual(list(spread.iter("DropShadowSetting")), [])
+
+    def test_the_offset_opacity_and_colour_are_written(self):
+        setting = self._setting(
+            model.Shadow(color=(0xC0, 0xC0, 0xC0), offset_x=2.0, offset_y=3.0, opacity=0.5)
+        )
+        self.assertEqual(setting.get("Mode"), "Drop")
+        self.assertEqual(setting.get("XOffset"), "2")
+        self.assertEqual(setting.get("YOffset"), "3")
+        self.assertEqual(setting.get("Opacity"), "50")
+        self.assertEqual(setting.get("EffectColor"), "Color/C_C0C0C0")
+
+    def test_publishers_shadow_is_hard_edged(self):
+        # A reader's own default blur would soften every one of them.
+        setting = self._setting(model.Shadow(color=(0, 0, 0), offset_x=2.0, offset_y=2.0))
+        self.assertEqual(setting.get("Size"), "0")
+        self.assertEqual(setting.get("Spread"), "0")
+        self.assertEqual(setting.get("Noise"), "0")
+
+    def test_a_down_right_shadow_puts_the_light_at_the_top_left(self):
+        # 135 degrees with both offsets positive is InDesign's own default,
+        # which is what fixes the convention: the angle is the light.
+        setting = self._setting(model.Shadow(color=(0, 0, 0), offset_x=9.0, offset_y=9.0))
+        self.assertEqual(setting.get("Angle"), "135")
+        self.assertAlmostEqual(float(setting.get("Distance")), 12.72792, places=4)
+
+    def test_an_up_left_shadow_is_the_opposite_angle(self):
+        setting = self._setting(model.Shadow(color=(0, 0, 0), offset_x=-9.0, offset_y=-9.0))
+        self.assertEqual(setting.get("Angle"), "315")
+
+    def test_a_global_light_angle_must_not_override_the_offset(self):
+        setting = self._setting(model.Shadow(color=(0, 0, 0), offset_x=2.0, offset_y=2.0))
+        self.assertEqual(setting.get("UseGlobalLight"), "false")
+
+    def test_a_shadowed_text_frame_carries_it_too(self):
+        frame = model.TextFrame(
+            x=10.0, y=20.0, width=100.0, height=50.0,
+            style=model.GraphicStyle(
+                shadow=model.Shadow(color=(0, 0, 0), offset_x=2.0, offset_y=2.0)
+            ),
+        )
+        frame.story.paragraphs.append(model.Paragraph())
+        spread = self._spread(frame)
+        self.assertEqual(len(list(spread.iter("DropShadowSetting"))), 1)
+
+    def test_the_package_is_well_formed(self):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        document.pages[0].items.append(
+            self._rectangle(model.Shadow(color=(1, 2, 3), offset_x=2.0, offset_y=2.0))
+        )
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                if name.endswith(".xml"):
+                    ET.fromstring(archive.read(name))
+
+
+class OpacityOutputTest(unittest.TestCase):
+    """A see-through fill, stated as opacity rather than as a pale tint."""
+
+    def _spread(self, style: model.GraphicStyle) -> ET.Element:
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        document.pages[0].items.append(
+            model.Rectangle(x=10.0, y=20.0, width=100.0, height=50.0, style=style)
+        )
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            return ET.fromstring(archive.read(name))
+
+    def test_opacity_is_written_as_a_blending_setting(self):
+        spread = self._spread(
+            model.GraphicStyle(fill=(255, 0, 0), fill_opacity=0.6)
+        )
+        settings = list(spread.iter("BlendingSetting"))
+        self.assertEqual(len(settings), 1)
+        self.assertEqual(settings[0].get("Opacity"), "60")
+
+    def test_a_tint_is_no_longer_used_to_fake_it(self):
+        # FillTint mixes the colour with the paper; it is not transparency.
+        spread = self._spread(
+            model.GraphicStyle(fill=(255, 0, 0), fill_opacity=0.6)
+        )
+        rectangle = next(spread.iter("Rectangle"))
+        self.assertIsNone(rectangle.get("FillTint"))
+
+    def test_an_opaque_shape_says_nothing_about_transparency(self):
+        spread = self._spread(model.GraphicStyle(fill=(255, 0, 0)))
+        self.assertEqual(list(spread.iter("TransparencySetting")), [])
+
+    def test_opacity_and_a_shadow_share_one_element(self):
+        spread = self._spread(
+            model.GraphicStyle(
+                fill=(255, 0, 0),
+                fill_opacity=0.6,
+                shadow=model.Shadow(color=(0, 0, 0), offset_x=2.0, offset_y=2.0),
+            )
+        )
+        settings = list(spread.iter("TransparencySetting"))
+        self.assertEqual(len(settings), 1)
+        self.assertEqual(
+            [child.tag for child in settings[0]],
+            ["BlendingSetting", "DropShadowSetting"],
+        )
+
+
+class CellInsetOutputTest(unittest.TestCase):
+    """Publisher's cell padding, written where the reader will honour it."""
+
+    def _cells(self, insets):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        table = model.Table(
+            x=0.0, y=0.0, width=200.0, height=50.0,
+            column_widths=[100.0, 100.0],
+            row_heights=[50.0],
+        )
+        table.cells = [
+            model.TableCell(row=0, column=0, insets=insets),
+            model.TableCell(row=0, column=1),
+        ]
+        document.pages[0].items.append(table)
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        return {c.get("Name"): c for c in story.iter("Cell")}
+
+    def test_the_four_sides_are_written_in_points(self):
+        cells = self._cells(model.CellInsets(left=2.88, top=0.75, right=1.0, bottom=0.0))
+        cell = cells["0:0"]
+        self.assertEqual(cell.get("LeftInset"), "2.88")
+        self.assertEqual(cell.get("TopInset"), "0.75")
+        self.assertEqual(cell.get("RightInset"), "1")
+        self.assertEqual(cell.get("BottomInset"), "0")
+
+    def test_a_cell_we_know_nothing_about_keeps_the_readers_default(self):
+        # Writing zeros here would be a claim the file never made.
+        cells = self._cells(model.CellInsets())
+        for attribute in ("LeftInset", "TopInset", "RightInset", "BottomInset"):
+            self.assertIsNone(cells["1:0"].get(attribute))
+
+    def test_a_zero_inset_is_written_rather_than_left_out(self):
+        cells = self._cells(model.CellInsets())
+        self.assertEqual(cells["0:0"].get("LeftInset"), "0")

@@ -8,6 +8,7 @@ cannot.
 
 from __future__ import annotations
 
+import struct
 import unittest
 from pathlib import Path
 
@@ -79,6 +80,22 @@ class RealFileTest(unittest.TestCase):
                 self.assertEqual(len(s.pages), pages)
                 self.assertEqual(len(s.masters), masters)
                 self.assertEqual(s.has_fields, fields)
+
+    def test_wordart_is_read_out_of_a_real_file(self):
+        # The synthetic streams above prove the record layout; this proves
+        # the layout is the one Publisher actually writes.
+        structure = pubfile.read_structure(SAMPLES / "Cantico_dei_Cantici.pub")
+        self.assertIsNotNone(structure)
+        found = {art.text for art in structure.wordart}
+        self.assertIn("Il Cantico dei Cantici", found)
+        art = next(a for a in structure.wordart if a.text == "Il Cantico dei Cantici")
+        self.assertEqual(art.font, "Arial Black")
+        self.assertAlmostEqual(art.size, 28.0)
+        self.assertFalse(art.fitted)
+
+    def test_a_file_with_no_wordart_reports_none(self):
+        structure = pubfile.read_structure(SAMPLES / "MISSAL MARIANA E PEDRO.pub")
+        self.assertEqual(structure.wordart, [])
 
     def test_page_count_matches_what_libmspub_emits(self):
         # The whole approach depends on these lining up index by index.
@@ -280,6 +297,496 @@ class MasterExtractionTest(unittest.TestCase):
         document.masters.append(master)
         self.assertIn("Master Only Font", document.fonts)
         self.assertIn((1, 2, 3), document.colors)
+
+
+def _block(id_: int, type_: int, payload: bytes = b"") -> bytes:
+    return bytes([id_, type_]) + payload
+
+
+def _u32(id_: int, value: int) -> bytes:
+    return _block(id_, 0x20, struct.pack("<I", value))
+
+
+def _container(id_: int, type_: int, children) -> bytes:
+    body = b"".join(children)
+    # A container's length counts itself, so the payload opens with 4 + body.
+    return _block(id_, type_, struct.pack("<I", len(body) + 4) + body)
+
+
+def _chunk(children) -> bytes:
+    body = b"".join(children)
+    return struct.pack("<I", len(body) + 4) + body
+
+
+EMU_PER_POINT = 12700
+
+
+def table_chunk(column_widths, row_heights, cells_seqnum: int) -> bytes:
+    """A TABLE chunk, measured in points and written out in EMU."""
+    sizes = [round(v * EMU_PER_POINT) for v in list(column_widths) + list(row_heights)]
+    running, entries = 0, []
+    for size in sizes:
+        running += size
+        entries.append(_container(0x00, 0x88, [_u32(0x01, running), _u32(0x02, size)]))
+    return _chunk([
+        _u32(0x66, len(row_heights)),
+        _u32(0x67, len(column_widths)),
+        _block(0x6B, 0x70, struct.pack("<I", cells_seqnum)),
+        _container(0x6D, 0x90, entries),
+    ])
+
+
+def cells_chunk(*cells) -> bytes:
+    """A CELLS chunk. Each cell is (row, column, {side id: EMU})."""
+    records = []
+    for row, column, insets in cells:
+        fields = [_u32(0x01, row), _u32(0x02, row), _u32(0x03, column), _u32(0x04, column)]
+        fields += [_u32(side, value) for side, value in sorted(insets.items())]
+        records.append(_container(0x00, 0x88, fields))
+    return _chunk([
+        _block(0x01, 0x18, struct.pack("<H", len(cells))),
+        _container(0x02, 0xA0, records),
+    ])
+
+
+class CellInsetReadingTest(unittest.TestCase):
+    """The part of a cell record libmspub leaves marked as a question."""
+
+    def read(self, *chunks):
+        """Lay chunks out in one buffer and read them as the file's tables."""
+        contents, refs = b"\x00" * 8, []
+        for seq, (kind, payload) in enumerate(chunks):
+            refs.append((seq, kind, len(contents)))
+            contents += payload
+        return pubfile._read_tables(contents, refs)
+
+    def one_table(self, *cells, widths=(72.0, 36.0), heights=(18.0,)):
+        tables = self.read(
+            (0x10, table_chunk(widths, heights, cells_seqnum=1)),
+            (0x63, cells_chunk(*cells)),
+        )
+        signature = pubfile.table_signature(list(widths), list(heights))
+        self.assertIn(signature, tables)
+        return tables[signature]
+
+    def test_the_four_insets_arrive_in_points(self):
+        # 36576 EMU is 0.04in, Publisher's own default, on all four sides.
+        table = self.one_table((0, 0, {0x0A: 36576, 0x0B: 36576, 0x0C: 36576, 0x0D: 36576}))
+        self.assertEqual(
+            [round(v, 4) for v in table.insets[(0, 0)]], [2.88, 2.88, 2.88, 2.88]
+        )
+
+    def test_the_sides_are_read_as_left_top_right_bottom(self):
+        table = self.one_table((0, 0, {0x0A: 12700, 0x0B: 25400, 0x0C: 38100, 0x0D: 50800}))
+        self.assertEqual(table.insets[(0, 0)], (1.0, 2.0, 3.0, 4.0))
+
+    def test_a_side_left_out_is_zero_not_a_default(self):
+        table = self.one_table((0, 0, {0x0A: 9525, 0x0B: 9525, 0x0C: 9525}))
+        self.assertEqual([round(v, 4) for v in table.insets[(0, 0)]], [0.75, 0.75, 0.75, 0.0])
+
+    def test_a_cell_is_keyed_by_the_row_and_column_it_starts_in(self):
+        table = self.one_table((3, 1, {0x0A: 12700}), heights=(18.0, 18.0, 18.0, 18.0))
+        self.assertIn((3, 1), table.insets)
+
+    def test_a_table_whose_cells_chunk_is_missing_is_skipped(self):
+        tables = self.read((0x10, table_chunk((72.0,), (18.0,), cells_seqnum=9)))
+        self.assertEqual(tables, {})
+
+    def test_a_table_with_no_grid_is_skipped(self):
+        tables = self.read((0x10, _chunk([_u32(0x66, 2)])), (0x63, cells_chunk()))
+        self.assertEqual(tables, {})
+
+    def test_two_tables_drawing_one_grid_disagreeing_are_both_dropped(self):
+        tables = self.read(
+            (0x10, table_chunk((72.0,), (18.0,), cells_seqnum=1)),
+            (0x63, cells_chunk((0, 0, {0x0A: 12700}))),
+            (0x10, table_chunk((72.0,), (18.0,), cells_seqnum=3)),
+            (0x63, cells_chunk((0, 0, {0x0A: 25400}))),
+        )
+        self.assertEqual(list(tables.values()), [None])
+
+    def test_two_tables_drawing_one_grid_agreeing_are_kept(self):
+        tables = self.read(
+            (0x10, table_chunk((72.0,), (18.0,), cells_seqnum=1)),
+            (0x63, cells_chunk((0, 0, {0x0A: 12700}))),
+            (0x10, table_chunk((72.0,), (18.0,), cells_seqnum=3)),
+            (0x63, cells_chunk((0, 0, {0x0A: 12700}))),
+        )
+        self.assertEqual([t.insets[(0, 0)] for t in tables.values()], [(1.0, 0.0, 0.0, 0.0)])
+
+    def test_a_signature_survives_the_trip_through_libmspub(self):
+        # Our widths come from EMU; libmspub's come from the same EMU by way
+        # of four-decimal inches. The signature has to ignore that gap.
+        emu = 2472814
+        ours = emu / 12700.0
+        theirs = round(emu / 914400.0, 4) * 72.0
+        self.assertNotEqual(ours, theirs)
+        self.assertEqual(
+            pubfile.table_signature([ours], [ours]),
+            pubfile.table_signature([theirs], [theirs]),
+        )
+
+    def test_a_truncated_cells_chunk_does_not_raise(self):
+        payload = cells_chunk((0, 0, {0x0A: 12700}))
+        for cut in range(1, len(payload)):
+            with self.subTest(cut=cut):
+                self.read(
+                    (0x10, table_chunk((72.0,), (18.0,), cells_seqnum=1)),
+                    (0x63, payload[:cut]),
+                )
+
+
+class CellInsetApplicationTest(unittest.TestCase):
+    """Getting the insets onto the cells libmspub reported."""
+
+    def document_with_table(self):
+        table = model.Table(
+            x=0.0, y=0.0, width=108.0, height=18.0,
+            column_widths=[72.0, 36.0],
+            row_heights=[18.0],
+        )
+        table.cells = [
+            model.TableCell(row=0, column=0),
+            model.TableCell(row=0, column=1),
+        ]
+        document = model.Document(pages=[page_with(table)])
+        return document, table
+
+    def structure_with(self, insets, widths=(72.0, 36.0), heights=(18.0,)):
+        signature = pubfile.table_signature(list(widths), list(heights))
+        return pubfile.FileStructure(
+            tables={signature: pubfile.TableStructure(insets=insets)}
+        )
+
+    def test_a_matched_table_gets_its_padding(self):
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 2.0, 3.0, 4.0)})
+        )
+        self.assertEqual(table.cells[0].insets, model.CellInsets(1.0, 2.0, 3.0, 4.0))
+
+    def test_a_cell_the_file_does_not_mention_is_left_alone(self):
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 1.0, 1.0, 1.0)})
+        )
+        self.assertIsNone(table.cells[1].insets)
+
+    def test_a_table_of_another_shape_is_not_matched(self):
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 1.0, 1.0, 1.0)}, widths=(99.0,))
+        )
+        self.assertIsNone(table.cells[0].insets)
+
+    def test_an_ambiguous_grid_is_not_applied(self):
+        document, table = self.document_with_table()
+        signature = pubfile.table_signature([72.0, 36.0], [18.0])
+        convert._apply_cell_insets(
+            document, pubfile.FileStructure(tables={signature: None})
+        )
+        self.assertIsNone(table.cells[0].insets)
+
+    def test_a_table_inside_a_group_is_reached(self):
+        document, table = self.document_with_table()
+        group = model.Group(children=[table])
+        document.pages[0].items = [group]
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 2.0, 3.0, 4.0)})
+        )
+        self.assertEqual(table.cells[0].insets, model.CellInsets(1.0, 2.0, 3.0, 4.0))
+
+    def test_no_structure_at_all_changes_nothing(self):
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(document, None)
+        self.assertIsNone(table.cells[0].insets)
+
+
+def _escher(rec_type: int, payload: bytes, version: int = 0, instance: int = 0) -> bytes:
+    return struct.pack("<HHI", version | (instance << 4), rec_type, len(payload)) + payload
+
+
+def _escher_container(rec_type: int, children) -> bytes:
+    return _escher(rec_type, b"".join(children), version=0x0F)
+
+
+def _escher_values(rec_type: int, pairs) -> bytes:
+    """An (id, value) record. CLIENT_ANCHOR and CLIENT_DATA repeat length."""
+    body = b"".join(struct.pack("<HI", key, value & 0xFFFFFFFF) for key, value in pairs)
+    return _escher(rec_type, struct.pack("<I", len(body) + 4) + body)
+
+
+def _escher_properties(entries) -> bytes:
+    """A property table: entries first, then every complex payload in order."""
+    table, payloads = b"", b""
+    for pid, value in entries:
+        if isinstance(value, bytes):
+            table += struct.pack("<HI", pid | 0x8000, len(value))
+            payloads += value
+        else:
+            table += struct.pack("<HI", pid, value & 0xFFFFFFFF)
+    return _escher(0xF00B, table + payloads, instance=len(entries))
+
+
+def wordart_shape(
+    text="Kerkdiensten", font="Monotype Corsiva", size=20.0, rotation=None,
+    box=(-100, -50, 100, -20), anchor=True,
+) -> bytes:
+    """One Escher shape container carrying WordArt, as Publisher writes it."""
+    entries = []
+    if text is not None:
+        entries.append((0x00C0, text.encode("utf-16-le") + b"\x00\x00"))
+    if font is not None:
+        entries.append((0x00C5, font.encode("utf-16-le") + b"\x00\x00"))
+    if size is not None:
+        entries.append((0x00C3, int(size * 65536)))
+    if rotation is not None:
+        entries.append((0x0004, int(rotation * 65536)))
+    children = [_escher_properties(entries)]
+    if anchor:
+        children.append(_escher_values(0xF010, [
+            (0x2001, box[0] * 12700), (0x2002, box[1] * 12700),
+            (0x2003, box[2] * 12700), (0x2004, box[3] * 12700),
+        ]))
+    return _escher_container(0xF004, children)
+
+
+class WordArtReadingTest(unittest.TestCase):
+    """The half of a WordArt shape libmspub has no constants for."""
+
+    def read(self, *shapes):
+        return pubfile._wordart_shapes(b"".join(shapes))
+
+    def one(self, **kwargs):
+        found = self.read(wordart_shape(**kwargs))
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def test_the_words_the_font_and_the_size_are_read(self):
+        art = self.one(text="Kerkdiensten", font="Monotype Corsiva", size=20.0)
+        self.assertEqual(art.text, "Kerkdiensten")
+        self.assertEqual(art.font, "Monotype Corsiva")
+        self.assertAlmostEqual(art.size, 20.0)
+        self.assertFalse(art.fitted)
+
+    def test_the_band_is_measured_from_the_centre_of_the_page(self):
+        art = self.one(box=(-100, -50, 100, -20))
+        self.assertAlmostEqual(art.width, 200.0)
+        self.assertAlmostEqual(art.height, 30.0)
+        self.assertAlmostEqual(art.centre_x, 0.0)
+        self.assertAlmostEqual(art.centre_y, -35.0)
+
+    def test_a_shape_stating_no_size_is_fitted_to_its_band(self):
+        art = self.one(size=None, box=(0, 0, 200, 40))
+        self.assertTrue(art.fitted)
+        self.assertAlmostEqual(art.size, 40.0 / 1.33, places=4)
+
+    def test_rotation_is_read_as_signed_fixed_point(self):
+        art = self.one(rotation=-12.192230224609375)
+        self.assertAlmostEqual(art.rotation, -12.192230224609375)
+
+    def test_a_shape_with_no_rotation_is_not_turned(self):
+        self.assertEqual(self.one().rotation, 0.0)
+
+    def test_a_shape_with_no_anchor_cannot_be_placed_and_is_skipped(self):
+        self.assertEqual(self.read(wordart_shape(anchor=False)), [])
+
+    def test_a_shape_with_no_text_is_an_ordinary_shape(self):
+        self.assertEqual(self.read(wordart_shape(text=None)), [])
+
+    def test_a_band_with_no_area_is_skipped(self):
+        self.assertEqual(self.read(wordart_shape(box=(0, 0, 0, 40))), [])
+
+    def test_several_shapes_are_all_found(self):
+        found = self.read(
+            wordart_shape(text="First", box=(0, 0, 100, 20)),
+            wordart_shape(text="Second", box=(0, 40, 100, 60)),
+        )
+        self.assertEqual([art.text for art in found], ["First", "Second"])
+
+    def test_a_shape_after_a_dg_container_is_still_found(self):
+        # A DG container is followed by four bytes of tail, which desyncs
+        # any walk that does not know about it -- and then everything after
+        # the first page's shapes is lost.
+        stream = (
+            _escher_container(0xF002, [wordart_shape(text="Inside")])
+            + b"\x00\x00\x00\x00"
+            + wordart_shape(text="After", box=(0, 40, 100, 60))
+        )
+        self.assertEqual([art.text for art in self.read(stream)], ["Inside", "After"])
+
+    def test_a_truncated_stream_does_not_raise(self):
+        payload = wordart_shape()
+        for cut in range(1, len(payload)):
+            with self.subTest(cut=cut):
+                pubfile._wordart_shapes(payload[:cut])
+
+    def test_a_stream_of_rubbish_does_not_raise(self):
+        pubfile._wordart_shapes(bytes(range(256)) * 4)
+
+
+class WordArtRecoveryTest(unittest.TestCase):
+    """Putting the words back on the guides libmspub did report."""
+
+    def guides(self, x=100.0, y=200.0, width=200.0, height=30.0, **style) -> model.Path:
+        """The two-edge filled path a WordArt arrives as."""
+        return model.Path(
+            x=x, y=y, width=width, height=height,
+            ops=[
+                ("M", x, y), ("L", x + width, y), ("Z",),
+                ("M", x, y + height), ("L", x + width, y + height), ("Z",),
+            ],
+            style=model.GraphicStyle(fill=(0, 51, 128), **style),
+        )
+
+    def structure_with(self, *wordart) -> pubfile.FileStructure:
+        return pubfile.FileStructure(wordart=list(wordart))
+
+    def art(self, **kwargs):
+        # A page of 612 x 792 puts a band at (100, 200) 200 x 30 here.
+        defaults = dict(
+            text="Kerkdiensten", font="Monotype Corsiva", size=20.0,
+            centre_x=100.0 + 100.0 - 306.0, centre_y=200.0 + 15.0 - 396.0,
+            width=200.0, height=30.0,
+        )
+        defaults.update(kwargs)
+        return pubfile.WordArt(**defaults)
+
+    def document_with(self, *items) -> model.Document:
+        return model.Document(pages=[page_with(*items)])
+
+    def test_the_guide_path_becomes_a_text_frame(self):
+        path = self.guides()
+        document = self.document_with(path)
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        items = document.pages[0].items
+        self.assertEqual(len(items), 1)
+        frame = items[0]
+        self.assertIsInstance(frame, model.TextFrame)
+        span = frame.story.paragraphs[0].spans[0]
+        self.assertEqual(span.text, "Kerkdiensten")
+        self.assertEqual(span.font, "Monotype Corsiva")
+        self.assertAlmostEqual(span.size_pt, 20.0)
+
+    def test_the_frame_lands_on_the_band(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        frame = document.pages[0].items[0]
+        self.assertAlmostEqual(frame.x, 100.0)
+        self.assertAlmostEqual(frame.y, 200.0)
+        self.assertAlmostEqual(frame.width, 200.0)
+        self.assertAlmostEqual(frame.height, 30.0)
+
+    def test_the_words_take_the_colour_of_the_shape(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        frame = document.pages[0].items[0]
+        self.assertEqual(frame.story.paragraphs[0].spans[0].color, (0, 51, 128))
+        # ... and the frame itself stays unfilled, or the box paints over them.
+        self.assertIsNone(frame.style.fill)
+
+    def test_a_shadow_on_the_shape_stays_with_the_words(self):
+        shadow = model.Shadow(color=(192, 192, 192), offset_x=2.0, offset_y=2.0)
+        document = self.document_with(self.guides(shadow=shadow))
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertEqual(document.pages[0].items[0].style.shadow, shadow)
+
+    def test_rotation_carries_over(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(
+            document, self.structure_with(self.art(rotation=-12.19))
+        )
+        self.assertAlmostEqual(document.pages[0].items[0].rotation, -12.19)
+
+    def test_each_line_becomes_a_paragraph(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(
+            document, self.structure_with(self.art(text="Ter herinnering\r\naan"))
+        )
+        frame = document.pages[0].items[0]
+        self.assertEqual(
+            ["".join(s.text for s in p.spans) for p in frame.story.paragraphs],
+            ["Ter herinnering", "aan"],
+        )
+
+    def test_a_path_that_matches_nothing_is_left_alone(self):
+        path = self.guides()
+        document = self.document_with(path)
+        convert._recover_wordart(
+            document, self.structure_with(self.art(centre_x=999.0))
+        )
+        self.assertIs(document.pages[0].items[0], path)
+
+    def test_two_candidates_at_one_place_are_an_ambiguity_not_a_guess(self):
+        path = self.guides()
+        document = self.document_with(path)
+        convert._recover_wordart(
+            document, self.structure_with(self.art(), self.art(text="Other"))
+        )
+        self.assertIs(document.pages[0].items[0], path)
+
+    def test_an_ordinary_shape_is_never_replaced(self):
+        rectangle = model.Rectangle(
+            x=100.0, y=200.0, width=200.0, height=30.0,
+            style=model.GraphicStyle(fill=(0, 0, 0)),
+        )
+        document = self.document_with(rectangle)
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertIs(document.pages[0].items[0], rectangle)
+
+    def test_guides_inside_a_group_are_reached(self):
+        path = self.guides()
+        group = model.Group(children=[path])
+        document = self.document_with(group)
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertIsInstance(group.children[0], model.TextFrame)
+
+    def test_guides_on_a_master_are_reached(self):
+        path = self.guides()
+        document = model.Document(pages=[page_with()])
+        document.masters.append(
+            model.Master(name="A", width=612.0, height=792.0, items=[path])
+        )
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertIsInstance(document.masters[0].items[0], model.TextFrame)
+
+    def test_a_recovered_headline_is_reported(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertTrue(any("1 WordArt headline" in w for w in document.warnings))
+
+    def test_a_fitted_size_is_reported_as_such(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(
+            document, self.structure_with(self.art(fitted=True))
+        )
+        self.assertTrue(any("sized from that band" in w for w in document.warnings))
+
+    def test_a_shape_with_nowhere_to_go_is_named_rather_than_dropped(self):
+        document = self.document_with()
+        convert._recover_wordart(
+            document, self.structure_with(self.art(text="I venerdì di Avvento"))
+        )
+        warning = " ".join(document.warnings)
+        self.assertIn("not placed", warning)
+        self.assertIn("I venerdì di Avvento", warning)
+
+    def test_recovered_guides_no_longer_count_as_unrenderable(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        convert._check_unrenderable_paths(document)
+        self.assertFalse(any("enclose no area" in w for w in document.warnings))
+
+    def test_guides_that_stay_are_still_reported_as_unrenderable(self):
+        document = self.document_with(self.guides())
+        convert._check_unrenderable_paths(document)
+        self.assertTrue(any("enclose no area" in w for w in document.warnings))
+
+    def test_no_structure_at_all_changes_nothing(self):
+        path = self.guides()
+        document = self.document_with(path)
+        convert._recover_wordart(document, None)
+        self.assertIs(document.pages[0].items[0], path)
 
 
 @needs_samples

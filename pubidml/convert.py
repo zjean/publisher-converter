@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 import tempfile
 import threading
 import time
@@ -500,6 +501,44 @@ def _apply_master_pages(
         )
 
 
+def _apply_cell_insets(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> None:
+    """Give every table cell the padding Publisher recorded for it.
+
+    libmspub reads a cell's row and column and stops there -- its own
+    source marks the rest of the record "width/height of content +
+    margins?" and skips it -- so a converted table arrives with whatever
+    padding Affinity defaults to. Publisher's is consistently tighter,
+    and in the newsletters' layout grids the gutter columns are an eighth
+    of an inch wide, narrower than two default insets put together, so
+    the default leaves them nothing to set text in.
+
+    The file itself carries four insets per cell, and the table's own
+    grid is what ties a chunk back to the table in the event stream.
+    """
+    if structure is None or not structure.tables:
+        return
+
+    tables = cells = 0
+    for item in document.all_items():
+        if not isinstance(item, model.Table):
+            continue
+        insets = structure.cell_insets(item.column_widths, item.row_heights)
+        if insets is None:
+            continue
+        tables += 1
+        for cell in item.cells:
+            found = insets.get((cell.row, cell.column))
+            if found is None:
+                continue
+            cell.insets = model.CellInsets(*found)
+            cells += 1
+
+    if tables:
+        log.info("cell insets read for %d table(s), %d cell(s)", tables, cells)
+
+
 def _frame_text(frame: model.TextFrame) -> str:
     return "".join(
         span.text
@@ -586,36 +625,169 @@ def _thread_duplicate_stories(document: model.Document) -> None:
         )
 
 
-def _check_unrenderable_paths(document: model.Document) -> None:
-    """Report filled paths whose outlines enclose nothing.
+def _is_edge_only_fill(item: model.Item) -> bool:
+    """A filled path made only of bare two-point edges.
 
     libmspub reports most Publisher paths as disconnected edges -- 50 of
     the 56 in the sample corpus. Where every one of those edges is a bare
     two-point segment, a fill has no area to cover and the shape draws
-    nothing at all. Joining the edges instead would invent geometry, and
-    used to draw a filled bowtie across the page, so they are kept apart
-    and the loss is named.
+    nothing at all. In the corpus every one of them turns out to be the
+    pair of guides a WordArt shape stretches its glyphs between, which is
+    why `_recover_wordart` looks here first.
+    """
+    if not isinstance(item, model.Path) or not item.ops:
+        return False
+    # A stroke draws the edges themselves, so the shape is visible.
+    if item.style.stroke is not None or item.style.fill is None:
+        return False
+    lengths = []
+    current = 0
+    for op in item.ops:
+        if op[0] == "M":
+            if current:
+                lengths.append(current)
+            current = 1
+        elif op[0] in ("L", "C", "Q"):
+            current += 1
+    if current:
+        lengths.append(current)
+    return bool(lengths) and all(length <= 2 for length in lengths)
+
+
+def _recover_wordart(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> None:
+    """Put Publisher's WordArt headlines back, as ordinary text.
+
+    A WordArt headline arrives as two things, neither of them the
+    headline: an empty text frame, which is dropped because it has no text,
+    no fill and no stroke; and a filled path made of the two guide edges
+    the glyphs are stretched between, which encloses no area and draws
+    nothing. The words, the font, the size and the rotation are all in the
+    Escher stream, which libmspub reads for geometry and fill and has no
+    constants for the rest of.
+
+    So the guide path is replaced by a text frame carrying the words. The
+    band and the rotation come from the shape's own anchor, the colour and
+    any shadow from what libmspub already reported about the same shape,
+    and the two halves are tied together by the one thing they share: the
+    centre of that band, which both sides put in the same place to a
+    fraction of a point.
+
+    What cannot come across is WordArt itself -- IDML has no warped or
+    stretched type -- so a headline that was arched or shadowed into a
+    shape arrives as straight text in a box and may need restyling.
+    """
+    if structure is None or not structure.wordart:
+        return
+
+    recovered = fitted = 0
+    placed: set = set()
+
+    def rebuild(items: List[model.Item], width: float, height: float) -> List[model.Item]:
+        nonlocal recovered, fitted
+        out: List[model.Item] = []
+        for item in items:
+            if isinstance(item, model.Group):
+                item.children = rebuild(item.children, width, height)
+                out.append(item)
+                continue
+            art = None
+            if _is_edge_only_fill(item):
+                art = structure.wordart_near(
+                    item.x + item.width / 2.0 - width / 2.0,
+                    item.y + item.height / 2.0 - height / 2.0,
+                )
+            if art is None or not art.text:
+                out.append(item)
+                continue
+            out.append(_wordart_frame(item, art, width, height))
+            placed.add(id(art))
+            recovered += 1
+            fitted += 1 if art.fitted else 0
+        return out
+
+    for page in document.pages:
+        page.items = rebuild(page.items, page.width, page.height)
+    for master in document.masters:
+        master.items = rebuild(master.items, master.width, master.height)
+
+    if recovered:
+        detail = (
+            f", {fitted} of them sized from that band because the file states none"
+            if fitted else ""
+        )
+        document.warnings.append(
+            f"{recovered} WordArt headline(s) recovered as ordinary text: "
+            f"Publisher stores the words in the Escher stream and libmspub "
+            f"reports only the band they were stretched into, so they arrive "
+            f"as straight text in that band and may need restyling{detail}"
+        )
+
+    # A WordArt shape libmspub reported nothing at all for. Its words are in
+    # the file and its band says where they went, but with nothing in the
+    # event stream to confirm either, placing it would be placing content on
+    # the strength of the .pub alone. Naming it is what stops it being a
+    # silent loss.
+    missing = [art for art in structure.wordart if id(art) not in placed]
+    if missing:
+        words = ", ".join(
+            repr(" ".join(art.text.split())[:40]) for art in missing[:3]
+        )
+        if len(missing) > 3:
+            words += f" and {len(missing) - 3} more"
+        document.warnings.append(
+            f"{len(missing)} WordArt shape(s) not placed: libmspub reports no "
+            f"shape where the file puts them, so {words} need retyping"
+        )
+
+
+def _wordart_frame(
+    path: model.Path, art: "pubfile.WordArt", page_width: float, page_height: float
+) -> model.TextFrame:
+    """One WordArt shape as a text frame, in the band the file gives it."""
+    frame = model.TextFrame(
+        x=page_width / 2.0 + art.centre_x - art.width / 2.0,
+        y=page_height / 2.0 + art.centre_y - art.height / 2.0,
+        width=art.width,
+        height=art.height,
+        rotation=art.rotation,
+        # Only the shadow carries over: a fill here would paint a solid
+        # block of the text colour across the band.
+        style=model.GraphicStyle(shadow=path.style.shadow),
+    )
+    # A WordArt headline can be set on more than one line, and states the
+    # break as the same CR LF Publisher uses in body text; one paragraph
+    # per line is what that means.
+    for line in re.split(r"\r\n|\r|\n", art.text):
+        paragraph = model.Paragraph()
+        paragraph.spans.append(
+            model.Span(
+                text=model.clean_text(line),
+                font=art.font,
+                size_pt=art.size,
+                # The fill libmspub reported for this shape is the colour of
+                # the glyphs, not of a box behind them, so it goes on the run.
+                color=path.style.fill,
+            )
+        )
+        frame.story.paragraphs.append(paragraph)
+    return frame
+
+
+def _check_unrenderable_paths(document: model.Document) -> None:
+    """Report filled paths whose outlines enclose nothing.
+
+    What is left here after `_recover_wordart` is a path whose guides
+    matched no WordArt shape, so there is nothing to say about what it
+    outlined. Joining the edges instead would invent geometry, and used to
+    draw a filled bowtie across the page, so they are kept apart and the
+    loss is named.
     """
     unrenderable = 0
     for page in document.pages:
         for item in model._walk(page.items):
-            if not isinstance(item, model.Path) or not item.ops:
-                continue
-            # A stroke draws the edges themselves, so the shape is visible.
-            if item.style.stroke is not None or item.style.fill is None:
-                continue
-            lengths = []
-            current = 0
-            for op in item.ops:
-                if op[0] == "M":
-                    if current:
-                        lengths.append(current)
-                    current = 1
-                elif op[0] in ("L", "C", "Q"):
-                    current += 1
-            if current:
-                lengths.append(current)
-            if lengths and all(length <= 2 for length in lengths):
+            if _is_edge_only_fill(item):
                 unrenderable += 1
 
     if unrenderable:
@@ -746,7 +918,10 @@ def _convert(
         raise ConversionError("document contains no pages")
 
     textrepair.repair_document(document, codepage)
-    _apply_master_pages(document, pubfile.read_structure(source))
+    structure = pubfile.read_structure(source)
+    _apply_master_pages(document, structure)
+    _apply_cell_insets(document, structure)
+    _recover_wordart(document, structure)
     _rasterise_metafiles(document)
     # After the master pass: threading empties the continuation frames, and
     # a run of identical empty frames is exactly what master lifting looks
