@@ -213,6 +213,11 @@ class Span:
     gradient: Optional[Gradient] = None
     stroke: Optional[Color] = None
     stroke_width: float = 0.0
+    #: The locale this run is written in, as language-COUNTRY ('nl-NL').
+    #: It decides hyphenation, so it moves line breaks rather than looks.
+    language: Optional[str] = None
+    #: Horizontal glyph scaling as a percentage, where 100 is unscaled.
+    horizontal_scale: Optional[float] = None
 
     def format_key(self) -> tuple:
         return (
@@ -228,6 +233,8 @@ class Span:
             self.gradient,
             self.stroke,
             self.stroke_width,
+            self.language,
+            self.horizontal_scale,
         )
 
 
@@ -541,6 +548,39 @@ _TEXT_TRANSLATION = _build_text_translation()
 
 def clean_text(text: str) -> str:
     return text.translate(_TEXT_TRANSLATION)
+
+
+# A horizontal scale arrives a hundred times too large. libmspub reads the
+# raw field as tenths of a percent and divides by ten (MSPUBParser.cpp,
+# SCALING_ID), which gives a percentage -- and then hands that to
+# librevenge as a *fraction*, which multiplies by a hundred again. So the
+# corpus's one scaled span reports "9000.0000%" for what Publisher means
+# as 90%. Anything landing outside what IDML can state is dropped rather
+# than written, since a misread here would stretch a run off the page.
+_TEXT_SCALE_RANGE = (1.0, 1000.0)
+
+
+def _text_scale(value) -> Optional[float]:
+    if value is None:
+        return None
+    # units.percent divides the reported figure by a hundred, which is
+    # exactly the correction needed: "9000.0000%" comes back as 90.
+    scale = units.percent(value)
+    low, high = _TEXT_SCALE_RANGE
+    return scale if scale is not None and low <= scale <= high else None
+
+
+def _locale(language, country) -> Optional[str]:
+    """'nl' and 'NL' as 'nl-NL'; a language with no country stands alone.
+
+    libmspub reports both on every span in the corpus, but it reports what
+    the file holds, and a file is free to hold one without the other.
+    """
+    language = str(language).strip() if language else ""
+    country = str(country).strip() if country else ""
+    if not language:
+        return None
+    return f"{language}-{country}" if country else language
 
 
 _ALIGN_MAP = {
@@ -869,6 +909,8 @@ class ModelBuilder:
             strikethrough=props.get("style:text-line-through-type", "none") != "none",
             superscript=str(props.get("style:text-position", "")).startswith("super"),
             subscript=str(props.get("style:text-position", "")).startswith("sub"),
+            language=_locale(props.get("fo:language"), props.get("fo:country")),
+            horizontal_scale=_text_scale(props.get("fo:text-scale")),
         )
         self._paragraph.spans.append(self._span)
 

@@ -1442,3 +1442,84 @@ class StatedTabStopTest(unittest.TestCase):
             model.TabStop(position=36.0), margin_left=36.0, first_line_indent=-36.0
         )
         self.assertEqual(self.positions(items), ["36"])
+
+
+class LanguageOutputTest(unittest.TestCase):
+    """Hyphenation follows the language, and every span states one.
+
+    libmspub reports `fo:language` and `fo:country` on every span in the
+    corpus and both were read nowhere, so Dutch text was hyphenated as
+    whatever the reader defaults to — which moves every line after the
+    first bad break. The shapes below are InDesign's own: a `Language`
+    per locale in the designmap, named `$ID/<name>` from an
+    `AppliedLanguage` on the run.
+    """
+
+    def _package(self, *languages: str):
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        frame = model.TextFrame(x=10.0, y=10.0, width=300.0, height=200.0)
+        paragraph = model.Paragraph()
+        for language in languages:
+            paragraph.spans.append(model.Span(text="tekst ", language=language))
+        frame.story.paragraphs.append(paragraph)
+        document.pages[0].items.append(frame)
+        archive = zipfile.ZipFile(write_package(document))
+        designmap = ET.fromstring(archive.read("designmap.xml"))
+        story = next(n for n in archive.namelist() if n.startswith("Stories/"))
+        return designmap, ET.fromstring(archive.read(story))
+
+    def languages(self, designmap):
+        return [element.get("Name") for element in designmap.findall("Language")]
+
+    def applied(self, story):
+        return [
+            element.get("AppliedLanguage")
+            for element in story.iter("CharacterStyleRange")
+        ]
+
+    def test_a_run_names_the_language_it_is_written_in(self):
+        designmap, story = self._package("nl-NL")
+        self.assertEqual(self.applied(story), ["$ID/Dutch"])
+
+    def test_the_language_is_declared_in_the_designmap(self):
+        designmap, _story = self._package("nl-NL")
+        self.assertEqual(self.languages(designmap), ["$ID/Dutch"])
+        entry = designmap.find("Language")
+        self.assertEqual(entry.get("Self"), "Language/$ID/Dutch")
+        self.assertEqual(entry.get("Id"), "268")
+
+    def test_a_locale_is_declared_once_however_often_it_is_used(self):
+        designmap, _story = self._package("nl-NL", "nl-NL", "it-IT")
+        self.assertEqual(self.languages(designmap), ["$ID/Dutch", "$ID/Italian"])
+
+    def test_a_country_variant_is_named_where_IDML_has_one(self):
+        designmap, story = self._package("en-US")
+        self.assertEqual(self.applied(story), ["$ID/English: USA"])
+        self.assertEqual(
+            designmap.find("Language").get("Self"), "Language/$ID/English%3a USA"
+        )
+
+    def test_an_unknown_country_falls_back_to_the_language_itself(self):
+        # Publisher's fr-CA and fr-FR are both French to a reader that
+        # names only French; the hyphenation dictionary is the same one.
+        designmap, story = self._package("fr-CA")
+        self.assertEqual(self.applied(story), ["$ID/French"])
+
+    def test_a_locale_IDML_cannot_name_is_left_to_the_reader(self):
+        # No plain 'English' exists to fall back to, so stating anything
+        # would be picking a dictionary the file never named.
+        designmap, story = self._package("en-AU")
+        self.assertEqual(self.applied(story), [None])
+        self.assertEqual(self.languages(designmap), [])
+
+    def test_a_span_with_no_language_states_none(self):
+        designmap, story = self._package(None)
+        self.assertEqual(self.applied(story), [None])
+        self.assertEqual(self.languages(designmap), [])
+
+    def test_languages_are_declared_before_the_package_parts(self):
+        # The DOM 8.0 designmap schema puts the Language group ahead of
+        # the idPkg references, so order is not cosmetic here.
+        designmap, _story = self._package("nl-NL")
+        tags = [child.tag for child in designmap]
+        self.assertEqual(tags[0], "Language")

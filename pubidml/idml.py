@@ -81,6 +81,40 @@ _URI_PATH_SAFE = "/!$&'()*+,;=:@"
 NO_PARAGRAPH_STYLE = "ParagraphStyle/$ID/[No paragraph style]"
 NO_CHARACTER_STYLE = "CharacterStyle/$ID/[No character style]"
 
+# What IDML calls the languages Publisher states, with the quote marks and
+# the id each one carries. Copied from the languages a real InDesign
+# designmap declares rather than invented: the name is not a locale tag
+# but a display string, and a reader matches on it exactly.
+#
+# Keyed by locale, most specific first: a country IDML names separately
+# (English: USA) is looked up whole, and anything else falls back to the
+# bare language, which is the same hyphenation dictionary -- fr-CA and
+# fr-FR are both French to a reader that names only French. A locale with
+# neither is left alone rather than guessed at: there is no plain
+# "English" to fall back to, so en-AU keeps the reader's own default.
+_LANGUAGES = {
+    "da": ("Danish", 267, "’’", "””"),
+    "de": ("German: Reformed", 275, "‚‘", "„“"),
+    "en-GB": ("English: UK", 525, "‘’", "“”"),
+    "en-US": ("English: USA", 269, "‘’", "“”"),
+    "es": ("Spanish: Castilian", 294, "‘’", "“”"),
+    "fi": ("Finnish", 273, "’’", "””"),
+    "fr": ("French", 274, "‘’", "«»"),
+    "it": ("Italian", 281, "‘’", "“”"),
+    "nl": ("Dutch", 268, "‘’", "“”"),
+    "pl": ("Polish", 287, "‚’", "„”"),
+    "pt": ("Portuguese", 288, "‘’", "“”"),
+    "sv": ("Swedish", 295, "’’", "””"),
+}
+
+
+def _language_name(locale: Optional[str]) -> Optional[str]:
+    """IDML's name for a locale, or None where it names nothing for it."""
+    if not locale:
+        return None
+    found = _LANGUAGES.get(locale) or _LANGUAGES.get(locale.split("-")[0])
+    return found[0] if found else None
+
 # InDesign's Auto leading is 120% of the type size, and that is also what
 # Publisher calls one "space" of line spacing. Equating the two is what
 # makes the most common case right by construction: libmspub omits the
@@ -443,6 +477,32 @@ class IdmlWriter:
                     for span in paragraph.spans:
                         claim(span.gradient)
 
+    def _languages_used(self) -> List[str]:
+        """IDML's name for every language the text is written in.
+
+        In first-appearance order, and only those a run actually names:
+        a document says nothing about languages it does not use, which is
+        also how InDesign writes it -- a Czech document's designmap
+        declares Czech and nothing else.
+        """
+        found: List[str] = []
+        for story in self._stories():
+            for paragraph in story.paragraphs:
+                for span in paragraph.spans:
+                    name = _language_name(span.language)
+                    if name and name not in found:
+                        found.append(name)
+        return found
+
+    def _stories(self):
+        """Every story in the document, table cells included."""
+        for item in self.doc.all_items():
+            if isinstance(item, model.TextFrame):
+                yield item.story
+            elif isinstance(item, model.Table):
+                for cell in item.cells:
+                    yield cell.story
+
     def _fill_ref(self, style: model.GraphicStyle) -> str:
         """A shape's fill: its gradient where it has one, else its colour."""
         gradient = style.gradient
@@ -535,6 +595,28 @@ class IdmlWriter:
                 "Name": self.doc.title or "Converted Publisher document",
             },
         )
+        # The schema puts the languages ahead of the package references,
+        # and a reader resolving AppliedLanguage looks for them here.
+        for name in self._languages_used():
+            display, identifier, single, double = next(
+                entry for entry in _LANGUAGES.values() if entry[0] == name
+            )
+            primary, _, sub = display.partition(": ")
+            ET.SubElement(
+                document,
+                "Language",
+                {
+                    # A colon is escaped in the id and left alone in the
+                    # name, which is how InDesign writes it.
+                    "Self": f"Language/$ID/{display.replace(':', '%3a')}",
+                    "Name": f"$ID/{display}",
+                    "SingleQuotes": single,
+                    "DoubleQuotes": double,
+                    "PrimaryLanguageName": f"$ID/{primary}",
+                    "SublanguageName": f"$ID/{sub}",
+                    "Id": str(identifier),
+                },
+            )
         for src in (
             "Resources/Graphic.xml",
             "Resources/Fonts.xml",
@@ -1450,6 +1532,14 @@ class IdmlWriter:
             attributes["Position"] = "Superscript"
         elif span.subscript:
             attributes["Position"] = "Subscript"
+        # Not styling, but it decides hyphenation, and Dutch broken as
+        # English reflows every line after the first bad break.
+        language = _language_name(span.language)
+        if language:
+            attributes["AppliedLanguage"] = f"$ID/{language}"
+        # Unscaled text says nothing rather than saying 100.
+        if span.horizontal_scale and abs(span.horizontal_scale - 100.0) > 0.01:
+            attributes["HorizontalScale"] = fmt(span.horizontal_scale)
 
         element = ET.SubElement(parent, "CharacterStyleRange", attributes)
 

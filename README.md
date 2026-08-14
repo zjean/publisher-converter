@@ -557,6 +557,24 @@ These are real and deliberate, not bugs to be surprised by later.
   run whose size libmspub never reported is assumed to be 12pt, IDML's
   default — which is also the size it will be rendered at, so the leading
   stays proportionally correct even there.
+- **Text carries the language it is written in.** libmspub reports
+  `fo:language` and `fo:country` on every run, and both were read nowhere.
+  This is not styling and nothing about it is visible directly, but it
+  decides hyphenation: Dutch text broken by English rules reflows, and in
+  a two-column newsletter that moves every line after the first bad break.
+  Each run now states an `AppliedLanguage` and the document declares a
+  `Language` for each locale it uses, which is what InDesign itself
+  writes — a Czech document's designmap declares Czech and nothing else.
+
+  IDML names languages by a display string rather than a locale tag, so
+  the mapping is by name: `nl-NL` is `$ID/Dutch`, `en-US` is
+  `$ID/English: USA`. A country IDML does not list falls back to the bare
+  language, which is the same hyphenation dictionary — `fr-CA` and
+  `fr-FR` are both French to a reader that names only French. Where there
+  is no fallback either, nothing is written and the run keeps the
+  reader's own default: `en-AU` has no plain "English" to fall back to,
+  and naming a neighbouring dictionary would be choosing one the file
+  never did. Those runs are counted in the report.
 - **Tab stops are carried where the file states one, and most tabs have
   none.** libmspub reports five paragraph properties and no tab stop is
   among them, which is not because Publisher does not record them: the

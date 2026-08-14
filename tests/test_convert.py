@@ -668,3 +668,33 @@ class ContentCensusTest(unittest.TestCase):
     def test_a_table_is_not_counted_as_a_shape(self):
         result = self._result(self._table("x"))
         self.assertEqual(result.shapes, 0)
+
+
+class UnnamedLanguageTest(unittest.TestCase):
+    """What happens to a locale IDML has no display name for."""
+
+    def document(self, *languages) -> model.Document:
+        frame = model.TextFrame(x=0.0, y=0.0, width=200.0, height=100.0)
+        paragraph = model.Paragraph()
+        for language in languages:
+            paragraph.spans.append(model.Span(text="text", language=language))
+        frame.story.paragraphs.append(paragraph)
+        page = model.Page(width=612.0, height=792.0)
+        page.items.append(frame)
+        return model.Document(pages=[page])
+
+    def test_a_locale_with_no_idml_name_is_reported(self):
+        document = self.document("en-AU", "en-AU")
+        convert._check_unnamed_languages(document)
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("en-AU (2)", document.warnings[0])
+
+    def test_a_locale_idml_names_is_not_reported(self):
+        document = self.document("nl-NL", "fr-CA")
+        convert._check_unnamed_languages(document)
+        self.assertEqual(document.warnings, [])
+
+    def test_text_with_no_language_at_all_is_not_reported(self):
+        document = self.document(None)
+        convert._check_unnamed_languages(document)
+        self.assertEqual(document.warnings, [])

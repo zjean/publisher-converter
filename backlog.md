@@ -204,31 +204,58 @@ and hides the page background it was laid over. The fallback is to restore
 
 ---
 
-## 8. Language, and one scaled span
+## 8. Language, and one scaled span — **done**
 
-Every span libmspub reports carries a language, and the converter reads
-neither `fo:language` nor `fo:country`:
+Every span libmspub reports carries a locale and neither `fo:language`
+nor `fo:country` was read. Nine locales across the corpus, on every run:
 
 ```
-1336: nl-NL x1785, en-US x11, fr-FR x4, sv-SE x3, da-DK x2, de-DE x1
-1337: nl-NL x1302, en-US x19, fr-FR x3
-1338: nl-NL x2371, fr-FR x3
+nl-NL x5516  it-IT x448  pt-PT x346  en-US x71  en-AU x64
+fr-FR x10    sv-SE x3    da-DK x2    de-DE x1
 ```
 
-This is not visual styling, but it decides hyphenation, and Dutch text
-hyphenated as English reflows — in a two-column newsletter that moves
-every line after the first bad break. IDML carries it as `AppliedLanguage`
-on a `CharacterStyleRange`, against `Language` entries in the resources,
-so it needs a language resource per distinct locale plus the attribute.
-Affinity has per-text language, so this is likely to land; probe it the
-same way.
+Landed as `model.Span.language`, written by `idml` as `AppliedLanguage`
+on each `CharacterStyleRange` against a `Language` per locale in the
+designmap. Not visual styling, but it decides hyphenation, and Dutch
+broken by English rules reflows every line after the first bad break. It
+is a second influence on the wrapping §11 measured, not the one it found:
+there the cause is the missing fonts, and this only narrows the gap.
 
-One span in `1336` also reports `fo:text-scale`. Read it carefully if it
-is ever carried: libmspub does `textScale = data / 10` and then hands
-librevenge the result as a percentage, so a 90% scale arrives as the
-string `9000.0000%` and `units.percent` would return 90 — a 9000%
-scaling. The correct reading is a further division by 100, which is a
-guess against a single span, which is why it is here and not in the code.
+Three things were settled against real InDesign output rather than
+guessed, since none of it is in any specification to hand:
+
+- **Language elements live in the designmap**, not in `Resources/`, and
+  the DOM 8.0 schema puts them ahead of the `idPkg:` references. Two real
+  InDesign designmaps confirm both, and the second — a Czech document
+  declaring Czech and nothing else — settles that a package declares only
+  the languages it uses rather than the whole built-in table.
+- **`AppliedLanguage` names a display string**, `$ID/English: USA`, not a
+  locale tag, and the id form escapes the colon: `Language/$ID/English%3a
+  USA`. The ids and quote marks in `idml._LANGUAGES` are copied from that
+  same file.
+- **A country IDML does not name falls back to the bare language**, which
+  is the same hyphenation dictionary: `fr-CA` and `fr-FR` are both
+  French. Where there is no fallback either the run is left alone and
+  counted in the report — `en-AU` has no plain "English" behind it, and
+  naming a neighbouring dictionary would be choosing one the file never
+  did. That is 57 runs in `Bus Meeting Zones & Luggage JLW.pub`.
+
+**The scaled span is carried too**, and it was in `1337` rather than
+`1336`. The arithmetic is no longer a guess: `MSPUBParser.cpp` reads the
+raw field as tenths of a percent and divides by ten, and the collector
+then hands that percentage to librevenge as a *fraction*, which
+multiplies by a hundred again. So `9000.0000%` in the event stream is
+Publisher's 90%, and `units.percent` — which divides by a hundred — is
+exactly the correction. It writes `HorizontalScale="90"`, and a figure
+outside what IDML can state (1–1000) is dropped rather than written,
+because a misread here stretches a run off the page.
+
+**Unverified on the Affinity side**, and worth a minute the next time the
+package is open: click into a Dutch paragraph and read the Character
+panel's language. If it says Dutch, hyphenation is following the file. If
+it says whatever the install defaults to, `AppliedLanguage` is being
+ignored and the honest fallback is to say so in the README rather than
+imply the text is hyphenating correctly.
 
 ---
 

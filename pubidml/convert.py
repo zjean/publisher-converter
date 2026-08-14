@@ -943,6 +943,36 @@ def _wordart_frame(
     return frame
 
 
+def _check_unnamed_languages(document: model.Document) -> None:
+    """Report text whose language IDML has no name for.
+
+    Publisher states a locale on every run and IDML names languages by a
+    display string rather than a locale tag, so a country variant it does
+    not list -- en-AU, say, where there is no plain "English" to fall back
+    to either -- can only be left to the reader's own default. Stating a
+    neighbouring dictionary instead would be picking one the file never
+    named, and hyphenation is exactly what the choice decides.
+    """
+    unnamed: Dict[str, int] = {}
+    for item in document.all_items():
+        if not isinstance(item, model.TextFrame):
+            continue
+        for paragraph in item.story.paragraphs:
+            for span in paragraph.spans:
+                if span.language and not idml._language_name(span.language):
+                    unnamed[span.language] = unnamed.get(span.language, 0) + 1
+
+    if unnamed:
+        named = ", ".join(
+            f"{locale} ({count})" for locale, count in sorted(unnamed.items())
+        )
+        document.warnings.append(
+            f"{sum(unnamed.values())} text run(s) are in a language IDML has "
+            f"no name for — {named} — so they keep the reader's own language "
+            f"and will hyphenate by its rules rather than Publisher's"
+        )
+
+
 def _check_gradient_losses(document: model.Document) -> None:
     """Report the gradients that could not be written as gradients.
 
@@ -1130,6 +1160,7 @@ def _convert(
     _apply_tab_stops(document, structure)
     _check_unrenderable_paths(document)
     _check_gradient_losses(document)
+    _check_unnamed_languages(document)
     _check_overset_text(document)
 
     writer = idml.IdmlWriter(

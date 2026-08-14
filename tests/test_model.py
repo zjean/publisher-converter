@@ -625,3 +625,40 @@ class EmptyTableTest(unittest.TestCase):
             *table_events(["1in"], [("0.5in", [(None, 1, 1)])]),
         )
         self.assertEqual(len(doc.pages[0].items), 1)
+
+
+class TextScaleTest(unittest.TestCase):
+    """Horizontal glyph scaling, which arrives a hundred times too large.
+
+    libmspub reads the field as tenths of a percent and divides by ten,
+    then hands librevenge the percentage as if it were a fraction, so the
+    figure in the event stream is a hundred times what Publisher means.
+    """
+
+    def test_the_reported_figure_is_a_hundred_times_the_real_one(self):
+        self.assertAlmostEqual(model._text_scale("9000.0000%"), 90.0)
+
+    def test_unscaled_text_reads_as_a_hundred(self):
+        self.assertAlmostEqual(model._text_scale("10000.0000%"), 100.0)
+
+    def test_a_figure_idml_cannot_state_is_dropped(self):
+        # Writing this through would stretch the run off the page.
+        self.assertIsNone(model._text_scale("900000.0000%"))
+        self.assertIsNone(model._text_scale("0.0000%"))
+
+    def test_nothing_reported_is_nothing_carried(self):
+        self.assertIsNone(model._text_scale(None))
+
+    def test_a_scaled_span_carries_it_through_the_builder(self):
+        doc = support.build(
+            *(support.page() + [
+                event("startTextObject", {"svg:x": "1in", "svg:y": "1in",
+                                          "svg:width": "3in", "svg:height": "2in"}),
+                event("openParagraph", {}),
+                event("openSpan", {"fo:text-scale": "9000.0000%"}),
+                event("insertText", text="smal"),
+                event("closeSpan"), event("closeParagraph"),
+                event("endTextObject"), event("endPage"), event("endDocument"),
+            ])
+        )
+        self.assertAlmostEqual(support.only_span(doc).horizontal_scale, 90.0)
