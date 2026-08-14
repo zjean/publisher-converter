@@ -258,16 +258,15 @@ table matched in the .pub or write the real weights and colours.
 
 WordArt headlines now convert (`actions.md` §8): the words come out of the
 Escher stream and replace the guide path libmspub reports for the same
-shape. **Two shapes in `Cantico_dei_Cantici.pub` have no such path** —
-libmspub reports nothing at all where the file puts them — so they are
-named in the report rather than placed:
+shape. **One shape in `Cantico_dei_Cantici.pub` has no such path** —
+libmspub reports nothing at all where the file puts it — so it is named in
+the report rather than placed:
 
 ```
 'I venerdì 2006 di Avvento'      64.4 x  63.5pt, Comic Sans MS, no size stated
-'Il Cantico dei Cantici'        222.0 x  34.0pt, Arial Black, 28pt
 ```
 
-Everything needed to place them is in the .pub: the anchor gives the band
+Everything needed to place it is in the .pub: the anchor gives the band
 and the rotation, the properties give the text, font and size. What is
 missing is any confirmation from the event stream, and that is the whole
 reason to hesitate — it would be the only content the converter puts on a
@@ -275,10 +274,173 @@ page without libmspub agreeing that something is there, and the corpus has
 one case where the guides were welded into a shape that did not exist
 (197368d).
 
-Worth doing, carefully: place them, but only where nothing libmspub *did*
+Worth doing, carefully: place it, but only where nothing libmspub *did*
 report already overlaps the band, so a WordArt whose text also arrived as
 an ordinary frame cannot be written twice. The overlap test is the part to
 get right; `_recover_wordart` already has the geometry to do it.
+
+**This item used to name two shapes, and was wrong about the second.**
+`'Il Cantico dei Cantici'` did have a path — at exactly its centre, in
+exactly its band — and the reason it looked absent was that the match
+tested the fill. Its glyphs are filled with a texture, so libmspub reports
+the shape's fill as a bitmap and its only colour as the outline, and a
+test reading `fill is not None` never saw it. The guides drew themselves
+across the title instead. Matching on the geometry and letting the paint
+say only *how* it was drawn placed it, with the confirmation this item
+wanted already in hand. Worth remembering when the remaining one is
+attempted: check what libmspub reports before concluding it reports
+nothing.
+
+---
+
+## 11. Where a table lands
+
+Reported from Affinity: a converted table is placed wrong on the page.
+The numbers in the package are not the problem — for all 11 tables
+libmspub reports in `1336 kerkbode.pub`, the row heights sum to
+`svg:height`, the column widths to `svg:width`, and the frame is written
+at the reported `svg:x`/`svg:y` to the point. So it is what a reader does
+with a frame whose whole content is a table.
+
+Two things are now measured rather than assumed, both by
+`research/probe_table_placement.py` against Affinity:
+
+- **A synthetic table places correctly.** 288 x 144pt, three equal rows,
+  drawn over a magenta rectangle at the same coordinates: it lands square
+  on it. Frames are positioned right, row heights are honoured, nothing
+  grows. So there is no general table placement bug, and whatever is wrong
+  is something the real tables have that a made-up one does not.
+- **Pinning the first baseline is harmful.** `FirstBaselineOffset =
+  "FixedHeight"` with `MinimumFirstBaselineOffset = "0"` reads like the
+  right thing for a table, which has no baseline to offset. Affinity
+  answers it by lifting the whole table *a full frame height* off its
+  position. It was tried, measured, and taken back out; `idml.py` carries
+  a comment saying why so it does not get re-invented.
+
+- **Position is not the problem; height is.** The real tables land on
+  their rectangles horizontally and at the top, and render *taller* than
+  the height Publisher states. On `1336`'s first table — 3 columns, 7
+  rows, 262.68pt — the six rows carrying text absorb about 32pt between
+  them and push the empty seventh row clean out of the magenta. The three
+  tables with substantial wrapped text overflow; the two with short cell
+  text sit exactly right. So `SingleRowHeight` is being read as a
+  minimum, and the text is wrapping to more lines than Publisher laid out.
+
+**And the reason is missing fonts, not anything the converter does.**
+Measured on `1336`'s first table, against the leading and insets the
+converter itself writes, with every paragraph on one line:
+
+```
+ row  stated   needs   slack
+  0    36.04   36.14   -0.10
+  1    30.47   30.38   +0.09
+  2    37.56   38.06   -0.50
+  3    61.65   59.18   +2.47
+  4    32.32   30.38   +1.94
+  5    32.32   30.38   +1.94
+  6    32.32   15.02  +17.30   (empty)
+```
+
+Publisher's row heights *are* the height of the text it laid out — two
+rows are already fractionally over before anything wraps. One extra
+wrapped line costs 7.68pt at 8pt type, and no row has that to spare. So
+the geometry has no tolerance at all: a single line breaking differently
+grows the table.
+
+Lines do break differently because **7 of the 12 font families these
+documents use are not installed**: Calibri, Monotype Corsiva, Pristina,
+Aptos, Blackadder ITC, MV Boli, Segoe Script. Calibri is the body font of
+these tables. A substitute with even 1–2% wider glyphs turns a line that
+just fitted into two.
+
+Nothing to fix in the converter: it writes the file's own numbers, and
+they are right. The fix is on the machine opening the package — install
+Calibri, or **Carlito**, which is metric-compatible with it and free, so
+the wrapping matches exactly. Worth confirming that way before spending
+anything on `AutoGrow`; the probe's four treatments are there if it turns
+out to be needed for files whose fonts genuinely cannot be had.
+
+Separately, and found while measuring the above: **a cell's bottom inset
+is zero in all 974 cells of the corpus**, which no Publisher default
+produces. The four inset fields are `0x0A`–`0x0D`, and they are present
+354, 351, 336 and **65** times respectively — the count falls away
+towards the last, the signature of trailing fields left out when they
+match a default. `_table_cells` reads a missing field as zero, so the
+bottom inset is being invented rather than read. Where `0x0D` *is*
+present it is always 2.88pt, Publisher's 0.04in default, which says the
+default those fields are measured against is something else again. Worth
+settling; it makes rows want slightly more height, not less, so it is not
+the cause of the overflow above.
+
+Also unresolved and probably showing at the same time: **three full-page
+layout tables in `1336` never reach the package at all.** libmspub reports
+11 tables and 7 are written; the four missing are the 3-column full-page
+grids with a 9pt gutter, and one 1-column strip. They are gone before
+`_recover_wordart` runs — the parser drops them — and nothing says so in
+the report. Worth finding out whether they are dropped for being empty,
+which for a layout grid may be right, but it should be a decision rather
+than a silence.
+
+---
+
+## 12. Tab stops — **read, and mostly not there to read**
+
+The record is found and carried. It was never missing from the file and
+barely even hidden: libmspub *parses* tab stops, into
+`ParagraphStyle::m_tabStopsInEmu`, and `MSPUBCollector` never reads that
+member again — the only member of the struct it drops — so they are gone
+before librevenge sees anything. `pubfile` reads them out of the Quill
+stream (`Quill/QuillSub/CONTENTS`), whose layout is now in that module's
+docstring: FDPP is a table of paragraphs in text order, each naming a
+style, and block `0x32` inside a style holds an array of stops, each a
+signed EMU position and optionally an alignment byte.
+
+Matching is by paragraph text, because nothing in the event stream
+identifies the paragraph libmspub is reporting. One text stated two ways
+applies to neither — the rule two tables drawing one grid already get.
+
+**The item's premise turned out to be wrong, and this is the finding
+worth keeping.** It assumed 554 tabs were waiting on stops the file
+holds. It does not hold them:
+
+```
+stops stated anywhere in the corpus     335   (313 left, 11 centre, 11 right)
+paragraphs containing a tab             203
+       ... of which state a stop          3
+```
+
+The stops that exist are almost all somewhere else — 313 of them in two
+paragraph *styles* of the kerkbode files, and the 22 alignment-bearing
+ones are the centre-and-right pair of a header or footer, on paragraphs
+holding a page-number field and no tab at all. The tabs that actually
+move text were lined up on Publisher's document-wide default grid, and
+**that interval is not recorded anywhere in the file yet found**.
+
+Which leaves the honest position: the 3 are carried exactly, the hanging
+indent still implies its own stop, and the remaining 200 are counted in
+the report so nobody assumes they landed right.
+
+Two things established while looking, so they don't get re-derived:
+
+- **Document chunk block `0x15` is not the default tab interval.** It
+  reads 359410 EMU in *every* file in the corpus — 566 twips, which is
+  1 cm truncated, and a tempting fit. But it is the same 359410 in the
+  US-Letter `Blank Note Card`, where a metric default has no business
+  being, so it is a constant of the format rather than a locale-derived
+  interval. Materialising a grid from it would have written a 1 cm ruler
+  into every tabbed paragraph on a guess.
+- **Style inheritance is deliberately not implemented.** A paragraph can
+  name a default style (block `0x19`) and take that style's stops, the
+  way every other paragraph property resolves in
+  `MSPUBCollector::getParaStyleProps`. **No tabbed paragraph in the
+  corpus names a style that states any**, so the path would be dormant
+  code written against no sample. `research/tab_stops.py` prints the
+  three counts above per file, including which styles states stops and
+  which paragraphs name them, so a file that does exercise it announces
+  itself.
+
+What would finish this is the default interval, and it needs Publisher:
+`actions.md` §10 is the controlled pair that would find it.
 
 ---
 

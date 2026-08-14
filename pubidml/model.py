@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -128,8 +129,15 @@ class GraphicStyle:
                     stops=tuple(stops),
                     # libmspub inserts the angle as a plain double, so
                     # librevenge stamps it with its default inch unit. The
-                    # value is degrees, the same quirk as rotation.
-                    angle=units.to_float(props.get("draw:angle"), 0.0) or 0.0,
+                    # value is degrees, the same quirk as rotation, and
+                    # Publisher lets it run outside a half turn either way
+                    # -- the corpus has a -225 -- so it is folded back into
+                    # the range IDML states angles in. Folding here rather
+                    # than at write time also means two ramps a full turn
+                    # apart still share one resource.
+                    angle=_fold_angle(
+                        units.to_float(props.get("draw:angle"), 0.0) or 0.0
+                    ),
                     radial=radial,
                 )
             else:
@@ -198,6 +206,13 @@ class Span:
     strikethrough: bool = False
     superscript: bool = False
     subscript: bool = False
+    # Publisher body text is never anything but a flat colour. These carry
+    # a WordArt headline, whose glyphs are painted the way a shape is --
+    # `color` still holds the ramp's first stop, so anything reading only
+    # that behaves as it always did.
+    gradient: Optional[Gradient] = None
+    stroke: Optional[Color] = None
+    stroke_width: float = 0.0
 
     def format_key(self) -> tuple:
         return (
@@ -210,7 +225,23 @@ class Span:
             self.strikethrough,
             self.superscript,
             self.subscript,
+            self.gradient,
+            self.stroke,
+            self.stroke_width,
         )
+
+
+@dataclass
+class TabStop:
+    """Where a tab lands, measured from the frame's text edge.
+
+    libmspub parses these and drops them, so they come from the .pub
+    directly (`pubfile`). Alignment is 'left', 'center' or 'right'; a
+    decimal tab is not something Publisher's record can state.
+    """
+
+    position: float
+    alignment: str = "left"
 
 
 @dataclass
@@ -229,10 +260,16 @@ class Paragraph:
     line_spacing_pt: Optional[float] = None
     list_level: int = 0
     list_ordered: bool = False
+    # Empty unless the .pub stated stops for this paragraph: libmspub
+    # reports none, so they are filled in afterwards by `convert`.
+    tab_stops: List[TabStop] = field(default_factory=list)
     spans: List[Span] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         return not any(span.text for span in self.spans)
+
+    def text(self) -> str:
+        return "".join(span.text for span in self.spans)
 
 
 @dataclass
@@ -455,6 +492,11 @@ class Document:
                     for span in paragraph.spans:
                         if span.color:
                             found.add(span.color)
+                        if span.stroke:
+                            found.add(span.stroke)
+                        if span.gradient:
+                            for stop in span.gradient.stops:
+                                found.add(stop.color)
         return sorted(found)
 
 
@@ -956,6 +998,17 @@ def _rotation(props: dict) -> float:
     discards the bogus suffix.
     """
     return units.to_float(props.get("librevenge:rotate"), 0.0) or 0.0
+
+
+def _fold_angle(degrees: float) -> float:
+    """An angle folded into the half turn either way that IDML states."""
+    folded = math.fmod(degrees, 360.0)
+    if folded > 180.0:
+        folded -= 360.0
+    elif folded <= -180.0:
+        folded += 360.0
+    # -0.0 formats as "-0", which is legal but reads as a mistake.
+    return folded + 0.0
 
 
 def _gradient_stops(raw: list) -> List[GradientStop]:

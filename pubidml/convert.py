@@ -539,6 +539,74 @@ def _apply_cell_insets(
         log.info("cell insets read for %d table(s), %d cell(s)", tables, cells)
 
 
+def _tabbed_paragraphs(document: model.Document):
+    """Every paragraph in the document that contains a tab."""
+    for item in document.all_items():
+        stories = []
+        if isinstance(item, model.TextFrame):
+            stories.append(item.story)
+        elif isinstance(item, model.Table):
+            stories += [cell.story for cell in item.cells]
+        for story in stories:
+            for paragraph in story.paragraphs:
+                if "\t" in paragraph.text():
+                    yield paragraph
+
+
+def _apply_tab_stops(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> None:
+    """Put each paragraph's tabs where Publisher put them.
+
+    libmspub reports five paragraph properties and a tab stop is not among
+    them -- it parses them and then never reads the member it parsed them
+    into -- so every tab in a converted document lands on the reader's own
+    grid, half an inch in InDesign, rather than where the author set it.
+
+    Nothing in the event stream says which paragraph is being reported, so
+    the text is the only handle: a paragraph is given the stops the file
+    states for that same text. Where one text is stated two ways the file
+    is not saying which paragraph is which, and neither is applied --
+    the same rule two tables drawing one grid get.
+
+    What is left over is named rather than passed over in silence: in this
+    corpus most tabs belong to paragraphs the file records no stop for at
+    all, and those still land on the reader's grid.
+    """
+    if structure is None or not structure.paragraph_stops:
+        return
+
+    stated: Dict[str, Optional[tuple]] = {}
+    for text, stops in structure.paragraph_stops:
+        key = model.clean_text(text)
+        # A text that turns up twice is only usable while both agree, and a
+        # paragraph stating no stops disagrees with one that states some.
+        if stated.setdefault(key, stops) != stops:
+            stated[key] = None
+
+    placed = unplaced = 0
+    for paragraph in _tabbed_paragraphs(document):
+        stops = stated.get(paragraph.text())
+        if not stops:
+            unplaced += 1
+            continue
+        paragraph.tab_stops = [
+            model.TabStop(position=position, alignment=alignment)
+            for position, alignment in stops
+        ]
+        placed += 1
+
+    if placed:
+        log.info("tab stops read for %d paragraph(s)", placed)
+    if unplaced:
+        document.warnings.append(
+            f"{unplaced} paragraph(s) use tabs the file states no stop for: "
+            f"Publisher lined them up on its own default grid, which is not "
+            f"recorded anywhere in the file, so they fall on the reader's "
+            f"instead and anything tabbed into columns needs checking"
+        )
+
+
 def _frame_text(frame: model.TextFrame) -> str:
     return "".join(
         span.text
@@ -625,20 +693,20 @@ def _thread_duplicate_stories(document: model.Document) -> None:
         )
 
 
-def _is_edge_only_fill(item: model.Item) -> bool:
-    """A filled path made only of bare two-point edges.
+def _is_guide_pair(item: model.Item) -> bool:
+    """A path made only of bare two-point edges.
 
     libmspub reports most Publisher paths as disconnected edges -- 50 of
-    the 56 in the sample corpus. Where every one of those edges is a bare
-    two-point segment, a fill has no area to cover and the shape draws
-    nothing at all. In the corpus every one of them turns out to be the
-    pair of guides a WordArt shape stretches its glyphs between, which is
-    why `_recover_wordart` looks here first.
+    the 56 in the sample corpus -- and where every one of those edges is a
+    bare two-point segment the path outlines no area at all. In the corpus
+    every one of them turns out to be the guides a WordArt shape stretches
+    its glyphs between, which is why `_recover_wordart` looks here first.
+
+    This is the geometry alone. Whether the path is filled, stroked or
+    both is what tells us how it was *meant* to draw, which is
+    `_is_edge_only_fill`'s question, not this one.
     """
     if not isinstance(item, model.Path) or not item.ops:
-        return False
-    # A stroke draws the edges themselves, so the shape is visible.
-    if item.style.stroke is not None or item.style.fill is None:
         return False
     lengths = []
     current = 0
@@ -652,6 +720,21 @@ def _is_edge_only_fill(item: model.Item) -> bool:
     if current:
         lengths.append(current)
     return bool(lengths) and all(length <= 2 for length in lengths)
+
+
+def _is_edge_only_fill(item: model.Item) -> bool:
+    """A guide pair that was asked to fill, so draws nothing at all.
+
+    A fill needs area and two-point edges enclose none, so such a path is
+    invisible. A stroke, by contrast, draws the edges themselves -- that
+    one is visible, and wrong in its own way, which is why WordArt
+    recovery claims both and only this one is reported when it is left.
+    """
+    return (
+        _is_guide_pair(item)
+        and item.style.stroke is None
+        and item.style.fill is not None
+    )
 
 
 def _recover_wordart(
@@ -681,42 +764,79 @@ def _recover_wordart(
     if structure is None or not structure.wordart:
         return
 
-    recovered = fitted = 0
-    placed: set = set()
+    # Which guide paths belong to which WordArt shape, in document order.
+    # One shape can arrive as several: libmspub makes a separate draw call
+    # per paint, so a headline that is filled *and* outlined reports the
+    # same two guides twice. Collecting them first is what lets the extra
+    # passes be dropped rather than left drawing rules across the words.
+    groups: Dict[int, List[model.Path]] = {}
+    by_id: Dict[int, "pubfile.WordArt"] = {}
+    # The page a shape sits on, which is what its centre is measured from.
+    page_size: Dict[int, tuple] = {}
 
-    def rebuild(items: List[model.Item], width: float, height: float) -> List[model.Item]:
-        nonlocal recovered, fitted
+    def collect(items: List[model.Item], width: float, height: float) -> None:
+        for item in items:
+            if isinstance(item, model.Group):
+                collect(item.children, width, height)
+                continue
+            if not _is_guide_pair(item):
+                continue
+            art = structure.wordart_near(
+                item.x + item.width / 2.0 - width / 2.0,
+                item.y + item.height / 2.0 - height / 2.0,
+            )
+            if art is None or not art.text:
+                continue
+            groups.setdefault(id(art), []).append(item)
+            by_id[id(art)] = art
+            page_size.setdefault(id(art), (width, height))
+
+    for page in document.pages:
+        collect(page.items, page.width, page.height)
+    for master in document.masters:
+        collect(master.items, master.width, master.height)
+
+    # The frame each shape becomes, against the first of its paths. Every
+    # later path is a further paint of the same shape and is dropped.
+    frames: Dict[int, model.TextFrame] = {}
+    superseded: set = set()
+    for art_id, paths in groups.items():
+        width, height = page_size[art_id]
+        frames[id(paths[0])] = _wordart_frame(paths, by_id[art_id], width, height)
+        superseded.update(id(path) for path in paths[1:])
+
+    def rebuild(items: List[model.Item]) -> List[model.Item]:
         out: List[model.Item] = []
         for item in items:
             if isinstance(item, model.Group):
-                item.children = rebuild(item.children, width, height)
+                item.children = rebuild(item.children)
                 out.append(item)
                 continue
-            art = None
-            if _is_edge_only_fill(item):
-                art = structure.wordart_near(
-                    item.x + item.width / 2.0 - width / 2.0,
-                    item.y + item.height / 2.0 - height / 2.0,
-                )
-            if art is None or not art.text:
-                out.append(item)
+            if id(item) in superseded:
                 continue
-            out.append(_wordart_frame(item, art, width, height))
-            placed.add(id(art))
-            recovered += 1
-            fitted += 1 if art.fitted else 0
+            out.append(frames.get(id(item), item))
         return out
 
     for page in document.pages:
-        page.items = rebuild(page.items, page.width, page.height)
+        page.items = rebuild(page.items)
     for master in document.masters:
-        master.items = rebuild(master.items, master.width, master.height)
+        master.items = rebuild(master.items)
+
+    recovered = len(groups)
+    fitted = sum(1 for art_id in groups if by_id[art_id].fitted)
+    repainted = len(superseded)
+    placed = set(groups)
 
     if recovered:
         detail = (
             f", {fitted} of them sized from that band because the file states none"
             if fitted else ""
         )
+        if repainted:
+            detail += (
+                f", and {repainted} repeated paint(s) of the same guides dropped "
+                f"rather than left drawing rules across the words"
+            )
         document.warnings.append(
             f"{recovered} WordArt headline(s) recovered as ordinary text: "
             f"Publisher stores the words in the Escher stream and libmspub "
@@ -743,36 +863,114 @@ def _recover_wordart(
 
 
 def _wordart_frame(
-    path: model.Path, art: "pubfile.WordArt", page_width: float, page_height: float
+    paths: List[model.Path],
+    art: "pubfile.WordArt",
+    page_width: float,
+    page_height: float,
 ) -> model.TextFrame:
-    """One WordArt shape as a text frame, in the band the file gives it."""
+    """One WordArt shape as a text frame, in the band the file gives it.
+
+    `paths` is every guide path libmspub reported for the shape, in the
+    order it drew them. They describe one headline between them -- one
+    call paints the glyphs, another outlines them -- so the paints are
+    merged here rather than each becoming its own object.
+    """
+    def first(pick):
+        for path in paths:
+            value = pick(path.style)
+            if value is not None:
+                return value
+        return None
+
+    fill, gradient = first(lambda s: s.fill), first(lambda s: s.gradient)
+    stroke = first(lambda s: s.stroke)
+    # A shape with no fill of its own -- WordArt filled with a texture
+    # reports one as a bitmap, not a colour -- has nothing but its outline
+    # to colour the words with, so the outline is spent on that instead.
+    outline = stroke if (fill is not None or gradient is not None) else None
+    outline_width = first(lambda s: s.stroke_width or None) or 0.0 if outline else 0.0
+
+    lines = re.split(r"\r\n|\r|\n", art.text)
+
+    # The frame is the band, exactly. Making it taller so a headline
+    # wrapped by a substituted font still had somewhere to go was tried
+    # and taken back out: it only holds the words in place if the reader
+    # centres them vertically, and if it does not, the headline hangs
+    # half a band high instead -- a certain error traded for a possible
+    # one. Centring inside the band is safe either way, because a reader
+    # that ignores it lands on the top of the band, which is where the
+    # words used to be put anyway.
     frame = model.TextFrame(
         x=page_width / 2.0 + art.centre_x - art.width / 2.0,
         y=page_height / 2.0 + art.centre_y - art.height / 2.0,
         width=art.width,
         height=art.height,
         rotation=art.rotation,
+        # WordArt fits its glyphs to the shape, so the band is not a box
+        # the words sit somewhere inside -- it *is* the words, and their
+        # centre is its centre. Straight text is the most that can come
+        # across, and centred in the band is where that lands closest;
+        # left and top would hang the headline off one corner with the
+        # space the stretch used to fill left empty beside it.
+        vertical_align="center",
         # Only the shadow carries over: a fill here would paint a solid
         # block of the text colour across the band.
-        style=model.GraphicStyle(shadow=path.style.shadow),
+        style=model.GraphicStyle(shadow=first(lambda s: s.shadow)),
     )
     # A WordArt headline can be set on more than one line, and states the
     # break as the same CR LF Publisher uses in body text; one paragraph
     # per line is what that means.
-    for line in re.split(r"\r\n|\r|\n", art.text):
-        paragraph = model.Paragraph()
+    for line in lines:
+        paragraph = model.Paragraph(align="center")
         paragraph.spans.append(
             model.Span(
                 text=model.clean_text(line),
                 font=art.font,
                 size_pt=art.size,
-                # The fill libmspub reported for this shape is the colour of
-                # the glyphs, not of a box behind them, so it goes on the run.
-                color=path.style.fill,
+                # What libmspub reported for this shape describes the
+                # glyphs, not a box behind them, so it goes on the run: the
+                # fill is their colour, the ramp their ramp, and the stroke
+                # the outline WordArt draws around them. A shape whose fill
+                # is a texture reports no colour at all, and then the
+                # outline is the only colour the words have.
+                color=fill if fill is not None else stroke,
+                gradient=gradient,
+                stroke=outline,
+                stroke_width=outline_width,
             )
         )
         frame.story.paragraphs.append(paragraph)
     return frame
+
+
+def _check_gradient_losses(document: model.Document) -> None:
+    """Report the gradients that could not be written as gradients.
+
+    Both of these are already worked out where the fill is read; without
+    them said out loud, a ramp that arrived as one stop is the one loss in
+    the conversion that looks exactly like a deliberate flat fill.
+    """
+    flattened = uneven = 0
+    for item in document.all_items():
+        if item.style.approximated_fill:
+            flattened += 1
+        if item.style.uneven_stop_opacity:
+            uneven += 1
+
+    if flattened:
+        document.warnings.append(
+            f"{flattened} gradient fill(s) flattened to one colour: libmspub "
+            f"reported a single stop for them, which leaves nothing to ramp "
+            f"between, so the shape is filled with that stop and any shading "
+            f"Publisher drew needs putting back"
+        )
+    if uneven:
+        document.warnings.append(
+            f"{uneven} gradient fill(s) had stops of differing opacity, which "
+            f"IDML cannot state: its only transparency for a fill is one value "
+            f"for the whole object, so the ramp is written opaque and the "
+            f"fading needs redoing"
+        )
 
 
 def _check_unrenderable_paths(document: model.Document) -> None:
@@ -927,7 +1125,11 @@ def _convert(
     # a run of identical empty frames is exactly what master lifting looks
     # for, so doing this first would sweep the chain onto a master spread.
     _thread_duplicate_stories(document)
+    # After threading, so that a paragraph is counted once rather than once
+    # per frame the story was copied into before the links were made.
+    _apply_tab_stops(document, structure)
     _check_unrenderable_paths(document)
+    _check_gradient_losses(document)
     _check_overset_text(document)
 
     writer = idml.IdmlWriter(

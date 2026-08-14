@@ -32,6 +32,7 @@ from __future__ import annotations
 import math
 import xml.etree.ElementTree as ET
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional
 from urllib.parse import quote
@@ -190,6 +191,56 @@ def _content_matrix(rotation_deg: float, width: float, height: float) -> str:
     tx = -(cos * half_w - sin * half_h)
     ty = -(sin * half_w + cos * half_h)
     return f"{fmt(cos)} {fmt(sin)} {fmt(-sin)} {fmt(cos)} {fmt(tx)} {fmt(ty)}"
+
+
+def _ramp_geometry(angle_deg: float, width: float, height: float):
+    """Where a gradient starts and how far it runs across a box.
+
+    IDML measures both in the box's own coordinates, which are centred on
+    its middle with y increasing downwards, and states the angle
+    anticlockwise from left-to-right. The ramp has to cover the box's
+    whole extent in that direction, so the length is the box projected
+    onto it and the start is half of that back from the centre.
+    """
+    radians = math.radians(angle_deg)
+    # A quarter turn leaves a cosine of 1e-17 rather than nothing, which
+    # would be written as the "-0" no reader should have to interpret.
+    cos, sin = (
+        value if abs(value) > 1e-9 else 0.0
+        for value in (math.cos(radians), math.sin(radians))
+    )
+    length = abs(width * cos) + abs(height * sin)
+    # Adding zero turns the -0.0 that negating a zero cosine leaves back
+    # into 0.0, which is the same number and the only one of the two that
+    # formats as "0".
+    start_x = -cos * length / 2.0 + 0.0
+    start_y = sin * length / 2.0 + 0.0
+    return f"{fmt(start_x)} {fmt(start_y)}", length
+
+
+def _spanning_stops(stops):
+    """A ramp with explicit stops at both ends of the range.
+
+    Publisher's ramps often occupy only part of their range -- 32 to 49,
+    or 3 to 69 -- and what happens outside that is the reader's choice:
+    hold the end colours, or stretch the ramp to fit. Those look nothing
+    alike, and holding is what Publisher does, so the ends are stated
+    rather than left to be guessed.
+
+    The reported offsets are not touched. Padding only adds a stop at 0
+    and at 100 in the colour already at that end, so the repeated offsets
+    Publisher uses to make a hard edge survive intact.
+    """
+    if not stops:
+        return stops
+    ordered = sorted(stops, key=lambda stop: stop.location)
+    padded = list(ordered)
+    first, last = ordered[0], ordered[-1]
+    if first.location > 0:
+        padded.insert(0, replace(first, location=0.0))
+    if last.location < 100:
+        padded.append(replace(last, location=100.0))
+    return padded
 
 
 def _rect_path(parent: ET.Element, width: float, height: float) -> None:
@@ -378,10 +429,19 @@ class IdmlWriter:
         self.fonts = self.doc.fonts
         for color in self.doc.colors:
             self.color_ids[color] = "Color/C_%02X%02X%02X" % color
-        for item in self.doc.all_items():
-            gradient = item.style.gradient
+        def claim(gradient: Optional[model.Gradient]) -> None:
             if gradient is not None and gradient not in self.gradient_ids:
                 self.gradient_ids[gradient] = f"Gradient/G_{len(self.gradient_ids) + 1}"
+
+        for item in self.doc.all_items():
+            claim(item.style.gradient)
+            # A recovered WordArt headline carries its ramp on the text
+            # rather than on a shape, so the runs have to be reached too or
+            # the reference resolves to nothing.
+            if isinstance(item, model.TextFrame):
+                for paragraph in item.story.paragraphs:
+                    for span in paragraph.spans:
+                        claim(span.gradient)
 
     def _fill_ref(self, style: model.GraphicStyle) -> str:
         """A shape's fill: its gradient where it has one, else its colour."""
@@ -560,7 +620,7 @@ class IdmlWriter:
                     "Type": "Radial" if gradient.radial else "Linear",
                 },
             )
-            for index, stop in enumerate(gradient.stops):
+            for index, stop in enumerate(_spanning_stops(gradient.stops)):
                 ET.SubElement(
                     element,
                     "GradientStop",
@@ -999,7 +1059,9 @@ class IdmlWriter:
         if link is None or link.head:
             part_name = f"Stories/Story_{story_id}.xml"
             story_parts.append(part_name)
-            self._parts[part_name] = self._story_part(story_id, frame.story)
+            self._parts[part_name] = self._story_part(
+                story_id, frame.story, (frame.width, frame.height)
+            )
 
     def _emit_table(
         self,
@@ -1033,6 +1095,12 @@ class IdmlWriter:
                 "VerticalJustification": "TopAlign",
                 "InsetSpacing": "0 0 0 0",
                 "AutoSizingType": "Off",
+                # No FirstBaselineOffset here, deliberately. Pinning it to
+                # the top of the frame reads like the right thing -- a
+                # table has no baseline to offset -- but Affinity answers
+                # "FixedHeight" with a minimum of zero by lifting the whole
+                # table a full frame height off its position. Measured, not
+                # argued: research/probe_table_placement.py.
             },
         )
 
@@ -1266,7 +1334,9 @@ class IdmlWriter:
 
     # -- stories ----------------------------------------------------------
 
-    def _story_part(self, story_id: str, story: model.Story) -> bytes:
+    def _story_part(
+        self, story_id: str, story: model.Story, box: Optional[tuple] = None
+    ) -> bytes:
         root = ET.Element("idPkg:Story", {"xmlns:idPkg": IDPKG, "DOMVersion": DOM_VERSION})
         element = ET.SubElement(
             root,
@@ -1293,11 +1363,17 @@ class IdmlWriter:
 
         paragraphs = story.paragraphs or [model.Paragraph()]
         for position, paragraph in enumerate(paragraphs):
-            self._emit_paragraph(element, paragraph, last=(position == len(paragraphs) - 1))
+            self._emit_paragraph(
+                element, paragraph, last=(position == len(paragraphs) - 1), box=box
+            )
         return _serialise(root)
 
     def _emit_paragraph(
-        self, story: ET.Element, paragraph: model.Paragraph, last: bool
+        self,
+        story: ET.Element,
+        paragraph: model.Paragraph,
+        last: bool,
+        box: Optional[tuple] = None,
     ) -> None:
         attributes = {
             "AppliedParagraphStyle": NO_PARAGRAPH_STYLE,
@@ -1321,22 +1397,51 @@ class IdmlWriter:
             attributes["SingleWordJustification"] = "LeftAlign"
 
         range_element = ET.SubElement(story, "ParagraphStyleRange", attributes)
+        _emit_tab_stops(range_element, paragraph)
 
         spans = paragraph.spans or [model.Span()]
         for span in spans:
-            self._emit_span(range_element, span, _leading_for(paragraph, span))
+            self._emit_span(range_element, span, _leading_for(paragraph, span), box)
 
         # IDML marks the end of a paragraph with an explicit break.
         if not last:
             ET.SubElement(range_element, "Br")
 
     def _emit_span(
-        self, parent: ET.Element, span: model.Span, leading: Optional[float] = None
+        self,
+        parent: ET.Element,
+        span: model.Span,
+        leading: Optional[float] = None,
+        box: Optional[tuple] = None,
     ) -> None:
         attributes = {"AppliedCharacterStyle": NO_CHARACTER_STYLE}
         if span.size_pt:
             attributes["PointSize"] = fmt(span.size_pt)
-        attributes["FillColor"] = self._color_ref(span.color, "Color/Black")
+        # Text takes a fill the same way a shape does, so a WordArt ramp
+        # can stay a ramp instead of collapsing to its first stop.
+        reference = (
+            self.gradient_ids.get(span.gradient) if span.gradient is not None else None
+        )
+        if reference:
+            attributes["FillColor"] = reference
+            attributes["GradientFillAngle"] = fmt(span.gradient.angle)
+            # A shape gets its ramp geometry from its own bounds; a run has
+            # none of its own, and the default is a length of nothing --
+            # which paints every stop before the start point in the first
+            # colour and everything after it in the last, so a two-stop
+            # ramp comes out as two solid halves with a hard edge down the
+            # middle. The band the headline sits in is the distance the
+            # ramp was meant to run over, so it is stated here.
+            if box:
+                start, length = _ramp_geometry(span.gradient.angle, *box)
+                attributes["GradientFillStart"] = start
+                attributes["GradientFillLength"] = fmt(length)
+        else:
+            attributes["FillColor"] = self._color_ref(span.color, "Color/Black")
+        if span.stroke is not None:
+            attributes["StrokeColor"] = self._color_ref(span.stroke)
+            if span.stroke_width:
+                attributes["StrokeWeight"] = fmt(span.stroke_width)
         if span.underline:
             attributes["Underline"] = "true"
         if span.strikethrough:
@@ -1374,6 +1479,63 @@ class IdmlWriter:
             if segment:
                 content = ET.SubElement(element, "Content")
                 content.text = segment
+
+
+_TAB_ALIGNMENTS = {"left": "LeftAlign", "center": "CenterAlign", "right": "RightAlign"}
+
+
+def _tab_stops_for(paragraph: model.Paragraph) -> List[model.TabStop]:
+    """Every stop this paragraph should carry, in order along the measure.
+
+    Two sources, and they add rather than compete. The .pub states stops
+    for a paragraph the author set them on, and those are exact. A hanging
+    indent implies one more at the left indent -- the outdented first line
+    carries a label, the tab after it moves to where the wrapped lines
+    start -- which Publisher and Word both honour without recording it.
+
+    A paragraph with neither is left alone: its tabs land on the reader's
+    own grid, half an inch in InDesign, and inventing a stop for it would
+    move text that is currently where it should be.
+
+    A stop at or left of the text edge is dropped. One style in the corpus
+    puts three there, and IDML measures a stop from that edge, so there is
+    nowhere to write them.
+    """
+    stops = [stop for stop in paragraph.tab_stops if stop.position > 0]
+    hangs = paragraph.first_line_indent < 0 < paragraph.margin_left
+    if hangs and not any(
+        abs(stop.position - paragraph.margin_left) < 0.01 for stop in stops
+    ):
+        stops.append(model.TabStop(position=paragraph.margin_left))
+    return sorted(stops, key=lambda stop: stop.position)
+
+
+def _emit_tab_stops(parent: ET.Element, paragraph: model.Paragraph) -> None:
+    """Write a paragraph's tab stops, where it has any to write."""
+    stops = _tab_stops_for(paragraph)
+    if not stops:
+        return
+    tabs = ET.SubElement(parent, "Properties")
+    listing = ET.SubElement(tabs, "TabList", {"type": "list"})
+    for stop in stops:
+        ET.SubElement(listing, "ListItem", {"type": "record"}).extend(
+            [
+                _tab_field(
+                    "Alignment",
+                    "enumeration",
+                    _TAB_ALIGNMENTS.get(stop.alignment, "LeftAlign"),
+                ),
+                _tab_field("AlignmentCharacter", "string", "."),
+                _tab_field("Leader", "string", ""),
+                _tab_field("Position", "unit", fmt(stop.position)),
+            ]
+        )
+
+
+def _tab_field(name: str, kind: str, value: str) -> ET.Element:
+    element = ET.Element(name, {"type": kind})
+    element.text = value
+    return element
 
 
 def _leading_for(paragraph: model.Paragraph, span: model.Span) -> Optional[float]:

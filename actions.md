@@ -438,10 +438,11 @@ arrives as two things, neither of them the headline:
 - an **empty text frame** — libmspub opens the text object, sets its
   geometry and closes it again with no `insertText` at all, so it is
   dropped for having no text, no fill and no stroke;
-- a **filled path of two disconnected two-point edges**, which encloses no
-  area and draws nothing. These are the guides the glyphs are stretched
-  between, which is why joining them into a filled quad invented shapes
-  (commit d43cdfe, reverted in 197368d).
+- a **path of two disconnected two-point edges**, which outlines no area.
+  These are the guides the glyphs are stretched between, which is why
+  joining them into a filled quad invented shapes (commit d43cdfe,
+  reverted in 197368d). Filled, it draws nothing at all; stroked, it draws
+  the guides themselves across the words.
 
 The two are the same object: in `1336` the 15 empty frames, the 15
 degenerate paths and the 15 WordArt shapes are one set of 15, and each
@@ -473,9 +474,23 @@ exactly what the first attempt here did.
 
 `pubfile._read_wordart` reads every WordArt shape and
 `convert._recover_wordart` replaces its guide path with a text frame
-carrying the words, in the band the anchor gives, at the stated size, in
-the colour and with the shadow libmspub reported for the same shape. 46
-headlines across the corpus, every one of them previously lost.
+carrying the words, in the band the anchor gives, at the stated size, and
+painted the way libmspub reported the same shape painted. 47 headlines
+across the corpus, every one of them previously lost.
+
+One shape can arrive as **several** guide paths, because libmspub makes a
+draw call per paint: a headline that is filled *and* outlined reports the
+same two edges twice. All of a shape's paths are collected before any are
+replaced, merged into one frame — fill for the glyph colour, ramp for
+their ramp, stroke for their outline — and the repeats dropped. Taken one
+at a time they left a pair of rules drawn across all four gradient-filled
+mastheads in the corpus.
+
+The match is on the **geometry**, not the paint. Reading `fill is not
+None` was what hid `'Il Cantico dei Cantici'`: its glyphs are filled with
+a texture, so libmspub reports the fill as a bitmap and the only colour on
+the shape is the outline. What the paint says is *how* the guides were
+drawn, which is a separate question from whether they are guides.
 
 ### What is left
 
@@ -484,17 +499,22 @@ headlines across the corpus, every one of them previously lost.
   sized from the band using the ratio the 39 sized shapes measure — 1.33,
   spread 1.02 to 1.59 — and the report says so. Nothing more precise is
   available without laying out the font.
-- **Two shapes in `Cantico_dei_Cantici.pub` cannot be placed.** libmspub
-  reports no shape at all where the file puts them, so there is no guide
-  path to replace and no confirmation of where the words went. They are
-  named in the report instead: `'I venerdì 2006 di Avvento'` and `'Il
-  Cantico dei Cantici'`. Placing them on the strength of the .pub alone is
-  possible — the anchor gives a band — but it would be the only content in
-  the converter put on the page without the event stream agreeing, and the
-  first version of this feature is not the place to start.
+- **One shape in `Cantico_dei_Cantici.pub` cannot be placed.** libmspub
+  reports no shape at all where the file puts it, so there is no guide
+  path to replace and no confirmation of where the words went. It is named
+  in the report instead: `'I venerdì 2006 di Avvento'`. Placing it on the
+  strength of the .pub alone is possible — the anchor gives a band — but it
+  would be the only content in the converter put on the page without the
+  event stream agreeing, and the first version of this feature is not the
+  place to start.
 - **WordArt is not WordArt any more.** Arched, stretched and outlined type
   has no IDML equivalent; the headline arrives as straight text and the
-  file is flagged `review`.
+  file is flagged `review`. Straight text is placed centred in the band
+  both ways, since fitting the glyphs to the shape is what WordArt does
+  and the band therefore *is* the words. The frame stays exactly the
+  band; a taller one with room for a wrapped headline was tried and taken
+  back out, because it depends on the reader centring vertically and
+  misplaces the headline by half a band if it does not.
 
 ---
 
@@ -608,3 +628,97 @@ piece.
 While in Publisher, also answer `research/probe_cell_insets.py` on the
 Affinity side: it builds a table whose rows differ only in their insets,
 and no one has yet confirmed that Affinity honours them on import.
+
+---
+
+## 10. Find the default tab interval  ⏰ needs Publisher, before 1 Oct 2026
+
+### Why this matters
+
+Tab stops are now carried (backlog §12), but hardly any tab has one:
+across the corpus **203 paragraphs contain a tab and 3 state a stop**.
+The other 200 were lined up on Publisher's document-wide default grid —
+"Default tab stops" in its Format → Tabs dialog — and that interval has
+not been found in the file. So they land on the reader's grid instead,
+half an inch in InDesign, and every tabbed column in the document sits
+somewhere other than where it was typed. A run of eight tabs, which is
+how these authors push a signature to the right, ends up 61pt further
+along than Publisher put it, or wraps.
+
+One number would fix all 200: with the interval known, a tabbed
+paragraph can be written with an explicit ruler of stops at that spacing
+and its tabs land exactly where they did.
+
+### What is already known
+
+Established here, so don't re-derive it:
+
+- **libmspub never reads it.** It reads per-paragraph stops (and drops
+  them); there is no default-interval block id in `MSPUBBlockID.h` at all.
+- **Document chunk block `0x15` is not it.** It reads 359410 EMU — 566
+  twips, 1 cm truncated — which looks exactly right until you notice it
+  is the same 359410 in the US-Letter `Blank Note Card`, where a metric
+  default cannot be. It is a constant of the format.
+- **The stops themselves are decoded**, so whatever holds the interval is
+  a plain length, and Publisher measures in **EMU, 914400 per inch**:
+  0.5in reads 457200, 1cm reads 360000, 0.25in reads 228600.
+- It need not be in the Quill stream. `research/diff_blocks.py` parses
+  the `Contents` stream directly, which is where a per-document setting
+  is more likely to live.
+
+### Step 1 — produce the sample files (on Windows, with Publisher, ~5 min)
+
+**Change only the default tab interval between saves**, and use two
+values that share no digits with the page size or anything else.
+
+1. New blank document. Add a text box with one paragraph reading
+   `a<tab>b<tab>c` so the setting has something to act on.
+2. **Format → Tabs** (Home → Paragraph → Tabs in 2010 and later), set
+   **Default tab stops: 0.5"**. Save as `tabs-a.pub`.
+3. Change *only* that value to **2.0"** and *Save As* `tabs-b.pub`.
+4. Copy both to `files/tab-samples/` on the Mac.
+
+0.5in and 2.0in are 457200 and 1828800 EMU, four times apart, so a block
+holding one cannot be confused with a block holding the other.
+
+### Step 2 — run the diff (on the Mac, ~1 min)
+
+```sh
+cd ~/prive/tools/affinity-converter
+python3 research/diff_blocks.py \
+  a=files/tab-samples/tabs-a.pub b=files/tab-samples/tabs-b.pub
+```
+
+It prints every block that changed, with any plausible length in inches
+beside the raw value.
+
+### Step 3 — read the result
+
+You are looking for one block reading `457200` under `a` and `1828800`
+under `b`. If nothing in `Contents` moves, the setting is in the Quill
+stream's `STSH` chunk — the document's default styles — and
+
+```sh
+python3 research/tab_stops.py files/tab-samples/tabs-a.pub
+python3 research/tab_stops.py files/tab-samples/tabs-b.pub
+```
+
+will show it as a default style whose stops are spaced by the interval,
+in which case the answer is to read the spacing rather than a field.
+
+### Step 4 — wire it in
+
+`pubfile.read_structure` gains the interval; `convert._apply_tab_stops`
+gives every tabbed paragraph that states no stops of its own a ruler of
+them at that spacing, out to the width of the frame it sits in; and the
+warning that currently counts those paragraphs goes away, because they
+are no longer landing anywhere unknown. The emitter needs no change:
+`idml._emit_tab_stops` already writes a list of stops.
+
+While in Publisher, also settle **which alignment byte is which**. The
+reading — `1` right, `2` centre — comes from geometry alone: the 22
+stops in the corpus that state one come in pairs, at the middle of a
+frame and at its right edge, which is a footer's centre-and-right pair.
+A single file with one left, one centre, one right and one decimal tab
+in one paragraph, read back with `research/tab_stops.py`, confirms it
+outright and says whether a decimal tab has a code at all.

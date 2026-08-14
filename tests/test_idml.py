@@ -861,6 +861,211 @@ class GradientFillTest(unittest.TestCase):
         self.assertEqual(rectangle.get("FillColor"), "Color/C_010203")
         self.assertIsNone(rectangle.get("GradientFillAngle"))
 
+    def _partial(self, first: float, last: float) -> model.Gradient:
+        """A ramp occupying only part of its range, as Publisher's do."""
+        return model.Gradient(
+            stops=(
+                model.GradientStop(location=first, color=(168, 186, 212)),
+                model.GradientStop(location=last, color=(223, 230, 239)),
+            )
+        )
+
+    def test_a_partial_ramp_is_given_both_its_ends(self):
+        # Publisher holds the end colours outside the ramp. Left unstated,
+        # a reader is equally entitled to stretch the ramp over the shape,
+        # which looks nothing like it.
+        graphic, _ = self._parts(self._document(self._partial(32.0, 49.0)))
+        stops = list(graphic.iter("GradientStop"))
+        self.assertEqual(
+            [s.get("Location") for s in stops], ["0", "32", "49", "100"]
+        )
+        self.assertEqual(
+            [s.get("StopColor") for s in stops],
+            ["Color/C_A8BAD4", "Color/C_A8BAD4", "Color/C_DFE6EF", "Color/C_DFE6EF"],
+        )
+
+    def test_a_ramp_that_already_spans_the_range_is_left_alone(self):
+        graphic, _ = self._parts(self._document(self._partial(0.0, 100.0)))
+        stops = list(graphic.iter("GradientStop"))
+        self.assertEqual([s.get("Location") for s in stops], ["0", "100"])
+
+    def test_padding_keeps_the_repeated_offsets_that_make_a_hard_edge(self):
+        ramp = model.Gradient(
+            stops=(
+                model.GradientStop(location=10.0, color=(255, 255, 255)),
+                model.GradientStop(location=50.0, color=(255, 255, 255)),
+                model.GradientStop(location=50.0, color=(0, 0, 0)),
+            )
+        )
+        graphic, _ = self._parts(self._document(ramp))
+        self.assertEqual(
+            [s.get("Location") for s in graphic.iter("GradientStop")],
+            ["0", "10", "50", "50", "100"],
+        )
+
+    def test_an_angle_outside_a_half_turn_is_folded_into_range(self):
+        # The corpus reports -225, which IDML states as its equal, 135.
+        style = model.GraphicStyle.from_props({
+            "draw:fill": "gradient",
+            "draw:angle": "-225.0000in",
+            "svg:linearGradient": [
+                {"svg:offset": "0%", "svg:stop-color": "#000000"},
+                {"svg:offset": "100%", "svg:stop-color": "#ffffff"},
+            ],
+        })
+        self.assertAlmostEqual(style.gradient.angle, 135.0)
+
+
+class TextGradientTest(unittest.TestCase):
+    """A recovered WordArt headline is painted the way a shape is.
+
+    Its ramp lives on the run rather than on a frame, which is the one
+    place in the document where text carries more than a flat colour.
+    """
+
+    RAMP = model.Gradient(
+        stops=(
+            model.GradientStop(location=0.0, color=(145, 56, 1)),
+            model.GradientStop(location=100.0, color=(255, 209, 125)),
+        ),
+        angle=45.0,
+    )
+
+    def _parts(self, span: model.Span):
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        frame = model.TextFrame(x=10.0, y=10.0, width=200.0, height=40.0)
+        paragraph = model.Paragraph()
+        paragraph.spans.append(span)
+        frame.story.paragraphs.append(paragraph)
+        document.pages[0].items.append(frame)
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            graphic = ET.fromstring(archive.read("Resources/Graphic.xml"))
+            story = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            return graphic, ET.fromstring(archive.read(story))
+
+    def test_the_runs_ramp_becomes_a_gradient_resource(self):
+        graphic, _ = self._parts(
+            model.Span(text="Kerkbode", color=(145, 56, 1), gradient=self.RAMP)
+        )
+        self.assertEqual(len(list(graphic.iter("Gradient"))), 1)
+
+    def test_the_run_fills_with_the_gradient_not_its_first_stop(self):
+        _, story = self._parts(
+            model.Span(text="Kerkbode", color=(145, 56, 1), gradient=self.RAMP)
+        )
+        run = next(story.iter("CharacterStyleRange"))
+        self.assertEqual(run.get("FillColor"), "Gradient/G_1")
+        self.assertEqual(run.get("GradientFillAngle"), "45")
+
+    def test_every_stop_colour_reaches_the_swatches(self):
+        graphic, _ = self._parts(
+            model.Span(text="Kerkbode", color=(145, 56, 1), gradient=self.RAMP)
+        )
+        colours = {c.get("Self") for c in graphic.iter("Color")}
+        self.assertIn("Color/C_FFD17D", colours)      # the end that was lost
+        for stop in graphic.iter("GradientStop"):
+            self.assertIn(stop.get("StopColor"), colours)
+
+    def test_the_ramp_is_given_the_distance_to_run_over(self):
+        # Without a length IDML ramps over nothing: everything before the
+        # start point takes the first stop and everything after it the
+        # last, so the masthead came out brown for its left half and gold
+        # for its right, with a hard edge between them.
+        flat = model.Gradient(stops=self.RAMP.stops, angle=0.0)
+        _, story = self._parts(
+            model.Span(text="Kerkbode", color=(145, 56, 1), gradient=flat)
+        )
+        run = next(story.iter("CharacterStyleRange"))
+        # The frame is 200 x 40, and the ramp is horizontal, so it starts
+        # at the left edge and runs the full width.
+        self.assertEqual(run.get("GradientFillLength"), "200")
+        self.assertEqual(run.get("GradientFillStart"), "-100 0")
+
+    def test_the_distance_follows_the_angle(self):
+        upright = model.Gradient(stops=self.RAMP.stops, angle=90.0)
+        _, story = self._parts(
+            model.Span(text="Kerkbode", color=(145, 56, 1), gradient=upright)
+        )
+        run = next(story.iter("CharacterStyleRange"))
+        # Turned a quarter, the ramp runs the frame's height instead.
+        self.assertEqual(run.get("GradientFillLength"), "40")
+        self.assertEqual(run.get("GradientFillStart"), "0 20")
+
+    def test_a_run_with_no_ramp_states_no_geometry(self):
+        _, story = self._parts(model.Span(text="body", color=(0, 0, 0)))
+        run = next(story.iter("CharacterStyleRange"))
+        self.assertIsNone(run.get("GradientFillLength"))
+        self.assertIsNone(run.get("GradientFillStart"))
+
+    def test_an_outline_on_the_glyphs_is_written_as_a_stroke(self):
+        _, story = self._parts(
+            model.Span(
+                text="Kerkbode", color=(145, 56, 1), gradient=self.RAMP,
+                stroke=(54, 27, 0), stroke_width=0.75,
+            )
+        )
+        run = next(story.iter("CharacterStyleRange"))
+        self.assertEqual(run.get("StrokeColor"), "Color/C_361B00")
+        self.assertEqual(run.get("StrokeWeight"), "0.75")
+
+    def test_ordinary_text_is_written_exactly_as_before(self):
+        graphic, story = self._parts(model.Span(text="body", color=(0, 0, 0)))
+        self.assertEqual(len(list(graphic.iter("Gradient"))), 0)
+        run = next(story.iter("CharacterStyleRange"))
+        self.assertEqual(run.get("FillColor"), "Color/C_000000")
+        self.assertIsNone(run.get("GradientFillAngle"))
+        self.assertIsNone(run.get("StrokeColor"))
+
+    def test_a_shape_and_a_run_sharing_a_ramp_share_one_resource(self):
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        document.pages[0].items.append(
+            model.Rectangle(
+                x=10.0, y=10.0, width=100.0, height=50.0,
+                style=model.GraphicStyle(fill=(145, 56, 1), gradient=self.RAMP),
+            )
+        )
+        frame = model.TextFrame(x=10.0, y=100.0, width=200.0, height=40.0)
+        paragraph = model.Paragraph()
+        paragraph.spans.append(
+            model.Span(text="Kerkbode", color=(145, 56, 1), gradient=self.RAMP)
+        )
+        frame.story.paragraphs.append(paragraph)
+        document.pages[0].items.append(frame)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            graphic = ET.fromstring(archive.read("Resources/Graphic.xml"))
+        self.assertEqual(len(list(graphic.iter("Gradient"))), 1)
+
+
+class TablePlacementTest(unittest.TestCase):
+    """A table starts at the top-left of the frame that holds it."""
+
+    def _frame(self):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        table = model.Table(
+            x=20.0, y=30.0, width=300.0, height=100.0,
+            column_widths=[150.0, 150.0], row_heights=[50.0, 50.0],
+        )
+        table.cells.append(model.TableCell(row=0, column=0))
+        document.pages[0].items.append(table)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            spread = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            return next(ET.fromstring(archive.read(spread)).iter("TextFrame"))
+
+    def test_the_first_baseline_is_left_to_the_reader(self):
+        # Pinning it reads like the right thing for a table, which has no
+        # baseline to offset. Affinity answers a fixed height of zero by
+        # lifting the table a whole frame height off its position, so the
+        # attribute stays off the frame -- see
+        # research/probe_table_placement.py, which measured it.
+        preference = next(self._frame().iter("TextFramePreference"))
+        self.assertIsNone(preference.get("FirstBaselineOffset"))
+        self.assertIsNone(preference.get("MinimumFirstBaselineOffset"))
+
+    def test_the_frame_still_carries_no_inset(self):
+        preference = next(self._frame().iter("TextFramePreference"))
+        self.assertEqual(preference.get("InsetSpacing"), "0 0 0 0")
+
 
 class TableOutputTest(unittest.TestCase):
     """A model.Table has to become a real IDML Table inside its story."""
@@ -1131,3 +1336,109 @@ class CellInsetOutputTest(unittest.TestCase):
     def test_a_zero_inset_is_written_rather_than_left_out(self):
         cells = self._cells(model.CellInsets())
         self.assertEqual(cells["0:0"].get("LeftInset"), "0")
+
+
+class HangingIndentTabTest(unittest.TestCase):
+    """A hanging indent needs the tab stop that makes it hang.
+
+    libmspub reports five paragraph properties and no tab stop is among
+    them, so every tab lands on the reader's default half-inch grid. The
+    one position recoverable without them is the one a hanging indent
+    implies: the tab after the outdented label goes to the left indent.
+    """
+
+    def _paragraph(self, **kwargs) -> ET.Element:
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        frame = model.TextFrame(x=10.0, y=10.0, width=300.0, height=200.0)
+        paragraph = model.Paragraph(**kwargs)
+        paragraph.spans.append(model.Span(text="Overgegaan\tnaar de PKN", size_pt=9.0))
+        frame.story.paragraphs.append(paragraph)
+        document.pages[0].items.append(frame)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            story = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            return next(ET.fromstring(archive.read(story)).iter("ParagraphStyleRange"))
+
+    def test_a_hanging_indent_gets_a_stop_at_its_left_indent(self):
+        found = self._paragraph(margin_left=84.75, first_line_indent=-84.75)
+        stop = found.find(".//TabList/ListItem/Position")
+        self.assertIsNotNone(stop, ET.tostring(found))
+        self.assertEqual(stop.text, "84.75")
+
+    def test_the_stop_is_a_plain_left_aligned_one(self):
+        found = self._paragraph(margin_left=84.75, first_line_indent=-84.75)
+        item = found.find(".//TabList/ListItem")
+        self.assertEqual(item.find("Alignment").text, "LeftAlign")
+        self.assertEqual(item.find("Leader").text, None)
+
+    def test_an_ordinary_paragraph_is_left_alone(self):
+        # Inventing a stop here would move text that is already right.
+        self.assertIsNone(self._paragraph().find(".//TabList"))
+
+    def test_a_plain_left_indent_is_left_alone(self):
+        found = self._paragraph(margin_left=36.0)
+        self.assertIsNone(found.find(".//TabList"))
+
+    def test_an_outdent_with_no_left_indent_is_left_alone(self):
+        found = self._paragraph(first_line_indent=-18.0)
+        self.assertIsNone(found.find(".//TabList"))
+
+
+class StatedTabStopTest(unittest.TestCase):
+    """The stops the .pub itself records, which beat anything inferred."""
+
+    def _stops(self, *stops, **kwargs) -> ET.Element:
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        frame = model.TextFrame(x=10.0, y=10.0, width=300.0, height=200.0)
+        paragraph = model.Paragraph(tab_stops=list(stops), **kwargs)
+        paragraph.spans.append(model.Span(text="Consegna\tlavori", size_pt=9.0))
+        frame.story.paragraphs.append(paragraph)
+        document.pages[0].items.append(frame)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            story = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            found = next(ET.fromstring(archive.read(story)).iter("ParagraphStyleRange"))
+            return found.findall(".//TabList/ListItem")
+
+    def positions(self, items):
+        return [item.find("Position").text for item in items]
+
+    def test_a_stated_stop_is_written_where_the_file_puts_it(self):
+        items = self._stops(model.TabStop(position=27.4))
+        self.assertEqual(self.positions(items), ["27.4"])
+
+    def test_the_stops_arrive_in_order_however_they_were_read(self):
+        items = self._stops(
+            model.TabStop(position=48.0), model.TabStop(position=12.0)
+        )
+        self.assertEqual(self.positions(items), ["12", "48"])
+
+    def test_a_centre_and_a_right_tab_keep_their_alignment(self):
+        items = self._stops(
+            model.TabStop(position=165.11, alignment="center"),
+            model.TabStop(position=329.22, alignment="right"),
+        )
+        self.assertEqual(
+            [item.find("Alignment").text for item in items],
+            ["CenterAlign", "RightAlign"],
+        )
+
+    def test_a_stop_left_of_the_text_cannot_be_written_and_is_dropped(self):
+        # One style in the corpus puts three stops at negative positions;
+        # IDML measures from the text edge and has nowhere to put them.
+        items = self._stops(
+            model.TabStop(position=-13.95), model.TabStop(position=14.5)
+        )
+        self.assertEqual(self.positions(items), ["14.5"])
+
+    def test_a_hanging_indent_still_gets_its_implied_stop(self):
+        # The file states one stop; the outdent implies another, and both
+        # are real -- Publisher honours the hanging position regardless.
+        items = self._stops(
+            model.TabStop(position=120.0), margin_left=36.0, first_line_indent=-36.0
+        )
+        self.assertEqual(self.positions(items), ["36", "120"])
+
+    def test_the_implied_stop_is_not_repeated_where_the_file_states_it(self):
+        items = self._stops(
+            model.TabStop(position=36.0), margin_left=36.0, first_line_indent=-36.0
+        )
+        self.assertEqual(self.positions(items), ["36"])

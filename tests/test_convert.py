@@ -361,6 +361,71 @@ class DegeneratePathTest(unittest.TestCase):
         self.assertEqual(document.warnings, [])
 
 
+class GradientLossTest(unittest.TestCase):
+    """A ramp that could not be written as one has to be said out loud.
+
+    Both of these are worked out where the fill is read and were then set
+    and never looked at, which made a flattened gradient the one loss in
+    the conversion indistinguishable from a deliberate flat fill.
+    """
+
+    def _document(self, count: int = 1, **flags) -> model.Document:
+        document = model.Document(pages=[model.Page()])
+        for _ in range(count):
+            document.pages[0].items.append(
+                model.Rectangle(
+                    x=0.0, y=0.0, width=10.0, height=10.0,
+                    style=model.GraphicStyle(fill=(0, 0, 0), **flags),
+                )
+            )
+        return document
+
+    def test_a_ramp_flattened_to_one_stop_is_reported(self):
+        document = self._document(approximated_fill=True)
+        convert._check_gradient_losses(document)
+        self.assertEqual(len(document.warnings), 1, document.warnings)
+        self.assertIn("flattened to one colour", document.warnings[0])
+
+    def test_several_are_counted_into_one_line(self):
+        document = self._document(count=10, approximated_fill=True)
+        convert._check_gradient_losses(document)
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("10", document.warnings[0])
+
+    def test_stops_that_disagree_on_opacity_are_reported(self):
+        document = self._document(uneven_stop_opacity=True)
+        convert._check_gradient_losses(document)
+        self.assertIn("differing opacity", " ".join(document.warnings))
+
+    def test_a_ramp_that_came_across_whole_says_nothing(self):
+        ramp = model.Gradient(
+            stops=(
+                model.GradientStop(location=0.0, color=(0, 0, 0)),
+                model.GradientStop(location=100.0, color=(255, 255, 255)),
+            )
+        )
+        document = self._document(gradient=ramp)
+        convert._check_gradient_losses(document)
+        self.assertEqual(document.warnings, [])
+
+    def test_a_single_stop_ramp_sets_the_flag_that_gets_reported(self):
+        # The whole chain, so the flag cannot quietly stop being set.
+        style = model.GraphicStyle.from_props({
+            "draw:fill": "gradient",
+            "svg:linearGradient": [
+                {"svg:offset": "53%", "svg:stop-color": "#e1e1e1"},
+            ],
+        })
+        self.assertTrue(style.approximated_fill)
+        self.assertIsNone(style.gradient)
+        document = model.Document(pages=[model.Page()])
+        document.pages[0].items.append(
+            model.Rectangle(x=0.0, y=0.0, width=10.0, height=10.0, style=style)
+        )
+        convert._check_gradient_losses(document)
+        self.assertIn("flattened to one colour", " ".join(document.warnings))
+
+
 class ThreadDuplicateStoriesTest(unittest.TestCase):
     """Linked Publisher text boxes arrive as one story duplicated per frame.
 

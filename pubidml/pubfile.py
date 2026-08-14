@@ -15,6 +15,10 @@ None on any difficulty, and the converter carries on exactly as it did
 before -- the information is an improvement on the output, not a
 prerequisite for it.
 
+Streams are addressed by their full path inside the compound file, not by
+name: an embedded OLE object brings its own storage, and one file in the
+corpus holds two streams called CONTENTS.
+
 Format, from libmspub 0.1.5 MSPUBParser.cpp:
 
     Contents stream
@@ -75,6 +79,27 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
                       0x00C0  WordArt text, UTF-16LE
                       0x00C3  WordArt point size, 16.16 fixed point
                       0x00C5  WordArt font name, UTF-16LE
+
+    Quill/QuillSub/CONTENTS stream, from MSPUBParser::parseQuill
+      0x18  U16 (unused), U16 chunk count, U32 offset of the next list;
+            then one 24-byte reference per chunk: U16 (0x18), 4-char name,
+            U16 id, 4 bytes, 4-char second name, U32 offset, U32 length.
+
+        TEXT  the document's words, UTF-16LE, every story end to end
+        FDPP  paragraph formatting: U16 count, 6 bytes, then that many U32
+              offsets -- the stream offset each paragraph ends at, in text
+              order -- and that many U16 offsets into this chunk, each the
+              position of a paragraph style
+        TOKN  the field table, which libmspub does not read
+
+      A paragraph style is a bare U32 length and then blocks, of which
+      0x32 holds the tab stops:
+        0x32  container, holding
+          0x28  array of one GENERAL_CONTAINER per stop, each giving
+                  0x00  position, signed EMU from the frame's text edge
+                  0x01  alignment in its low byte, absent for a left tab
+      libmspub reads all of this into ParagraphStyle::m_tabStopsInEmu and
+      then never uses the member, so the stops never reach librevenge.
 """
 
 from __future__ import annotations
@@ -82,7 +107,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import logsetup
 
@@ -122,7 +147,9 @@ _CELL_FIRST_ROW, _CELL_FIRST_COLUMN = 0x01, 0x03
 _CELL_INSETS = (0x0A, 0x0B, 0x0C, 0x0D)
 _EMU_PER_POINT = 12700.0
 
-_ESCHER_STREAM = "EscherStm"
+_CONTENTS_STREAM = ("Contents",)
+_ESCHER_STREAM = ("Escher", "EscherStm")
+_QUILL_STREAM = ("Quill", "QuillSub", "CONTENTS")
 _SHAPE_CONTAINER = 0xF004
 _CLIENT_ANCHOR = 0xF010
 _PROPERTY_RECORDS = frozenset({0xF00B, 0xF121, 0xF122})
@@ -143,9 +170,21 @@ _BAND_TO_SIZE = 1.33
 # (MSPUBParser::getPageTypeBySeqNum).
 _DUMMY_PAGE_SEQNUMS = frozenset({0x10D, 0x110, 0x113, 0x117})
 
-# Quill chunk types libmspub reads. TOKN, the field table, is not among
-# them, and its presence is what tells us the document has fields at all.
-_TOKEN_CHUNK = "TOKN"
+# Quill chunk types. TOKN, the field table, is one libmspub never reads,
+# and its presence is what tells us the document has fields at all. TEXT
+# holds the words and FDPP the paragraph formatting that runs over them.
+_TOKEN_CHUNK, _TEXT_CHUNK, _PARAGRAPHS_CHUNK = "TOKN", "TEXT", "FDPP"
+
+# Tab stops, which libmspub reads into ParagraphStyle::m_tabStopsInEmu and
+# its collector then never looks at, so they are dropped before librevenge
+# sees anything. The layout below is therefore known rather than inferred.
+_PARAGRAPH_TABS, _TAB_ARRAY = 0x32, 0x28
+_TAB_POSITION, _TAB_ALIGNMENT = 0x00, 0x01
+# The alignment field's low byte. 313 of the corpus's 335 stops leave the
+# field out altogether, which is a left tab; the 22 that state it come in
+# pairs, one at the middle of the frame reading 2 and one at its right
+# edge reading 1 -- the centre and right tabs of a header or a footer.
+_TAB_ALIGNMENTS = {1: "right", 2: "center"}
 
 
 @dataclass
@@ -208,6 +247,15 @@ class FileStructure:
     #: Every WordArt shape in the file. libmspub reports neither their text
     #: nor an id for them, so they are matched by where they sit.
     wordart: List[WordArt] = field(default_factory=list)
+    #: Tab stops by the text of the paragraph they belong to, one entry per
+    #: paragraph in the file that carries a tab -- including those stating
+    #: no stops, because a text that appears both with stops and without is
+    #: an ambiguity rather than a match. Text is the only handle there is:
+    #: nothing in the event stream identifies which paragraph libmspub is
+    #: reporting. Each stop is (position in points, alignment).
+    paragraph_stops: List[Tuple[str, Tuple[Tuple[float, str], ...]]] = field(
+        default_factory=list
+    )
 
     def wordart_near(
         self, centre_x: float, centre_y: float, tolerance: float = 0.5
@@ -256,8 +304,15 @@ def table_signature(column_widths: List[float], row_heights: List[float]) -> tup
 
 # -- OLE compound file ----------------------------------------------------
 
-def _read_stream(data: bytes, want: str) -> Optional[bytes]:
-    """Pull one named stream out of a CFB container."""
+def _read_stream(data: bytes, *path: str) -> Optional[bytes]:
+    """Pull one stream out of a CFB container, named by its full path.
+
+    A name on its own is not unique: an embedded OLE object brings its own
+    storage with it, and `1336 kerkbode.pub` holds two streams called
+    CONTENTS -- Publisher's text, and a metafile belonging to an embedded
+    object. Walking the directory tree from the root picks the one meant,
+    where matching on the name alone picked whichever came first.
+    """
     if data[:8] != _OLE_MAGIC:
         return None
     sector = 1 << struct.unpack_from("<H", data, 30)[0]
@@ -305,6 +360,9 @@ def _read_stream(data: bytes, want: str) -> Optional[bytes]:
     def read_chain(start: int, size: int) -> bytes:
         return b"".join(data[at(s):at(s) + sector] for s in chain(start))[:size]
 
+    # A directory entry is 128 bytes: the name, then its kind, then the
+    # red-black tree links -- left and right siblings, and the first child
+    # of a storage -- and finally where its own bytes start and end.
     entries = []
     for s in chain(dir_start):
         base = at(s)
@@ -313,19 +371,43 @@ def _read_stream(data: bytes, want: str) -> Optional[bytes]:
         for i in range(sector // 128):
             entry = base + i * 128
             name_length = struct.unpack_from("<H", data, entry + 64)[0]
-            if name_length < 2:
-                continue
             entries.append((
-                data[entry:entry + name_length - 2].decode("utf-16-le", "replace"),
+                data[entry:entry + max(0, name_length - 2)].decode("utf-16-le", "replace"),
                 data[entry + 66],
+                struct.unpack_from("<I", data, entry + 68)[0],   # left sibling
+                struct.unpack_from("<I", data, entry + 72)[0],   # right sibling
+                struct.unpack_from("<I", data, entry + 76)[0],   # first child
                 struct.unpack_from("<I", data, entry + 116)[0],
                 struct.unpack_from("<I", data, entry + 120)[0],
             ))
 
-    target = next((e for e in entries if e[0] == want and e[1] == 2), None)
-    if target is None:
+    def named(parent: int, want: str) -> Optional[int]:
+        """The child of `parent` called `want`, wherever it sits in the tree.
+
+        The siblings form a balanced tree ordered by a comparison this does
+        not need to reproduce, so every node under the child pointer is
+        visited rather than descending by name.
+        """
+        seen, stack = set(), [entries[parent][4]] if parent < len(entries) else []
+        while stack:
+            index = stack.pop()
+            if index >= len(entries) or index in seen:
+                continue
+            seen.add(index)
+            if entries[index][0] == want:
+                return index
+            stack += [entries[index][2], entries[index][3]]
         return None
-    _, _, start, size = target
+
+    target = 0  # the root storage
+    for part in path:
+        found = named(target, part)
+        if found is None:
+            return None
+        target = found
+    if entries[target][1] != 2:  # a storage is not a stream
+        return None
+    _, _, _, _, _, start, size = entries[target]
     if size >= mini_cutoff:
         return read_chain(start, size)
 
@@ -338,7 +420,7 @@ def _read_stream(data: bytes, want: str) -> Optional[bytes]:
         if base + sector > len(data):
             break
         mini_fat += [struct.unpack_from("<I", data, base + i * 4)[0] for i in range(sector // 4)]
-    ministore = read_chain(root[2], root[3])
+    ministore = read_chain(root[5], root[6])
     out, s, seen = b"", start, set()
     while s < 0xFFFFFFFE and s not in seen:
         seen.add(s)
@@ -615,7 +697,7 @@ def _read_wordart(data: bytes) -> List[WordArt]:
     empty frame beside a pair of guide edges that enclose no area. Both
     halves are in here.
     """
-    escher = _read_stream(data, _ESCHER_STREAM)
+    escher = _read_stream(data, *_ESCHER_STREAM)
     return _wordart_shapes(escher) if escher else []
 
 
@@ -669,12 +751,16 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
     return found
 
 
-def _has_field_table(data: bytes) -> bool:
-    """True when the Quill stream carries a TOKN chunk of any kind."""
-    quill = _read_stream(data, "CONTENTS")
-    if not quill:
-        return False
-    offset, seen = 0x18, set()
+# -- Quill (the text stream) ----------------------------------------------
+
+def _quill_chunks(quill: bytes):
+    """Every chunk in the Quill stream, as (name, offset, length).
+
+    The list starts at 0x18 and can continue in further lists; each
+    reference is 24 bytes, of which this needs the four-character name and
+    the last two words.
+    """
+    chunks, offset, seen = [], 0x18, set()
     while offset != 0xFFFFFFFF and offset + 8 <= len(quill) and offset not in seen:
         seen.add(offset)
         count = struct.unpack_from("<H", quill, offset + 2)[0]
@@ -683,26 +769,109 @@ def _has_field_table(data: bytes) -> bool:
         for _ in range(count):
             if pos + 24 > len(quill):
                 break
-            if quill[pos + 2:pos + 6].decode("ascii", "replace") == _TOKEN_CHUNK:
-                return True
+            chunks.append((
+                quill[pos + 2:pos + 6].decode("ascii", "replace"),
+                struct.unpack_from("<I", quill, pos + 16)[0],
+                struct.unpack_from("<I", quill, pos + 20)[0],
+            ))
             pos += 24
         offset = nxt
-    return False
+    return chunks
+
+
+def _has_field_table(quill: bytes) -> bool:
+    """True when the Quill stream carries a TOKN chunk of any kind."""
+    return any(name == _TOKEN_CHUNK for name, _offset, _length in _quill_chunks(quill))
+
+
+def _style_tab_stops(quill: bytes, position: int):
+    """The tab stops one paragraph style states, in points.
+
+    A style is a length followed by blocks. The tabs block holds an array
+    whose entries are containers of a position in EMU and, where the stop
+    is not an ordinary left one, an alignment. Positions are signed: one
+    style in the corpus puts three stops to the left of the text.
+    """
+    if position + 4 > len(quill):
+        return ()
+    length = struct.unpack_from("<I", quill, position)[0]
+    stops = []
+    for block in _blocks(quill, position + 4, position + length):
+        if block.id != _PARAGRAPH_TABS:
+            continue
+        for array in _blocks(quill, block.data_offset + 4, block.end):
+            if array.id != _TAB_ARRAY:
+                continue
+            for entry in _blocks(quill, array.data_offset + 4, array.end):
+                if entry.type != _GENERAL_CONTAINER:
+                    continue
+                fields = {
+                    sub.id: sub.data
+                    for sub in _blocks(quill, entry.data_offset + 4, entry.end)
+                }
+                if _TAB_POSITION not in fields:
+                    continue
+                stops.append((
+                    _signed(fields[_TAB_POSITION]) / _EMU_PER_POINT,
+                    _TAB_ALIGNMENTS.get(fields.get(_TAB_ALIGNMENT, 0) & 0xFF, "left"),
+                ))
+    return tuple(stops)
+
+
+def _paragraph_stops(quill: bytes):
+    """Every paragraph that carries a tab, with the stops stated for it.
+
+    FDPP is a table of paragraphs in text order: first the offset each one
+    ends at, then where in the chunk its style sits. The offsets are
+    measured from the start of the stream, so the text a paragraph covers
+    is the slice of TEXT between the previous one's end and its own.
+
+    A paragraph with no tab in it is left out: a stop only decides where a
+    tab lands, so there is nothing to carry for the rest, and dropping
+    them keeps the text this returns to what a caller can act on.
+    """
+    chunks = _quill_chunks(quill)
+    text_chunk = next((c for c in chunks if c[0] == _TEXT_CHUNK), None)
+    if text_chunk is None:
+        return []
+    _name, text_at, text_length = text_chunk
+    text = quill[text_at:text_at + text_length].decode("utf-16-le", "replace")
+
+    found, start = [], text_at
+    for _name, offset, _length in [c for c in chunks if c[0] == _PARAGRAPHS_CHUNK]:
+        if offset + 8 > len(quill):
+            continue
+        count = struct.unpack_from("<H", quill, offset)[0]
+        # Six bytes sit between the count and the offsets; libmspub skips
+        # them without saying what they are.
+        table = offset + 8
+        if table + count * 6 > len(quill):
+            continue
+        for index in range(count):
+            end = struct.unpack_from("<I", quill, table + 4 * index)[0]
+            at = struct.unpack_from("<H", quill, table + 4 * count + 2 * index)[0]
+            body = text[max(0, (start - text_at) // 2):max(0, (end - text_at) // 2)]
+            start = end + 1
+            if "\t" in body:
+                found.append((body, _style_tab_stops(quill, offset + at)))
+    return found
 
 
 def read_structure(source: Path) -> Optional[FileStructure]:
-    """Masters, field presence and cell insets, or None if unreadable."""
+    """Masters, field presence, cell insets and tab stops, or None."""
     try:
         data = Path(source).read_bytes()
-        contents = _read_stream(data, "Contents")
+        contents = _read_stream(data, *_CONTENTS_STREAM)
         if not contents:
             return None
+        quill = _read_stream(data, *_QUILL_STREAM) or b""
 
         refs = _chunk_references(contents)
         structure = FileStructure(
-            has_fields=_has_field_table(data),
+            has_fields=_has_field_table(quill),
             tables=_read_tables(contents, refs),
             wordart=_read_wordart(data),
+            paragraph_stops=_paragraph_stops(quill),
         )
         for seq, kind, offset in refs:
             if kind != _PAGE_CHUNK:

@@ -417,20 +417,29 @@ These are real and deliberate, not bugs to be surprised by later.
   set in WordArt used to vanish twice over. libmspub reports the object as
   an *empty* text frame, which is dropped for having no text, no fill and
   no stroke; and it reports the two guide edges the glyphs are stretched
-  between as a filled path that encloses no area and draws nothing. The
-  words themselves are in the Escher stream, in properties libmspub has no
-  constants for, and that is where `pubfile` now reads them: the text, the
-  font, the point size and the rotation.
+  between as a path that outlines no area. The words themselves are in the
+  Escher stream, in properties libmspub has no constants for, and that is
+  where `pubfile` now reads them: the text, the font, the point size and
+  the rotation.
 
   The guide path is then replaced by a text frame carrying the words. The
-  band and the rotation come from the shape's own anchor, the colour and
-  any shadow from what libmspub already reported for the same shape, and
-  the two halves are tied together by the only thing they share — the
-  centre of that band, which both sides put in the same place to a
-  fraction of a point. Across the corpus that is 46 headlines, every one of
-  which was previously lost: *Meditatie*, *Kerkdiensten*,
-  *Dankbetuigingen*, and the slanted *Kerkbode* masthead at its own
+  band and the rotation come from the shape's own anchor, the paint from
+  what libmspub already reported for the same shape, and the two halves
+  are tied together by the only thing they share — the centre of that
+  band, which both sides put in the same place to a fraction of a point.
+  Across the corpus that is 47 headlines, every one of which was
+  previously lost: *Meditatie*, *Kerkdiensten*, *Dankbetuigingen*, *Il
+  Cantico dei Cantici*, and the slanted *Kerkbode* masthead at its own
   −12.19°.
+
+  One shape can arrive as several paths, because libmspub makes a draw
+  call per paint: a headline that is both filled and outlined reports the
+  same two guides twice. They are collected and merged into one frame —
+  the fill becomes the colour of the glyphs, a ramp stays a ramp on them,
+  the outline becomes their stroke — and the repeats are dropped. Taken
+  singly they used to leave a pair of rules drawn across every masthead in
+  the corpus. Where a shape has no fill at all, which is what WordArt
+  filled with a texture reports, the outline is what colours the words.
 
   What cannot come across is WordArt itself, since IDML has no warped or
   stretched type, so the headline arrives as straight text in its band and
@@ -439,12 +448,22 @@ These are real and deliberate, not bugs to be surprised by later.
   by the ratio the sized shapes measure (1.33, spread 1.02 to 1.59), which
   the warning says out loud.
 
+  Because WordArt fits its glyphs to the shape, the band is not a box the
+  words sit somewhere inside — it *is* the words. So the text is centred
+  in it both ways rather than hung off the top-left corner. The frame
+  stays exactly the band: making it taller, so a headline wrapped by a
+  substituted font had somewhere to go, was tried and taken back out,
+  because the extra height only holds the words in place if the reader
+  centres them vertically and hangs the headline half a band high if it
+  does not. Centring inside the band is safe either way — ignored, it
+  lands on the top of the band, where the words went before.
+
   A WordArt shape libmspub reported *nothing* for cannot be placed this
   way: without a shape in the event stream there is nothing to confirm
   where the words went, and putting them on the page on the strength of
-  the .pub alone is how invented content gets in. Two shapes in
-  `Cantico_dei_Cantici.pub` are in that position, and the report names
-  their words so they can be retyped.
+  the .pub alone is how invented content gets in. One shape in
+  `Cantico_dei_Cantici.pub` is in that position, and the report names its
+  words so they can be retyped.
 - **A filled path of disconnected edges that is *not* WordArt still cannot
   be filled.** libmspub reports most paths as several subpaths — 50 of the
   56 in the sample corpus — and where each is a bare two-point segment, a
@@ -452,7 +471,10 @@ These are real and deliberate, not bugs to be surprised by later.
   which is what the path data says; joining them would invent geometry, and
   doing so used to draw a filled bowtie across the page. Every case in the
   corpus turned out to be WordArt guides and is now recovered as text
-  above; anything left is counted and flagged `review`.
+  above; anything left is counted and flagged `review`. Only a *filled*
+  one is reported that way: the same two edges with a stroke on them do
+  draw, so "encloses no area and draws nothing" would be the wrong
+  complaint, and WordArt recovery claims both shapes either way.
 - **CJK text is not repaired.** The code page detector (see below) works
   on alphabetic scripts, where letter frequency is a usable signal. For
   Chinese, Japanese and Korean it declines to guess rather than risk
@@ -535,6 +557,33 @@ These are real and deliberate, not bugs to be surprised by later.
   run whose size libmspub never reported is assumed to be 12pt, IDML's
   default — which is also the size it will be rendered at, so the leading
   stays proportionally correct even there.
+- **Tab stops are carried where the file states one, and most tabs have
+  none.** libmspub reports five paragraph properties and no tab stop is
+  among them, which is not because Publisher does not record them: the
+  parser reads them into `ParagraphStyle::m_tabStopsInEmu` and its
+  collector never looks at that member again, so they are dropped before
+  librevenge sees anything. `pubfile` reads them out of the Quill stream
+  instead — a position in EMU per stop, and an alignment byte on the
+  centre and right tabs of a header or footer.
+
+  Nothing in the event stream says which paragraph libmspub is reporting,
+  so a stop is tied to its paragraph by the text: a paragraph is given the
+  stops the file states for that same text, and where one text is stated
+  two different ways neither is applied, the rule two tables drawing one
+  grid already get.
+
+  The limit is what the file holds rather than what can be read out of it.
+  Across the corpus **203 paragraphs contain a tab and 3 of them state a
+  stop**; the rest were lined up on Publisher's document-wide default
+  grid, which is not recorded in the file anywhere yet found. Those tabs
+  land on the reader's own grid instead — half an inch in InDesign — so
+  anything tabbed into columns needs checking, and the report says how
+  many paragraphs per document are affected.
+
+  One position is recoverable without any stop at all, and is written: a
+  hanging indent implies a stop at its left indent, because that is where
+  the wrapped lines start and what the tab after the outdented label is
+  reaching for. Publisher and Word both honour it without recording it.
 - **Story threading is inferred, not read.** librevenge's drawing
   interface cannot say "this frame continues that one", so libmspub hands
   the *complete* story to every frame in a linked chain — one sample
@@ -554,8 +603,10 @@ These are real and deliberate, not bugs to be surprised by later.
   nothing moves, but the grouping is gone.
 - **Gradients are carried, with every stop.** They become real IDML
   gradient resources, shared between shapes that use the same ramp, with
-  Publisher's angle passed through. Only a ramp with fewer than two usable
-  stops falls back to a flat colour.
+  Publisher's angle passed through — folded into the half turn either way
+  that IDML states angles in, since the corpus reports a −225°. Only a ramp
+  with fewer than two usable stops falls back to a flat colour, and the
+  report says how many did.
 
   Worth knowing why this mattered: keeping just the first stop is how a
   background disappears rather than merely flattening. The ramps in the
@@ -565,13 +616,37 @@ These are real and deliberate, not bugs to be surprised by later.
   make a hard edge, and those offsets are passed through as reported rather
   than evened out, which would smooth the effect away.
 
+  **Text takes a ramp too.** A WordArt headline is painted the way a shape
+  is, so the ramp goes on the run rather than on a frame, and the outline
+  with it. Without that the *Kerkbode* masthead — the ribbon whose
+  brown-to-gold is the example above — came back through WordArt recovery
+  flattened to its first stop again, with the gold end absent from the
+  package altogether.
+
+  A run needs its ramp's *geometry* stated as well as the ramp. A shape
+  takes that from its own bounds, but a run has no bounds of its own and
+  the default is a length of nothing, which paints everything before the
+  start point in the first colour and everything after it in the last: the
+  masthead came out brown for its left half and gold for its right, with a
+  hard edge down the middle. The band the headline was stretched into is
+  the distance the ramp was meant to run over, and that is what is
+  written, projected onto the ramp's own angle.
+
+  **A ramp is given both its ends.** Publisher's often occupy only part of
+  their range, 32 → 49 or 3 → 69, and what happens outside that is the
+  reader's choice: hold the end colours, as Publisher does, or stretch the
+  ramp to fit. Those look nothing alike, so a stop is written at 0 and at
+  100 in the colour already there. The reported offsets themselves are
+  untouched, repeats and all.
+
   **A see-through ramp is carried as far as IDML allows.** An IDML gradient
   stop has a colour and a position and no opacity, so transparency can only
   be stated for the object as a whole. That is exact whenever the stops
   agree, which is every case in the corpus — 42 shapes, all of them a
   two-stop ramp with both stops at 60% and no stroke to fade along with the
   fill. A ramp whose stops *differ* in opacity cannot be carried at all,
-  and is flagged rather than averaged into something the file never said.
+  and is counted in the report rather than averaged into something the file
+  never said.
 - **Transparency is opacity, not a tint.** A shape's own `draw:opacity`
   used to be written as `FillTint`, which is a different thing: a tint
   mixes the colour with the paper, so a 78% fill came out pale rather than

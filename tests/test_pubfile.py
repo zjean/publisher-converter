@@ -93,6 +93,36 @@ class RealFileTest(unittest.TestCase):
         self.assertAlmostEqual(art.size, 28.0)
         self.assertFalse(art.fitted)
 
+    def test_a_stream_name_two_storages_share_resolves_by_path(self):
+        # `1336 kerkbode.pub` holds two streams called CONTENTS: Publisher's
+        # text under Quill/QuillSub, and a metafile belonging to an embedded
+        # object. Matching on the name alone found the metafile, which read
+        # as a Quill stream with no chunks in it at all -- so the document
+        # appeared to have no field table and its 27 page numbers stayed '#'.
+        source = SAMPLES / "cgk" / "1336 kerkbode.pub"
+        if not source.exists():
+            self.skipTest("newsletter sample absent")
+        data = source.read_bytes()
+        quill = pubfile._read_stream(data, *pubfile._QUILL_STREAM)
+        self.assertTrue(quill.startswith(b"CHNKINK "), quill[:16])
+        self.assertTrue(pubfile.read_structure(source).has_fields)
+
+    def test_tab_stops_are_read_out_of_a_real_file(self):
+        # The synthetic streams prove the record layout; this proves it is
+        # the layout Publisher writes. Three of this file's 38 tabbed
+        # paragraphs state a stop, which is the whole corpus's supply.
+        structure = pubfile.read_structure(SAMPLES / "rotated_text.pub")
+        stated = [(text, stops) for text, stops in structure.paragraph_stops if stops]
+        self.assertEqual(len(structure.paragraph_stops), 38)
+        self.assertEqual(
+            [stops for _text, stops in stated],
+            [
+                ((27.4, "left"),),
+                ((27.4, "left"),),
+                ((106.25, "left"),),
+            ],
+        )
+
     def test_a_file_with_no_wordart_reports_none(self):
         structure = pubfile.read_structure(SAMPLES / "MISSAL MARIANA E PEDRO.pub")
         self.assertEqual(structure.wordart, [])
@@ -502,6 +532,211 @@ class CellInsetApplicationTest(unittest.TestCase):
         self.assertIsNone(table.cells[0].insets)
 
 
+def quill_stream(*chunks: tuple) -> bytes:
+    """A Quill stream holding the given (name, payload) chunks.
+
+    The reference list sits at 0x18 and every reference names an offset
+    into the stream, so the payloads are laid out after the list.
+    """
+    body = b""
+    references = b""
+    start = 0x18 + 8 + 24 * len(chunks)
+    for name, payload in chunks:
+        offset = start + len(body)
+        references += (
+            struct.pack("<H", 0x18) + name.encode("ascii")
+            + struct.pack("<H", 0) + b"\x01\x00\x00\x00" + b"    "
+            + struct.pack("<II", offset, len(payload))
+        )
+        body += payload
+    head = b"\x00" * 0x18 + struct.pack("<HHI", 0, len(chunks), 0xFFFFFFFF)
+    return head + references + body
+
+
+def tab_block(*stops) -> bytes:
+    """A paragraph style's tab stop record. Each stop is (EMU, code)."""
+    entries = []
+    for index, (position, code) in enumerate(stops):
+        fields = [_u32(0x00, position & 0xFFFFFFFF)]
+        if code is not None:
+            fields.append(_block(0x01, 0x10, struct.pack("<H", code)))
+        entries.append(_container(index, 0x88, fields))
+    return _container(0x32, 0x82, [
+        _block(0x27, 0x1A, struct.pack("<H", len(stops))),
+        _container(0x28, 0x8A, entries),
+    ])
+
+
+def paragraph_chunk(text_at: int, paragraphs) -> bytes:
+    """An FDPP chunk: the offset each paragraph ends at, then its style.
+
+    `paragraphs` is a sequence of (character count, style body). Offsets
+    are measured from the start of the stream, which is why the caller
+    passes where the TEXT chunk begins.
+    """
+    styles, at = b"", 0
+    positions, ends = [], []
+    end = text_at
+    for length, body in paragraphs:
+        end += length * 2
+        ends.append(end)
+    header = 8 + 6 * len(paragraphs)
+    for _length, body in paragraphs:
+        positions.append(header + at)
+        styles += struct.pack("<I", len(body) + 4) + body
+        at += len(body) + 4
+    return (
+        struct.pack("<H", len(paragraphs)) + b"\x00" * 6
+        + b"".join(struct.pack("<I", e) for e in ends)
+        + b"".join(struct.pack("<H", p) for p in positions)
+        + styles
+    )
+
+
+class TabStopReadingTest(unittest.TestCase):
+    """The stops libmspub parses into a member it then never reads."""
+
+    def read(self, text: str, paragraphs, chunk_name: str = "FDPP"):
+        encoded = text.encode("utf-16-le")
+        # The text chunk must be laid out before its offsets can be stated,
+        # so build once to learn where it lands and then again for real.
+        probe = quill_stream(("TEXT", encoded), (chunk_name, b""))
+        text_at = struct.unpack_from("<I", probe, 0x18 + 8 + 16)[0]
+        stream = quill_stream(
+            ("TEXT", encoded), (chunk_name, paragraph_chunk(text_at, paragraphs))
+        )
+        return pubfile._paragraph_stops(stream)
+
+    def test_a_stop_arrives_in_points_against_its_paragraph(self):
+        found = self.read("a\tb\r", [(4, tab_block((114300, None)))])
+        self.assertEqual(found, [("a\tb\r", ((9.0, "left"),))])
+
+    def test_the_alignment_byte_says_centre_or_right(self):
+        found = self.read(
+            "a\tb\r", [(4, tab_block((2096901, 0xFF02), (4181102, 0xCC01)))]
+        )
+        self.assertEqual(
+            [alignment for _position, alignment in found[0][1]], ["center", "right"]
+        )
+
+    def test_a_stop_left_of_the_text_edge_is_read_as_negative(self):
+        found = self.read("a\tb\r", [(4, tab_block((0xFFF59304, None)))])
+        self.assertAlmostEqual(found[0][1][0][0], -53.8, places=1)
+
+    def test_a_paragraph_with_no_tab_is_not_reported(self):
+        # A stop only decides where a tab lands; there is nothing to carry.
+        self.assertEqual(self.read("ab\r", [(3, tab_block((114300, None)))]), [])
+
+    def test_a_tabbed_paragraph_stating_no_stops_is_still_reported(self):
+        # Two paragraphs of one text, one with stops and one without, is an
+        # ambiguity — which needs the second to be visible to the caller.
+        found = self.read("a\tb\r", [(4, b"")])
+        self.assertEqual(found, [("a\tb\r", ())])
+
+    def test_paragraphs_are_cut_where_the_offsets_say(self):
+        found = self.read(
+            "a\tb\rc\td\r",
+            [(4, tab_block((114300, None))), (4, tab_block((228600, None)))],
+        )
+        self.assertEqual([text for text, _stops in found], ["a\tb\r", "c\td\r"])
+        self.assertEqual(found[1][1], ((18.0, "left"),))
+
+    def test_a_stream_with_no_text_chunk_reads_nothing(self):
+        self.assertEqual(pubfile._paragraph_stops(quill_stream(("FDPP", b""))), [])
+
+    def test_a_truncated_chunk_does_not_raise(self):
+        stream = quill_stream(("TEXT", "a\tb\r".encode("utf-16-le")), ("FDPP", b"\x09"))
+        self.assertEqual(pubfile._paragraph_stops(stream), [])
+
+
+class TabStopApplicationTest(unittest.TestCase):
+    """Tying a stop to the paragraph libmspub reported, by its text."""
+
+    def document(self, *texts: str) -> model.Document:
+        frame = model.TextFrame(x=0.0, y=0.0, width=200.0, height=100.0)
+        for text in texts:
+            paragraph = model.Paragraph()
+            paragraph.spans.append(model.Span(text=text))
+            frame.story.paragraphs.append(paragraph)
+        return model.Document(pages=[page_with(frame)])
+
+    def paragraphs(self, document):
+        return document.pages[0].items[0].story.paragraphs
+
+    def structure(self, *stops) -> pubfile.FileStructure:
+        return pubfile.FileStructure(paragraph_stops=list(stops))
+
+    def test_a_paragraph_matched_by_its_text_gets_its_stops(self):
+        document = self.document("van:\tLisa")
+        convert._apply_tab_stops(
+            document, self.structure(("van:\tLisa\r", ((27.4, "left"),)))
+        )
+        self.assertEqual(
+            self.paragraphs(document)[0].tab_stops, [model.TabStop(27.4, "left")]
+        )
+
+    def test_the_paragraph_mark_and_control_characters_do_not_block_a_match(self):
+        document = self.document("a\tb")
+        convert._apply_tab_stops(document, self.structure(("a\tb\r\x00", ((9.0, "left"),))))
+        self.assertEqual(self.paragraphs(document)[0].tab_stops, [model.TabStop(9.0)])
+
+    def test_one_text_stated_two_ways_is_an_ambiguity_and_neither_applies(self):
+        document = self.document("a\tb")
+        convert._apply_tab_stops(
+            document,
+            self.structure(("a\tb\r", ((9.0, "left"),)), ("a\tb\r", ((18.0, "left"),))),
+        )
+        self.assertEqual(self.paragraphs(document)[0].tab_stops, [])
+
+    def test_one_text_stated_twice_alike_is_not_an_ambiguity(self):
+        document = self.document("a\tb")
+        convert._apply_tab_stops(
+            document,
+            self.structure(("a\tb\r", ((9.0, "left"),)), ("a\tb\r", ((9.0, "left"),))),
+        )
+        self.assertEqual(self.paragraphs(document)[0].tab_stops, [model.TabStop(9.0)])
+
+    def test_a_text_seen_both_with_stops_and_without_is_an_ambiguity(self):
+        document = self.document("a\tb")
+        convert._apply_tab_stops(
+            document, self.structure(("a\tb\r", ((9.0, "left"),)), ("a\tb\r", ()))
+        )
+        self.assertEqual(self.paragraphs(document)[0].tab_stops, [])
+
+    def test_a_paragraph_the_file_says_nothing_about_is_left_alone(self):
+        document = self.document("a\tb")
+        convert._apply_tab_stops(document, self.structure(("c\td\r", ((9.0, "left"),))))
+        self.assertEqual(self.paragraphs(document)[0].tab_stops, [])
+
+    def test_tabs_with_no_stop_anywhere_are_reported_once_for_the_document(self):
+        document = self.document("a\tb", "c\td")
+        convert._apply_tab_stops(document, self.structure(("a\tb\r", ()), ("c\td\r", ())))
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("2 paragraph(s)", document.warnings[0])
+
+    def test_a_document_whose_tabs_are_all_placed_is_not_warned_about(self):
+        document = self.document("a\tb")
+        convert._apply_tab_stops(document, self.structure(("a\tb\r", ((9.0, "left"),))))
+        self.assertEqual(document.warnings, [])
+
+    def test_no_structure_at_all_changes_nothing(self):
+        document = self.document("a\tb")
+        convert._apply_tab_stops(document, None)
+        self.assertEqual(self.paragraphs(document)[0].tab_stops, [])
+        self.assertEqual(document.warnings, [])
+
+    def test_a_paragraph_inside_a_table_cell_is_reached(self):
+        table = model.Table(x=0.0, y=0.0, width=100.0, height=20.0)
+        cell = model.TableCell(row=0, column=0)
+        paragraph = model.Paragraph()
+        paragraph.spans.append(model.Span(text="a\tb"))
+        cell.story.paragraphs.append(paragraph)
+        table.cells = [cell]
+        document = model.Document(pages=[page_with(table)])
+        convert._apply_tab_stops(document, self.structure(("a\tb\r", ((9.0, "left"),))))
+        self.assertEqual(paragraph.tab_stops, [model.TabStop(9.0)])
+
+
 def _escher(rec_type: int, payload: bytes, version: int = 0, instance: int = 0) -> bytes:
     return struct.pack("<HHI", version | (instance << 4), rec_type, len(payload)) + payload
 
@@ -668,14 +903,39 @@ class WordArtRecoveryTest(unittest.TestCase):
         self.assertEqual(span.font, "Monotype Corsiva")
         self.assertAlmostEqual(span.size_pt, 20.0)
 
-    def test_the_frame_lands_on_the_band(self):
+    def test_the_frame_is_centred_on_the_band(self):
+        # The band is where the words go, and the frame is centred on it
+        # rather than equal to it -- see the wrap allowance below. Centred
+        # and unfilled, the extra height shows as nothing while they fit.
         document = self.document_with(self.guides())
         convert._recover_wordart(document, self.structure_with(self.art()))
         frame = document.pages[0].items[0]
         self.assertAlmostEqual(frame.x, 100.0)
-        self.assertAlmostEqual(frame.y, 200.0)
+        self.assertAlmostEqual(frame.width, 200.0)
+        self.assertAlmostEqual(frame.x + frame.width / 2.0, 200.0)
+        self.assertAlmostEqual(frame.y + frame.height / 2.0, 215.0)
+
+    def test_the_frame_is_the_band_and_no_larger(self):
+        # Giving it room for a wrapped headline was tried and taken back
+        # out: the extra height only holds the words in place if the
+        # reader centres them vertically, and if it does not the headline
+        # hangs half a band high. Centring inside the band is safe either
+        # way -- ignored, it lands on the top of the band, where the words
+        # were put before there was any centring at all.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        frame = document.pages[0].items[0]
         self.assertAlmostEqual(frame.width, 200.0)
         self.assertAlmostEqual(frame.height, 30.0)
+
+    def test_the_words_are_centred_in_the_band(self):
+        # WordArt fits its glyphs to the shape, so the band is the words
+        # rather than a box they sit in one corner of.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        frame = document.pages[0].items[0]
+        self.assertEqual(frame.vertical_align, "center")
+        self.assertEqual(frame.story.paragraphs[0].align, "center")
 
     def test_the_words_take_the_colour_of_the_shape(self):
         document = self.document_with(self.guides())
@@ -787,6 +1047,76 @@ class WordArtRecoveryTest(unittest.TestCase):
         document = self.document_with(path)
         convert._recover_wordart(document, None)
         self.assertIs(document.pages[0].items[0], path)
+
+    def outlined(self, **style) -> model.Path:
+        """The same guides, painted as an outline rather than a fill."""
+        path = self.guides(**style)
+        path.style.fill = None
+        path.style.stroke = (54, 27, 0)
+        path.style.stroke_width = 0.75
+        return path
+
+    def test_guides_that_are_stroked_rather_than_filled_still_match(self):
+        # Cantico's headline arrives this way: its glyphs are filled with a
+        # texture, so the only colour on the shape is the outline. Reading
+        # the fill alone left the words behind and drew the guides instead.
+        document = self.document_with(self.outlined())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        frame = document.pages[0].items[0]
+        self.assertIsInstance(frame, model.TextFrame)
+        self.assertEqual(frame.story.paragraphs[0].spans[0].text, "Kerkdiensten")
+
+    def test_with_no_fill_the_outline_colours_the_words(self):
+        document = self.document_with(self.outlined())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        span = document.pages[0].items[0].story.paragraphs[0].spans[0]
+        self.assertEqual(span.color, (54, 27, 0))
+        # Spent on the words, so not also drawn around them.
+        self.assertIsNone(span.stroke)
+
+    def test_repeated_paints_of_one_shape_make_one_frame(self):
+        # libmspub draws once per paint, so a headline that is filled and
+        # outlined reports the same guides twice. Taking each on its own
+        # wrote the words twice over, or left rules across them.
+        document = self.document_with(self.guides(), self.outlined())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        items = document.pages[0].items
+        self.assertEqual(len(items), 1)
+        self.assertIsInstance(items[0], model.TextFrame)
+
+    def test_the_paints_are_merged_rather_than_one_winning(self):
+        document = self.document_with(self.guides(), self.outlined())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        span = document.pages[0].items[0].story.paragraphs[0].spans[0]
+        self.assertEqual(span.color, (0, 51, 128))       # from the fill pass
+        self.assertEqual(span.stroke, (54, 27, 0))       # from the outline pass
+        self.assertAlmostEqual(span.stroke_width, 0.75)
+
+    def test_a_dropped_repeat_is_reported(self):
+        document = self.document_with(self.guides(), self.outlined())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertTrue(any("repeated paint" in w for w in document.warnings))
+
+    def test_a_gradient_on_the_shape_stays_a_gradient_on_the_words(self):
+        ramp = model.Gradient(
+            stops=(
+                model.GradientStop(location=0.0, color=(145, 56, 1)),
+                model.GradientStop(location=100.0, color=(255, 209, 125)),
+            ),
+        )
+        document = self.document_with(self.guides(gradient=ramp))
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        span = document.pages[0].items[0].story.paragraphs[0].spans[0]
+        self.assertEqual(span.gradient, ramp)
+        # The flat first stop stays too, for anything not gradient-aware.
+        self.assertEqual(span.color, (0, 51, 128))
+
+    def test_a_stroked_guide_pair_is_not_reported_as_unrenderable(self):
+        # It draws its edges, so "encloses no area and draws nothing" would
+        # be the wrong complaint about it.
+        document = self.document_with(self.outlined())
+        convert._check_unrenderable_paths(document)
+        self.assertFalse(any("enclose no area" in w for w in document.warnings))
 
 
 @needs_samples
