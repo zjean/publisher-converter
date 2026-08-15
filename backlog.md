@@ -471,6 +471,78 @@ What would finish this is the default interval, and it needs Publisher:
 
 ---
 
+## 13. The ramp libmspub reports only the middle of — **done**
+
+Found by comparing a converted page against Publisher's own PDF of it:
+the cream banner behind every section heading came out flat grey.
+
+Publisher states a gradient as two colours — the shape's fill and
+fill-back — with waypoints between them. `MSPUBParser::getShapeFill`
+reads all three and then, **whenever a shade list exists at all, builds
+the ramp from that list alone**, dropping both end colours. A two-colour
+gradient with a single waypoint therefore reaches librevenge as one stop,
+which is nothing to ramp between, and the converter flattens it:
+
+```
+                        gradients   flattened
+1336 kerkbode.pub              24          10
+1337 kerkbode.pub              25          11
+1338 kerkbode.pub              25          11
+```
+
+What the file says for one of them — the banner — is `#ffffff →
+(#e1e1e1 at 52%) → #663300`, white to brown through grey. What arrived
+was `#e1e1e1`, and nothing else.
+
+Landed as `pubfile._read_gradients`, with `_resolve_color` following
+`ColorReference::getFinalColor`: a reference is a BGR triple unless its
+top byte is `0x08`, which indexes the document palette (chunk type
+`0x5C`), or `0x10`, which is an intensity change of the colour underneath.
+
+**A first pass at this got three things wrong, all found by checking the
+reconstruction against libmspub instead of against the eye.** Worth
+keeping, because each one looks right until it is measured:
+
+- **The ramp runs the other way.** Publisher's *fillFocus* says which end
+  it starts from, and at 100 — which is every shape in the corpus that
+  states a waypoint list — it starts at the fill-back colour, with the
+  waypoints reversed and each at its distance from the other end. That is
+  `addColorReverse` in libmspub, and the first pass ignored focus, so
+  every restored ramp ran backwards.
+- **The angle was dropped.** A flattened fill never became a `Gradient`,
+  so its angle went with the ramp and the replacement got zero. Six of
+  the 32 state 180. Reading it back needs all three of libmspub's own
+  transformations, the last of which explains a note in `model.py`: the
+  file's `-45` becomes `225` by its quirk table and then `-225` by the
+  negation ODF's clockwise angles need, which is the `-225` the corpus
+  was already known to carry.
+- **Only the flattened ramps were replaced.** libmspub drops the end
+  colours from *every* ramp with a waypoint list, so the 32 that survived
+  were missing them too — the heading bars run navy to white and arrived
+  light blue to pale blue. The rule is now: replace wherever the file
+  states a ramp, leave a fill with no waypoint list alone.
+
+And one plain bug: `_resolve_color` resolved an intensity change against
+a base it resolved in turn, which recursed until the stack ran out on a
+colour stated against itself. libmspub reads the base directly, and so
+does this now. It would have cost a file its masters, its WordArt and its
+tab stops, since `read_structure` answers any difficulty with None.
+
+**What makes the reading safe** is that libmspub reports 32 of these
+ramps in full: on every one, the waypoints reconstructed here are
+identical to its own stop for stop, and so are the angles. That is the
+regression test — not a fixed expectation, but the two readings agreeing
+on the shapes where both can be had.
+
+Matching is by centre, the same handle WordArt uses; where a banner and
+its backing panel share one to within half a point, the nearer size
+decides, and two equally near is an ambiguity rather than a guess. The
+size cannot be *required* to match — the anchor measures the shape with
+its outline while libmspub reports the path inside it, 16pt apart on one
+shape in the corpus — so it only ever breaks a tie.
+
+---
+
 ## Not worth doing
 
 Recorded so they don't get re-investigated:

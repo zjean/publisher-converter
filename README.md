@@ -626,6 +626,46 @@ These are real and deliberate, not bugs to be surprised by later.
   with fewer than two usable stops falls back to a flat colour, and the
   report says how many did.
 
+  **The ramp is read from the file, because libmspub reports only its
+  middle.** Publisher states a gradient as two colours — the shape's fill
+  and its fill-back — with waypoints between them. libmspub reads all
+  three and then, whenever there is a waypoint list at all, builds the
+  ramp from that list *alone* and drops both ends. Where the list holds a
+  single waypoint that leaves one stop, which is nothing to ramp between
+  and paints the shape flat; where it holds several, the ramp survives but
+  begins and ends in the wrong colours. In the three newsletters that is
+  **32 shapes flattened outright** and **32 more missing their ends**: the
+  banner behind every section heading runs white to brown through grey and
+  came out flat grey, and the heading bars run navy to white and came out
+  light blue to pale blue.
+
+  Those colours are in the Escher stream, so `pubfile` reads them there —
+  resolving palette references and intensity changes the way
+  `ColorReference` does — and rebuilds the ramp. Three details decide
+  whether the result is Publisher's ramp or merely a plausible one:
+
+  - **Which end it starts from.** Publisher's *focus* says so, and at 100,
+    which is every shape in the corpus that states a waypoint list, the
+    ramp runs from the fill-back colour and the waypoints run backwards
+    with it, each at its distance from the other end.
+  - **Its angle.** Three transformations sit between the file and
+    `draw:angle`: degrees in the high half of a fixed-point word, two
+    angles the format states ninety degrees askew, and a negation, since
+    ODF measures clockwise. A flattened fill never became a gradient at
+    all, so its angle was lost with the ramp.
+  - **Which shape it belongs to.** By where the shape sits, and — where a
+    banner and its backing panel share a centre to within half a point —
+    by which is nearer its size. The size cannot be *required* to match:
+    the anchor measures the shape with its outline while libmspub reports
+    the path inside it.
+
+  What makes this a reading rather than a second opinion is that libmspub
+  reports 32 of these ramps in full, and on every one of them the
+  waypoints reconstructed here are identical to its own, stop for stop,
+  and so are the angles. What is added is the pair of colours it drops. A
+  fill whose shade list is empty is left alone: libmspub builds those from
+  the two end colours itself, and gets them right.
+
   Worth knowing why this mattered: keeping just the first stop is how a
   background disappears rather than merely flattening. The ramps in the
   sample corpus start white — `#ffffff → #ffeedd → #ffffff` for a panel,

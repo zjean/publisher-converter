@@ -1149,3 +1149,304 @@ class EndToEndTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GradientReadingTest(unittest.TestCase):
+    """The ramp libmspub drops the ends of."""
+
+    def palette(self):
+        return [(0, 0, 0), (255, 0, 0), (255, 204, 0)]
+
+    def test_a_reference_reads_as_bgr_unless_it_is_flagged(self):
+        self.assertEqual(pubfile._resolve_color(0x00563412, 0, []), (0x12, 0x34, 0x56))
+
+    def test_a_flagged_reference_indexes_the_palette(self):
+        self.assertEqual(
+            pubfile._resolve_color(0x08000002, 0, self.palette()), (255, 204, 0)
+        )
+
+    def test_an_index_past_the_palette_is_not_a_colour(self):
+        self.assertIsNone(pubfile._resolve_color(0x08000009, 0, self.palette()))
+
+    def test_an_intensity_change_against_itself_terminates(self):
+        # The base of an intensity change is read directly rather than
+        # resolved in its turn; resolving it recursed until the stack ran
+        # out, which cost the file its masters and its WordArt with it.
+        self.assertIsNotNone(pubfile._resolve_color(0x10800100, 0x10800100, []))
+
+    def test_an_intensity_change_darkens_the_colour_underneath(self):
+        # Half intensity against a black base halves every channel.
+        found = pubfile._resolve_color(0x10800100, 0x00FFFFFF, [])
+        self.assertEqual(found, (128, 128, 128))
+
+    def test_the_shade_list_reads_as_position_and_colour(self):
+        blob = (
+            struct.pack("<HI", 1, 0)  # count, then four bytes of header
+            + struct.pack("<II", 0x00563412, 32768)  # colour, 0.5 in 16.16
+        )
+        self.assertEqual(
+            pubfile._shade_stops(blob, [], 0), [(0.5, (0x12, 0x34, 0x56))]
+        )
+
+    def test_a_shade_list_shorter_than_it_claims_stops_at_the_data(self):
+        blob = struct.pack("<HI", 9, 0) + struct.pack("<II", 0x00112233, 0)
+        self.assertEqual(len(pubfile._shade_stops(blob, [], 0)), 1)
+
+    def test_nothing_to_read_is_no_stops(self):
+        self.assertEqual(pubfile._shade_stops(b"", [], 0), [])
+        self.assertEqual(pubfile._shade_stops(None, [], 0), [])
+
+
+@needs_samples
+class RealGradientTest(unittest.TestCase):
+    def test_the_whole_ramp_is_read_out_of_a_real_file(self):
+        # libmspub reports this one as a single grey stop. The file states
+        # brown, white and a grey waypoint, at a focus of 100 -- so the
+        # ramp runs white to brown, through the grey.
+        structure = pubfile.read_structure(SAMPLES / "cgk" / "1336 kerkbode.pub")
+        if structure is None:
+            self.skipTest("newsletter sample absent")
+        ramps = {
+            tuple(colour for _position, colour in found.stops)
+            for found in structure.gradients
+        }
+        self.assertIn(((255, 255, 255), (0xE1, 0xE1, 0xE1), (0x66, 0x33, 0x00)), ramps)
+
+    def test_a_reconstructed_ramp_holds_the_waypoints_libmspub_reports(self):
+        """The reversal rule, checked against libmspub's own reading.
+
+        Where libmspub reports a ramp in full it applies the same focus
+        rule this reconstruction does, so on those shapes the two must
+        agree waypoint for waypoint -- and where they do, the rule is
+        right on the shapes it reports only one stop of as well.
+        """
+        if not convert.PUBDUMP.exists():
+            self.skipTest("pubdump not built")
+        source = SAMPLES / "cgk" / "1336 kerkbode.pub"
+        if not source.exists():
+            self.skipTest("newsletter sample absent")
+        structure = pubfile.read_structure(source)
+        document = convert.parse_document(source)
+        checked = 0
+        for page in document.pages:
+            for item in model._walk(page.items):
+                ramp = item.style.gradient
+                if ramp is None or len(ramp.stops) < 2:
+                    continue
+                found = structure.gradient_for(
+                    item.x + item.width / 2 - page.width / 2,
+                    item.y + item.height / 2 - page.height / 2,
+                    item.width,
+                    item.height,
+                )
+                if found is None:
+                    continue
+                theirs = [stop.color for stop in ramp.stops]
+                ours = [colour for _position, colour in found.stops]
+                # Ours adds the ends libmspub drops -- and only where the
+                # waypoints do not already reach them -- so what it reports
+                # has to sit inside ours, in order, unbroken.
+                inside = any(
+                    ours[at:at + len(theirs)] == theirs
+                    for at in range(len(ours) - len(theirs) + 1)
+                )
+                self.assertTrue(inside, f"{ours} does not contain {theirs}")
+                checked += 1
+        self.assertGreater(checked, 10, "no ramps were compared")
+
+
+class GradientMatchingTest(unittest.TestCase):
+    """Telling one shape's ramp from another's where they overlap."""
+
+    def structure(self, *shapes) -> pubfile.FileStructure:
+        return pubfile.FileStructure(gradients=[
+            pubfile.ShapeGradient(
+                stops=[(0.0, (r, 0, 0)), (1.0, (255, 255, 255))],
+                centre_x=cx, centre_y=cy, width=w, height=h,
+            )
+            for r, cx, cy, w, h in shapes
+        ])
+
+    def test_a_shape_on_its_own_is_matched_by_where_it_sits(self):
+        found = self.structure((1, 10.0, 20.0, 100.0, 50.0)).gradient_for(
+            10.0, 20.0, 100.0, 50.0
+        )
+        self.assertEqual(found.stops[0][1], (1, 0, 0))
+
+    def test_a_size_the_outline_widened_still_matches(self):
+        # The anchor box measures the outline; libmspub reports the path.
+        found = self.structure((1, 10.0, 20.0, 199.0, 83.0)).gradient_for(
+            10.0, 20.0, 182.5, 66.4
+        )
+        self.assertIsNotNone(found)
+
+    def test_two_ramps_at_one_centre_are_told_apart_by_size(self):
+        structure = self.structure(
+            (1, 10.0, 20.0, 100.0, 50.0), (2, 10.2, 20.1, 340.0, 35.0)
+        )
+        self.assertEqual(
+            structure.gradient_for(10.0, 20.0, 340.0, 35.0).stops[0][1], (2, 0, 0)
+        )
+
+    def test_two_ramps_of_one_size_at_one_centre_are_an_ambiguity(self):
+        structure = self.structure(
+            (1, 10.0, 20.0, 100.0, 50.0), (2, 10.2, 20.1, 100.0, 50.0)
+        )
+        self.assertIsNone(structure.gradient_for(10.0, 20.0, 100.0, 50.0))
+
+    def test_a_shape_nowhere_near_is_not_matched(self):
+        structure = self.structure((1, 10.0, 20.0, 100.0, 50.0))
+        self.assertIsNone(structure.gradient_for(300.0, 20.0, 100.0, 50.0))
+
+
+class GradientRestorationTest(unittest.TestCase):
+    """Only a ramp that arrived flattened is replaced."""
+
+    def document(self, style: model.GraphicStyle) -> model.Document:
+        shape = model.Rectangle(x=50.0, y=100.0, width=100.0, height=50.0, style=style)
+        return model.Document(pages=[page_with(shape)]), shape
+
+    def structure(self):
+        # page_with makes a 612x792 page, so this centre is the shape's.
+        return pubfile.FileStructure(gradients=[
+            pubfile.ShapeGradient(
+                stops=[(0.0, (102, 51, 0)), (0.48, (225, 225, 225)), (1.0, (255, 255, 255))],
+                centre_x=100.0 - 306.0, centre_y=125.0 - 396.0,
+                width=100.0, height=50.0,
+            )
+        ])
+
+    def test_a_flattened_ramp_is_replaced_with_the_whole_one(self):
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        convert._restore_gradient_ramps(document, self.structure())
+        self.assertEqual(
+            [stop.color for stop in shape.style.gradient.stops],
+            [(102, 51, 0), (225, 225, 225), (255, 255, 255)],
+        )
+        self.assertFalse(shape.style.approximated_fill)
+
+    def test_the_flat_fill_becomes_the_ramps_first_colour(self):
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        convert._restore_gradient_ramps(document, self.structure())
+        self.assertEqual(shape.style.fill, (102, 51, 0))
+
+    def test_a_ramp_that_arrived_whole_still_gains_its_ends(self):
+        # libmspub drops the two end colours from every ramp with a
+        # waypoint list, not only from the ones that collapse to a stop,
+        # so a ramp that survived is missing them just the same.
+        whole = model.Gradient(stops=(
+            model.GradientStop(location=32.0, color=(1, 2, 3)),
+            model.GradientStop(location=49.0, color=(4, 5, 6)),
+        ))
+        document, shape = self.document(model.GraphicStyle(gradient=whole))
+        convert._restore_gradient_ramps(document, self.structure())
+        self.assertEqual(
+            [stop.color for stop in shape.style.gradient.stops],
+            [(102, 51, 0), (225, 225, 225), (255, 255, 255)],
+        )
+
+    def test_a_ramp_the_file_states_no_waypoints_for_is_left_alone(self):
+        # With no waypoint list libmspub builds the ramp from the two end
+        # colours itself, and gets it right; `pubfile` reports nothing for
+        # those, so there is nothing here to replace them with.
+        whole = model.Gradient(stops=(
+            model.GradientStop(location=0.0, color=(1, 2, 3)),
+            model.GradientStop(location=100.0, color=(4, 5, 6)),
+        ))
+        document, shape = self.document(model.GraphicStyle(gradient=whole))
+        convert._restore_gradient_ramps(document, pubfile.FileStructure())
+        self.assertIs(shape.style.gradient, whole)
+
+    def test_a_shape_the_file_says_nothing_about_keeps_its_flat_fill(self):
+        document, shape = self.document(
+            model.GraphicStyle(fill=(1, 1, 1), approximated_fill=True)
+        )
+        convert._restore_gradient_ramps(document, pubfile.FileStructure())
+        self.assertIsNone(shape.style.gradient)
+        self.assertTrue(shape.style.approximated_fill)
+
+    def test_a_shape_inside_a_group_is_reached(self):
+        shape = model.Rectangle(
+            x=50.0, y=100.0, width=100.0, height=50.0,
+            style=model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True),
+        )
+        group = model.Group(children=[shape])
+        document = model.Document(pages=[page_with(group)])
+        convert._restore_gradient_ramps(document, self.structure())
+        self.assertIsNotNone(shape.style.gradient)
+
+    def test_no_structure_at_all_changes_nothing(self):
+        document, shape = self.document(
+            model.GraphicStyle(fill=(1, 1, 1), approximated_fill=True)
+        )
+        convert._restore_gradient_ramps(document, None)
+        self.assertIsNone(shape.style.gradient)
+
+
+class RampDirectionTest(unittest.TestCase):
+    """Which end a ramp starts from, and which way its waypoints run.
+
+    Publisher's focus says where the ramp begins. At 100 it begins at the
+    fill-back colour, and libmspub reverses the waypoints with it --
+    `addColorReverse`, at the distance from the other end. Every shape in
+    the corpus that states a waypoint list states a focus of 100, and on
+    the 32 ramps libmspub reports in full the two readings agree stop for
+    stop, which is what makes the rule safe to apply to the ones it
+    reports a single stop of.
+    """
+
+    BROWN, GREY, WHITE = (102, 51, 0), (225, 225, 225), (255, 255, 255)
+
+    def test_a_forward_ramp_runs_from_the_fill_colour(self):
+        stops = pubfile._ramp_stops(0, [(0.48, self.GREY)], self.BROWN, self.WHITE)
+        self.assertEqual(
+            stops, [(0.0, self.BROWN), (0.48, self.GREY), (1.0, self.WHITE)]
+        )
+
+    def test_a_focus_of_a_hundred_runs_the_other_way(self):
+        stops = pubfile._ramp_stops(100, [(0.48, self.GREY)], self.BROWN, self.WHITE)
+        self.assertEqual(
+            stops, [(0.0, self.WHITE), (0.52, self.GREY), (1.0, self.BROWN)]
+        )
+
+    def test_reversing_keeps_the_waypoints_in_their_new_order(self):
+        stops = pubfile._ramp_stops(
+            100, [(0.52, (1, 1, 1)), (0.69, (2, 2, 2))], self.BROWN, self.WHITE
+        )
+        self.assertEqual(
+            [colour for _position, colour in stops],
+            [self.WHITE, (2, 2, 2), (1, 1, 1), self.BROWN],
+        )
+        self.assertAlmostEqual(stops[1][0], 0.31)
+        self.assertAlmostEqual(stops[2][0], 0.48)
+
+    def test_a_list_that_already_reaches_an_end_states_that_end_itself(self):
+        stops = pubfile._ramp_stops(
+            0, [(0.0, (1, 1, 1)), (1.0, (2, 2, 2))], self.BROWN, self.WHITE
+        )
+        self.assertEqual(stops, [(0.0, (1, 1, 1)), (1.0, (2, 2, 2))])
+
+
+class GradientAngleTest(unittest.TestCase):
+    """Three transformations sit between the file and `draw:angle`."""
+
+    def angle(self, raw):
+        return pubfile._gradient_angle({pubfile._PROP_FILL_ANGLE: raw})
+
+    def test_the_angle_is_the_high_half_of_a_fixed_point_value(self):
+        self.assertEqual(self.angle(0x00B40000), -180.0)  # 180 in the file
+
+    def test_it_is_negated_because_odf_measures_clockwise(self):
+        self.assertEqual(self.angle(0x00870000), -135.0)  # 135 in the file
+
+    def test_the_two_angles_the_format_states_askew_are_corrected(self):
+        # -45 in the file is 225 to libmspub, which reports it as -225 --
+        # the value the corpus carries and the model already folds.
+        self.assertEqual(self.angle(0xFFD30000), -225.0)
+
+    def test_a_shape_stating_no_angle_has_none(self):
+        self.assertEqual(pubfile._gradient_angle({}), 0.0)

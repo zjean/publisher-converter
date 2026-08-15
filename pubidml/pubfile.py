@@ -79,6 +79,13 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
                       0x00C0  WordArt text, UTF-16LE
                       0x00C3  WordArt point size, 16.16 fixed point
                       0x00C5  WordArt font name, UTF-16LE
+                      0x0180  fill type; 4-8 are the shaded ones
+                      0x0181/0x0183  fill and fill-back colour
+                      0x0197  shade list: U16 count, four bytes, then a
+                              colour and a 16.16 position per waypoint
+                    A colour is BGR unless its top byte is 0x08, which
+                    indexes the palette chunk, or 0x10, an intensity
+                    change of the colour it is stated against.
 
     Quill/QuillSub/CONTENTS stream, from MSPUBParser::parseQuill
       0x18  U16 (unused), U16 chunk count, U32 offset of the next list;
@@ -159,6 +166,33 @@ _ESCHER_EXTRA_HEADER = {0xF010: 4, 0xF011: 4}
 _ANCHOR_SIDES = (0x2001, 0x2002, 0x2003, 0x2004)
 _PROP_ROTATION = 0x0004
 _PROP_WORDART_TEXT, _PROP_WORDART_SIZE, _PROP_WORDART_FONT = 0x00C0, 0x00C3, 0x00C5
+
+# A gradient fill, and the colours it ramps between. libmspub reads all of
+# these (EscherFieldIds.h) but builds the ramp from the shade list *alone*
+# when there is one, so a Publisher gradient stated as "these two colours,
+# with a waypoint in between" reaches librevenge as the waypoint by itself.
+_PROP_FILL_TYPE, _PROP_FILL_COLOR, _PROP_FILL_BACK = 0x0180, 0x0181, 0x0183
+_PROP_FILL_SHADE = 0x0197
+_PROP_FILL_ANGLE, _PROP_FILL_FOCUS = 0x018B, 0x018C
+# Two angles the file states ninety degrees out, corrected by name in
+# MSPUBParser::getShapeFill -- "totally arbitrary", as its comment says.
+_FILL_ANGLE_FIXUPS = {-135: -45, -45: 225}
+# Where the ramp starts from: the fill colour, or the fill-back colour at
+# the far end. Any other value folds the ramp back on itself, and no shape
+# in the corpus states one of those together with a shade list, so there
+# is nothing to check a reconstruction of it against.
+_KNOWN_FILL_FOCUS = frozenset({0, 100})
+# fillType values that mean a shaded ramp rather than a solid or a bitmap,
+# from MS-ODRAW's MSO_FILLTYPE: shade, shadeCenter, shadeShape, shadeScale
+# and shadeTitle.
+_GRADIENT_FILL_TYPES = frozenset({4, 5, 6, 7, 8})
+_PALETTE_CHUNK = 0x5C
+_PALETTE_ENTRY_COLOR = 0x01
+# How a colour reference resolves, from ColorReference::getRealColor: the
+# top byte says what the rest means.
+_COLOR_FROM_PALETTE = 0x08
+_COLOR_CHANGE_INTENSITY = 0x10
+_INTENSITY_BLACK_BASE, _INTENSITY_WHITE_BASE = 0x01, 0x02
 _FIXED_16_16 = 65536.0
 # WordArt stretches its glyphs to fill the shape, so the band is not a
 # fixed multiple of the size the file states: across the 39 sized shapes in
@@ -228,6 +262,24 @@ class WordArt:
 
 
 @dataclass
+class ShapeGradient:
+    """One shape's gradient as the file states it, and where the shape sits.
+
+    `stops` is (position 0..1, (r, g, b)) in ramp order. Coordinates are
+    measured from the centre of the page, the only frame of reference the
+    Escher stream has, exactly as `WordArt` measures them.
+    """
+
+    stops: List[Tuple[float, tuple]] = field(default_factory=list)
+    #: Degrees, as libmspub would have reported them in `draw:angle`.
+    angle: float = 0.0
+    centre_x: float = 0.0
+    centre_y: float = 0.0
+    width: float = 0.0
+    height: float = 0.0
+
+
+@dataclass
 class FileStructure:
     """What the file says that libmspub does not pass on."""
 
@@ -256,6 +308,43 @@ class FileStructure:
     paragraph_stops: List[Tuple[str, Tuple[Tuple[float, str], ...]]] = field(
         default_factory=list
     )
+    #: Every shape whose fill the file states as a gradient, matched to the
+    #: event stream the same way WordArt is: by where the shape sits.
+    gradients: List[ShapeGradient] = field(default_factory=list)
+
+    def gradient_for(
+        self,
+        centre_x: float,
+        centre_y: float,
+        width: float,
+        height: float,
+        tolerance: float = 0.5,
+    ) -> Optional[ShapeGradient]:
+        """The gradient shape sitting here, told apart from its neighbours
+        by size where the centre alone is not enough.
+
+        A newsletter stacks a banner and the panel behind it within half a
+        point of one another, so two ramps can share a centre. Their sizes
+        differ by tens of points, which settles it -- but the size cannot
+        be required to *match*, because the anchor box measures the shape
+        with its outline and libmspub reports the path inside it, a gap of
+        16pt on one shape in the corpus. So the nearest size wins, and two
+        equally near is an ambiguity rather than a guess.
+        """
+        near = [
+            found for found in self.gradients
+            if abs(found.centre_x - centre_x) <= tolerance
+            and abs(found.centre_y - centre_y) <= tolerance
+        ]
+        if not near:
+            return None
+        near.sort(key=lambda f: abs(f.width - width) + abs(f.height - height))
+        if len(near) > 1:
+            first = abs(near[0].width - width) + abs(near[0].height - height)
+            second = abs(near[1].width - width) + abs(near[1].height - height)
+            if abs(first - second) <= tolerance:
+                return None
+        return near[0]
 
     def wordart_near(
         self, centre_x: float, centre_y: float, tolerance: float = 0.5
@@ -779,6 +868,198 @@ def _quill_chunks(quill: bytes):
     return chunks
 
 
+def _read_palette(contents: bytes, refs) -> List[tuple]:
+    """The document's colour scheme, in the order a reference indexes it.
+
+    An entry that states no colour still takes its place in the list --
+    libmspub adds a black for it -- so the positions have to be kept.
+    """
+    palette: List[tuple] = []
+    for _seq, kind, offset in refs:
+        if kind != _PALETTE_CHUNK:
+            continue
+        for block in _chunk_blocks(contents, offset):
+            if block.type != 0xA0:
+                continue
+            for entry in _children(contents, block):
+                colour = next(
+                    (
+                        sub.data
+                        for sub in _children(contents, entry)
+                        if sub.id == _PALETTE_ENTRY_COLOR
+                    ),
+                    None,
+                )
+                palette.append(
+                    (0, 0, 0) if colour is None
+                    else (colour & 0xFF, (colour >> 8) & 0xFF, (colour >> 16) & 0xFF)
+                )
+    return palette
+
+
+def _real_color(value: int, palette: List[tuple]) -> Optional[tuple]:
+    """A colour reference read directly, as ColorReference::getRealColor.
+
+    Either an index into the document palette or a BGR triple. This never
+    consults a base colour, which is what stops an intensity change stated
+    against another intensity change from chasing its own tail.
+    """
+    if (value >> 24) & 0xFF == _COLOR_FROM_PALETTE:
+        index = value & 0xFFFFFF
+        return palette[index] if index < len(palette) else None
+    return (value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF)
+
+
+def _resolve_color(value: int, base: int, palette: List[tuple]) -> Optional[tuple]:
+    """A colour reference as ColorReference::getFinalColor resolves it.
+
+    An intensity change is a shade of the colour it is stated against, so
+    it takes a second reference -- and that one is read directly, the way
+    libmspub reads it, rather than resolved in its turn.
+    """
+    kind = (value >> 24) & 0xFF
+    if kind == _COLOR_CHANGE_INTENSITY:
+        under = _real_color(base, palette)
+        if under is None:
+            return None
+        intensity = ((value >> 16) & 0xFF) / 255.0
+        which = (value >> 8) & 0xFF
+        if which == _INTENSITY_BLACK_BASE:
+            return tuple(round(channel * intensity) for channel in under)
+        if which == _INTENSITY_WHITE_BASE:
+            return tuple(
+                round(channel + (255 - channel) * (1 - intensity)) for channel in under
+            )
+        return None
+    return _real_color(value, palette)
+
+
+def _shade_stops(blob, palette: List[tuple], base: int):
+    """The waypoints of a shade list: (position, colour) in file order.
+
+    Each entry is a colour and a position in 16.16 fixed point, after a
+    six-byte header whose first two bytes count them.
+    """
+    if not isinstance(blob, bytes) or len(blob) <= 6:
+        return []
+    count = blob[0] | (blob[1] << 8)
+    stops, at = [], 6
+    for _ in range(min(count, (len(blob) - 6) // 8)):
+        colour = int.from_bytes(blob[at:at + 4], "little")
+        position = int.from_bytes(blob[at + 4:at + 8], "little") / _FIXED_16_16
+        at += 8
+        resolved = _resolve_color(colour, base, palette)
+        if resolved is not None:
+            stops.append((min(1.0, max(0.0, position)), resolved))
+    return stops
+
+
+def _gradient_angle(props: dict) -> float:
+    """The ramp's angle, stated the way libmspub would have reported it.
+
+    Three transformations sit between the file and `draw:angle`, and all
+    three have to be reproduced or a restored ramp runs a different way
+    from an identical one libmspub reported itself: the value is degrees
+    in the high half of a 16.16 fixed point; two angles are offset by
+    ninety degrees in the file format, which libmspub corrects by name;
+    and the result is negated, because ODF measures clockwise.
+    """
+    raw = props.get(_PROP_FILL_ANGLE)
+    if not isinstance(raw, int):
+        return 0.0
+    degrees = _signed(raw) >> 16
+    degrees = _FILL_ANGLE_FIXUPS.get(degrees, degrees)
+    return float(-degrees)
+
+
+def _ramp_stops(focus, waypoints, first, last):
+    """The whole ramp: the waypoints, with the colours either side of them.
+
+    `focus` says which end the ramp starts from. At 100 it runs from the
+    fill-back colour to the fill colour and the waypoints run backwards
+    with it, each at the distance from the *other* end -- which is what
+    libmspub does with the ones it reports in full
+    (`addColorReverse`), so the two readings of one file agree.
+
+    A focus that means neither end is left to the caller: libmspub folds
+    those into a ramp that returns to where it started, and no shape in
+    the corpus states one alongside a shade list, so there is nothing to
+    check a reconstruction against.
+    """
+    if focus == 100:
+        stops = [(1.0 - position, colour) for position, colour in reversed(waypoints)]
+        first, last = last, first
+    else:
+        stops = list(waypoints)
+    # A list that already reaches an end states that end itself.
+    if stops[0][0] > 0.01:
+        stops.insert(0, (0.0, first))
+    if stops[-1][0] < 0.99:
+        stops.append((1.0, last))
+    return stops
+
+
+def _read_gradients(data: bytes, palette: List[tuple]) -> List[ShapeGradient]:
+    """Every gradient the file states, whole, with the shape it fills.
+
+    libmspub reads the same properties and then builds the ramp from the
+    shade list alone whenever there is one (MSPUBParser::getShapeFill), so
+    a two-colour Publisher gradient with a waypoint in the middle reaches
+    the event stream as that waypoint by itself -- one stop, nothing to
+    ramp between, and a flat fill on the page. The colours it dropped are
+    the shape's own fill and fill-back, and they sit either side of the
+    waypoints.
+    """
+    escher = _read_stream(data, *_ESCHER_STREAM)
+    if not escher:
+        return []
+
+    found: List[ShapeGradient] = []
+    for body, end in _escher_shapes(escher, 0, len(escher)):
+        props: dict = {}
+        box = None
+        for _version, instance, rec_type, sub_body, sub_end in _escher_records(
+            escher, body, end
+        ):
+            if rec_type in _PROPERTY_RECORDS:
+                props.update(_escher_properties(escher, sub_body, sub_end, instance))
+            elif rec_type == _CLIENT_ANCHOR:
+                anchor = _escher_values(escher, sub_body, sub_end)
+                if all(side in anchor for side in _ANCHOR_SIDES):
+                    box = [
+                        _signed(anchor[side]) / _EMU_PER_POINT
+                        for side in _ANCHOR_SIDES
+                    ]
+
+        if props.get(_PROP_FILL_TYPE) not in _GRADIENT_FILL_TYPES or box is None:
+            continue
+        fill = props.get(_PROP_FILL_COLOR)
+        if not isinstance(fill, int):
+            continue
+        focus = _signed(props[_PROP_FILL_FOCUS]) if _PROP_FILL_FOCUS in props else 0
+        if focus not in _KNOWN_FILL_FOCUS:
+            continue
+        back = props.get(_PROP_FILL_BACK)
+        first = _resolve_color(fill, fill, palette)
+        last = _resolve_color(back, fill, palette) if isinstance(back, int) else None
+        waypoints = _shade_stops(props.get(_PROP_FILL_SHADE), palette, fill)
+        if first is None or last is None or not waypoints:
+            continue
+
+        stops = _ramp_stops(focus, waypoints, first, last)
+        found.append(
+            ShapeGradient(
+                angle=_gradient_angle(props),
+                stops=stops,
+                centre_x=(box[0] + box[2]) / 2.0,
+                centre_y=(box[1] + box[3]) / 2.0,
+                width=box[2] - box[0],
+                height=box[3] - box[1],
+            )
+        )
+    return found
+
+
 def _has_field_table(quill: bytes) -> bool:
     """True when the Quill stream carries a TOKN chunk of any kind."""
     return any(name == _TOKEN_CHUNK for name, _offset, _length in _quill_chunks(quill))
@@ -872,6 +1153,7 @@ def read_structure(source: Path) -> Optional[FileStructure]:
             tables=_read_tables(contents, refs),
             wordart=_read_wordart(data),
             paragraph_stops=_paragraph_stops(quill),
+            gradients=_read_gradients(data, _read_palette(contents, refs)),
         )
         for seq, kind, offset in refs:
             if kind != _PAGE_CHUNK:

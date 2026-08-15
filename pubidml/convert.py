@@ -539,6 +539,77 @@ def _apply_cell_insets(
         log.info("cell insets read for %d table(s), %d cell(s)", tables, cells)
 
 
+def _restore_gradient_ramps(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> None:
+    """Put back the ends of every ramp libmspub reports only the middle of.
+
+    Publisher states a gradient as two colours -- the shape's fill and its
+    fill-back -- with waypoints between them. libmspub reads all three
+    (`getShapeFill`) and then, whenever there is a waypoint list at all,
+    builds the ramp from that list alone and drops both ends. Where the
+    list holds one waypoint that leaves a single stop, which is nothing to
+    ramp between and paints the shape flat; where it holds several the
+    ramp survives but starts and finishes in the wrong colours. A heading
+    bar that runs navy to white arrived as light blue to pale blue, and a
+    banner that runs white to brown arrived as flat grey.
+
+    So the ramp is read from the file wherever the file states one, not
+    only where it collapsed. Two things make that safe rather than a
+    second opinion: on the ramps libmspub does report in full, the
+    waypoints this reconstruction produces are identical to its own, stop
+    for stop, and so are the angles. What is added is the pair of colours
+    it drops. A shape whose fill states no waypoint list is left alone --
+    libmspub builds those from the two end colours itself, correctly.
+    """
+    if structure is None or not structure.gradients:
+        return
+
+    restored = 0
+
+    def visit(items: List[model.Item], width: float, height: float) -> None:
+        nonlocal restored
+        for item in items:
+            if isinstance(item, model.Group):
+                visit(item.children, width, height)
+                continue
+            if item.style.gradient is None and not item.style.approximated_fill:
+                continue
+            found = structure.gradient_for(
+                item.x + item.width / 2.0 - width / 2.0,
+                item.y + item.height / 2.0 - height / 2.0,
+                item.width,
+                item.height,
+            )
+            if found is None or len(found.stops) < 2:
+                continue
+            item.style.gradient = model.Gradient(
+                stops=tuple(
+                    model.GradientStop(location=position * 100.0, color=colour)
+                    for position, colour in found.stops
+                ),
+                # A flattened fill never became a Gradient at all, so its
+                # angle went with the ramp; the file states it, and
+                # `pubfile` hands it over the way libmspub would have.
+                angle=model._fold_angle(found.angle),
+                radial=(
+                    item.style.gradient.radial
+                    if item.style.gradient is not None else False
+                ),
+            )
+            item.style.fill = found.stops[0][1]
+            item.style.approximated_fill = False
+            restored += 1
+
+    for page in document.pages:
+        visit(page.items, page.width, page.height)
+    for master in document.masters:
+        visit(master.items, master.width, master.height)
+
+    if restored:
+        log.info("gradient ramps read from the file for %d shape(s)", restored)
+
+
 def _tabbed_paragraphs(document: model.Document):
     """Every paragraph in the document that contains a tab."""
     for item in document.all_items():
@@ -1149,6 +1220,8 @@ def _convert(
     structure = pubfile.read_structure(source)
     _apply_master_pages(document, structure)
     _apply_cell_insets(document, structure)
+    # Before the WordArt pass, which takes a shape's paint as it finds it.
+    _restore_gradient_ramps(document, structure)
     _recover_wordart(document, structure)
     _rasterise_metafiles(document)
     # After the master pass: threading empties the continuation frames, and
