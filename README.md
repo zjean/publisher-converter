@@ -590,13 +590,23 @@ These are real and deliberate, not bugs to be surprised by later.
   two different ways neither is applied, the rule two tables drawing one
   grid already get.
 
-  The limit is what the file holds rather than what can be read out of it.
   Across the corpus **203 paragraphs contain a tab and 3 of them state a
-  stop**; the rest were lined up on Publisher's document-wide default
-  grid, which is not recorded in the file anywhere yet found. Those tabs
-  land on the reader's own grid instead — half an inch in InDesign — so
-  anything tabbed into columns needs checking, and the report says how
-  many paragraphs per document are affected.
+  stop**. The other 200 were lined up on the document's own default grid
+  — "Default tab stops" in Publisher's Format → Tabs dialog, and
+  `Document.DefaultTabStop` in its VBA, a per-publication value. The
+  Quill stream's `SGP ` chunk states it, and each of those paragraphs is
+  written out with an explicit ruler of left stops at that spacing, out
+  to the width its tabs have to cross. Without it they would land on
+  InDesign's own default grid of half an inch, which three of the nine
+  corpus files put four and a half times too far apart.
+
+  A file stating no interval is on Publisher's default of half an inch
+  already, which is the grid InDesign falls back to, so nothing is
+  written for it. What the `SGP ` block means is **inferred rather than
+  confirmed** — it behaves exactly as the setting would across the corpus
+  but has never been read back in Publisher itself (`actions.md` §10) —
+  so a document given a ruler says so in the report, with the interval it
+  was given.
 
   One position is recoverable without any stop at all, and is written: a
   hanging indent implies a stop at its left indent, because that is where

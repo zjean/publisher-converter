@@ -708,11 +708,14 @@ class TabStopApplicationTest(unittest.TestCase):
         convert._apply_tab_stops(document, self.structure(("c\td\r", ((9.0, "left"),))))
         self.assertEqual(self.paragraphs(document)[0].tab_stops, [])
 
-    def test_tabs_with_no_stop_anywhere_are_reported_once_for_the_document(self):
+    def test_tabs_with_no_stop_in_a_file_stating_no_interval_are_left_alone(self):
+        # No interval means Publisher's own default of half an inch, which
+        # is the grid InDesign falls back to, so there is nothing to write
+        # and nothing to warn about.
         document = self.document("a\tb", "c\td")
         convert._apply_tab_stops(document, self.structure(("a\tb\r", ()), ("c\td\r", ())))
-        self.assertEqual(len(document.warnings), 1)
-        self.assertIn("2 paragraph(s)", document.warnings[0])
+        self.assertEqual([p.tab_stops for p in self.paragraphs(document)], [[], []])
+        self.assertEqual(document.warnings, [])
 
     def test_a_document_whose_tabs_are_all_placed_is_not_warned_about(self):
         document = self.document("a\tb")
@@ -735,6 +738,140 @@ class TabStopApplicationTest(unittest.TestCase):
         document = model.Document(pages=[page_with(table)])
         convert._apply_tab_stops(document, self.structure(("a\tb\r", ((9.0, "left"),))))
         self.assertEqual(paragraph.tab_stops, [model.TabStop(9.0)])
+
+
+def section_chunk(interval_emu=None, block_type=0x22) -> bytes:
+    """A `SGP ` chunk stating the document's default tab interval, or none."""
+    if interval_emu is None:
+        return struct.pack("<I", 4)
+    block = struct.pack("<BB", 0x00, block_type) + struct.pack("<I", interval_emu)
+    return struct.pack("<I", 4 + len(block)) + block
+
+
+class DefaultTabStopTest(unittest.TestCase):
+    """Reading the document-wide interval out of the Quill stream."""
+
+    def read(self, *chunks):
+        return pubfile._default_tab_stop(quill_stream(*chunks))
+
+    def test_an_interval_is_read_as_points(self):
+        # 359410 EMU, which is what three of the corpus files state.
+        self.assertAlmostEqual(self.read(("SGP ", section_chunk(359410))), 28.3)
+
+    def test_a_chunk_stating_no_block_reads_nothing(self):
+        self.assertIsNone(self.read(("SGP ", section_chunk())))
+
+    def test_a_stream_with_no_section_chunk_reads_nothing(self):
+        self.assertIsNone(self.read(("TEXT", b"")))
+
+    def test_a_block_of_another_type_is_not_the_interval(self):
+        self.assertIsNone(self.read(("SGP ", section_chunk(359410, block_type=0x20))))
+
+    def test_a_reading_outside_publishers_own_range_is_refused(self):
+        # Publisher allows 1 to 1584 points; anything else says the block
+        # is not what it looks like.
+        self.assertIsNone(self.read(("SGP ", section_chunk(1))))
+        self.assertIsNone(self.read(("SGP ", section_chunk(1585 * 12700))))
+
+    def test_a_truncated_chunk_does_not_raise(self):
+        self.assertIsNone(self.read(("SGP ", b"\x40\x00\x00\x00\x00")))
+
+
+class DefaultTabGridTest(unittest.TestCase):
+    """Writing the document's default grid out as an explicit ruler."""
+
+    def document(self, *, width=200.0, page_width=612.0, indent=0.0):
+        frame = model.TextFrame(x=0.0, y=0.0, width=width, height=100.0)
+        paragraph = model.Paragraph(margin_left=indent)
+        paragraph.spans.append(model.Span(text="a\tb"))
+        frame.story.paragraphs.append(paragraph)
+        page = model.Page(width=page_width, height=792.0)
+        page.items.append(frame)
+        return model.Document(pages=[page]), paragraph
+
+    def apply(self, interval, *, stops=(), **kwargs):
+        document, paragraph = self.document(**kwargs)
+        convert._apply_tab_stops(
+            document,
+            pubfile.FileStructure(
+                paragraph_stops=list(stops), default_tab_stop=interval
+            ),
+        )
+        return document, paragraph
+
+    def test_a_stated_interval_becomes_a_ruler_of_left_stops(self):
+        _document, paragraph = self.apply(50.0)
+        self.assertEqual(
+            paragraph.tab_stops,
+            [model.TabStop(50.0), model.TabStop(100.0),
+             model.TabStop(150.0), model.TabStop(200.0)],
+        )
+
+    def test_the_ruler_runs_no_further_than_the_frame(self):
+        _document, paragraph = self.apply(80.0, width=200.0)
+        self.assertEqual([stop.position for stop in paragraph.tab_stops], [80.0, 160.0])
+
+    def test_an_indent_neither_moves_nor_shortens_the_ruler(self):
+        # A stop is measured from the frame's text edge, so every paragraph
+        # in a frame is on one grid; an indent only makes the stops behind
+        # it unreachable.
+        _document, paragraph = self.apply(50.0, width=200.0, indent=60.0)
+        self.assertEqual(
+            [stop.position for stop in paragraph.tab_stops],
+            [50.0, 100.0, 150.0, 200.0],
+        )
+
+    def test_publishers_own_default_needs_no_ruler(self):
+        # Half an inch is what InDesign falls back to anyway.
+        document, paragraph = self.apply(36.0)
+        self.assertEqual(paragraph.tab_stops, [])
+        self.assertEqual(document.warnings, [])
+
+    def test_a_file_stating_no_interval_gets_no_ruler(self):
+        document, paragraph = self.apply(None)
+        self.assertEqual(paragraph.tab_stops, [])
+        self.assertEqual(document.warnings, [])
+
+    def test_a_stop_the_file_states_wins_over_the_grid(self):
+        _document, paragraph = self.apply(50.0, stops=[("a\tb\r", ((17.0, "right"),))])
+        self.assertEqual(paragraph.tab_stops, [model.TabStop(17.0, "right")])
+
+    def test_a_frame_too_narrow_to_believe_falls_back_to_the_page(self):
+        # One corpus frame reports 5.5pt of width while holding 34
+        # paragraphs of text; its tabs are better served by a long ruler
+        # than by none.
+        _document, paragraph = self.apply(50.0, width=5.5, page_width=300.0)
+        self.assertEqual(
+            [stop.position for stop in paragraph.tab_stops],
+            [50.0, 100.0, 150.0, 200.0, 250.0, 300.0],
+        )
+
+    def test_a_ruler_is_capped_so_a_tiny_interval_cannot_flood_the_file(self):
+        _document, paragraph = self.apply(1.0, width=100000.0)
+        self.assertEqual(len(paragraph.tab_stops), convert._MAX_RULER_STOPS)
+
+    def test_the_grid_is_named_in_a_warning_because_it_is_not_confirmed(self):
+        document, _paragraph = self.apply(8.0787)
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("8.08pt", document.warnings[0])
+        self.assertIn("1 paragraph(s)", document.warnings[0])
+
+    def test_a_table_cell_is_ruled_across_the_columns_it_spans(self):
+        table = model.Table(x=0.0, y=0.0, width=300.0, height=20.0)
+        table.column_widths = [100.0, 100.0, 100.0]
+        cell = model.TableCell(row=0, column=0, column_span=2)
+        paragraph = model.Paragraph()
+        paragraph.spans.append(model.Span(text="a\tb"))
+        cell.story.paragraphs.append(paragraph)
+        table.cells = [cell]
+        document = model.Document(pages=[page_with(table)])
+        convert._apply_tab_stops(
+            document, pubfile.FileStructure(default_tab_stop=50.0)
+        )
+        self.assertEqual(
+            [stop.position for stop in paragraph.tab_stops],
+            [50.0, 100.0, 150.0, 200.0],
+        )
 
 
 def _escher(rec_type: int, payload: bytes, version: int = 0, instance: int = 0) -> bytes:

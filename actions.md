@@ -631,25 +631,25 @@ and no one has yet confirmed that Affinity honours them on import.
 
 ---
 
-## 10. Find the default tab interval  ⏰ needs Publisher, before 1 Oct 2026
+## 10. Confirm the default tab interval  ⏰ needs Publisher, before 1 Oct 2026
 
 ### Why this matters
 
-Tab stops are now carried (backlog §12), but hardly any tab has one:
-across the corpus **203 paragraphs contain a tab and 3 state a stop**.
-The other 200 were lined up on Publisher's document-wide default grid —
-"Default tab stops" in its Format → Tabs dialog — and that interval has
-not been found in the file. So they land on the reader's grid instead,
-half an inch in InDesign, and every tabbed column in the document sits
-somewhere other than where it was typed. A run of eight tabs, which is
-how these authors push a signature to the right, ends up 61pt further
-along than Publisher put it, or wraps — and in the three `kerkbode`
-issues, if the candidate below is the setting, 223pt further, which is
-wider than the page they are set on.
+Tab stops are carried (backlog §12), but hardly any tab has one: across
+the corpus **203 paragraphs contain a tab and 3 state a stop**. The other
+200 were lined up on Publisher's document-wide default grid — "Default
+tab stops" in its Format → Tabs dialog. Left to itself InDesign puts them
+on its own grid at half an inch, so a run of eight tabs, which is how
+these authors push a signature to the right, ends up 61pt further along
+than Publisher put it — and in the three `kerkbode` issues 223pt further,
+which is wider than the page they are set on.
 
-One number would fix all 200: with the interval known, a tabbed
-paragraph can be written with an explicit ruler of stops at that spacing
-and its tabs land exactly where they did.
+**A field that behaves like that interval has been found, and is now
+applied**: every such paragraph is written out with an explicit ruler of
+left stops at the document's own spacing. What is left is confirmation
+that the field means what it appears to mean. Until that is done, each
+converted document carrying a ruler says so in its report, with the
+interval it was given.
 
 ### What is already known
 
@@ -724,14 +724,17 @@ Nine pairs against nine `SGP ` readings:
 - **They match** — 8.0787 for the `kerkbode` issues, 28.30 for
   `Cantico`, `MISSAL` and `rotated_text`, 28.2898 for `Lisa Hoogendijk`,
   and 36 for the two files with no `SGP ` block. The field is identified,
-  and Step 4 can be wired against it.
+  and the ruler already being written is right. Delete the warning
+  `convert._apply_tab_stops` raises for it, and the `⏰` on this item.
 - **They don't** — the true numbers are now known per file, which is a
   far better starting point than a blind diff: grep each file for its own
   number as a length in EMU (`value_in_points × 12700`), and if nothing
   turns up, fall back to authoring two files that differ only in the
   setting (0.5" and 2.0", four times apart so no block holding one can be
   confused with a block holding the other) and running
-  `research/diff_blocks.py a=… b=…` over the pair.
+  `research/diff_blocks.py a=… b=…` over the pair. Then point
+  `pubfile._default_tab_stop` at whatever it finds — everything
+  downstream of it stays as it is.
 
 While reading these, also note whether the number is one the author could
 have typed. 8.0787pt is 2.85mm exactly and 28.2898pt is 9.98mm exactly —
@@ -739,16 +742,18 @@ neither is a value anybody types into a dialog, so if these *are* default
 tab stops they arrived by some route other than the Format → Tabs box,
 and that is worth understanding before trusting them.
 
-### Step 4 — wire it in
+### Already wired in
 
-`pubfile.read_structure` gains the interval; `convert._apply_tab_stops`
-gives every tabbed paragraph that states no stops of its own a ruler of
-them at that spacing, out to the width of the frame it sits in; and the
-warning that currently counts those paragraphs goes away, because they
-are no longer landing anywhere unknown. The emitter needs no change:
-`idml._emit_tab_stops` already writes a list of stops.
+Nothing to build once Step 3 comes out right. `pubfile.read_structure`
+carries the interval as `default_tab_stop`, `convert._apply_tab_stops`
+gives every tabbed paragraph with no stops of its own a ruler at that
+spacing out to the width its tabs have to cross, and `idml` writes it
+out. A file stating no interval is already on half an inch and gets no
+ruler. All that Step 3 changes is whether the warning stays.
 
-While in Publisher, also settle **which alignment byte is which**. The
+### While you are in there
+
+Also settle **which alignment byte is which**. The
 reading — `1` right, `2` centre — comes from geometry alone: the 22
 stops in the corpus that state one come in pairs, at the middle of a
 frame and at its right edge, which is a footer's centre-and-right pair.

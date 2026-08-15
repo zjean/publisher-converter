@@ -440,22 +440,29 @@ The stops that exist are almost all somewhere else — 313 of them in two
 paragraph *styles* of the kerkbode files, and the 22 alignment-bearing
 ones are the centre-and-right pair of a header or footer, on paragraphs
 holding a page-number field and no tab at all. The tabs that actually
-move text were lined up on Publisher's document-wide default grid, and
-**that interval is not recorded anywhere in the file yet found**.
+move text were lined up on Publisher's document-wide default grid.
 
-Which leaves the honest position: the 3 are carried exactly, the hanging
-indent still implies its own stop, and the remaining 200 are counted in
-the report so nobody assumes they landed right.
+**That interval has since been found**, in the Quill stream's `SGP `
+chunk: a bare U32 length and then at most one block, id `0x00` and type
+`0x22`, holding the interval in EMU. The 3 stated stops are still
+carried exactly, the hanging indent still implies its own stop, and the
+other 200 are now given an explicit ruler at the document's own spacing
+instead of being counted and left on the reader's grid.
 
-Two things established while looking, so they don't get re-derived:
+Three things established while looking, so they don't get re-derived:
 
+- **Publisher names the setting.** `Document.DefaultTabStop` in its own
+  VBA — per publication, in points, range 1 to 1584 — so the value has
+  to be in the file. Its default is 0.5in, which is InDesign's default
+  too, so a document that never touched the dialog needs nothing.
 - **Document chunk block `0x15` is not the default tab interval.** It
-  reads 359410 EMU in *every* file in the corpus — 566 twips, which is
-  1 cm truncated, and a tempting fit. But it is the same 359410 in the
-  US-Letter `Blank Note Card`, where a metric default has no business
-  being, so it is a constant of the format rather than a locale-derived
-  interval. Materialising a grid from it would have written a 1 cm ruler
-  into every tabbed paragraph on a guess.
+  reads 359410 EMU — 566 twips, 1 cm truncated, a tempting fit — but it
+  reads the same 359410 in every corpus file that carries it, including
+  the three `kerkbode` issues whose `SGP ` chunk states 8.0787pt, and it
+  is absent from the two files that carry no tab. A field that never
+  varies cannot be a per-document setting. (An earlier note here ruled it
+  out for the wrong reason, saying the US-Letter `Blank Note Card` reads
+  359410 as well; that file does not carry the block at all.)
 - **Style inheritance is deliberately not implemented.** A paragraph can
   name a default style (block `0x19`) and take that style's stops, the
   way every other paragraph property resolves in
@@ -466,8 +473,14 @@ Two things established while looking, so they don't get re-derived:
   which paragraphs name them, so a file that does exercise it announces
   itself.
 
-What would finish this is the default interval, and it needs Publisher:
-`actions.md` §10 is the controlled pair that would find it.
+What is left is confirmation. The `SGP ` block behaves exactly as the
+setting would — absent from both corpus files carrying no tab, present in
+all seven that carry one, and reading three different values where block
+`0x15` reads one — but nothing has read it back in Publisher, and a
+document-wide length could be a hyphenation zone as easily as a tab
+interval. `actions.md` §10 is now one line of VBA on the files we already
+have. Until it is answered, every document given a ruler says so in the
+report. `research/default_tab.py` prints what each file states.
 
 ---
 

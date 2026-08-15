@@ -106,6 +106,9 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
               order -- and that many U16 offsets into this chunk, each the
               position of a paragraph style
         TOKN  the field table, which libmspub does not read
+        SGP   a bare U32 length and then at most one block, id 0x00 type
+              0x22, holding the document's default tab interval in EMU --
+              the grid every tab with no stop of its own lands on
 
       A paragraph style is a bare U32 length and then blocks, of which
       0x32 holds the tab stops:
@@ -265,6 +268,23 @@ _TAB_POSITION, _TAB_ALIGNMENT = 0x00, 0x01
 # edge reading 1 -- the centre and right tabs of a header or a footer.
 _TAB_ALIGNMENTS = {1: "right", 2: "center"}
 
+# The document's "Default tab stops" interval -- Publisher's own
+# `Document.DefaultTabStop`, a per-publication value it documents as
+# points in the range 1 to 1584. The Quill stream's SGP chunk is a bare
+# U32 length and then at most one block, id 0x00 and type 0x22, holding
+# the interval in EMU; a chunk stating no block leaves the document on
+# Publisher's default of half an inch. See research/default_tab.py for
+# the evidence, which is circumstantial: the block is absent from both
+# corpus files carrying no tab, present in all seven that carry one, and
+# reads three different values where the block once suspected of holding
+# the interval reads the same number in every file that has it.
+_SECTION_CHUNK = "SGP "
+_DEFAULT_TAB_STOP, _DEFAULT_TAB_STOP_TYPE = 0x00, 0x22
+# What Publisher uses when the file states nothing, and what InDesign
+# falls back to as well -- so a document reading this needs no ruler
+# written for it.
+PUBLISHER_DEFAULT_TAB_STOP = 36.0
+
 
 @dataclass
 class PageStructure:
@@ -369,6 +389,11 @@ class FileStructure:
     #: Every shape whose fill the file states as a gradient, matched to the
     #: event stream the same way WordArt is: by where the shape sits.
     gradients: List[ShapeGradient] = field(default_factory=list)
+    #: The document's "Default tab stops" interval in points, where the file
+    #: states one. None means it does not, which is Publisher's own default
+    #: of half an inch -- the same grid InDesign falls back to, so there is
+    #: then nothing to carry.
+    default_tab_stop: Optional[float] = None
 
     def gradient_for(
         self,
@@ -1222,8 +1247,35 @@ def _paragraph_stops(quill: bytes):
     return found
 
 
+def _default_tab_stop(quill: bytes) -> Optional[float]:
+    """The document's default tab interval in points, where it states one.
+
+    Publisher applies this to every tab that has no stop of its own, which
+    in this corpus is 200 of the 203 tabs there are. It is out of range of
+    what Publisher's own property allows -- 1 to 1584 points -- if the
+    block is something other than what it looks like, so a reading outside
+    that is refused rather than carried.
+    """
+    for name, offset, _length in _quill_chunks(quill):
+        if name != _SECTION_CHUNK:
+            continue
+        if offset + 4 > len(quill):
+            continue
+        stated = struct.unpack_from("<I", quill, offset)[0]
+        for block in _blocks(quill, offset + 4, offset + stated):
+            if (block.id, block.type) != (_DEFAULT_TAB_STOP, _DEFAULT_TAB_STOP_TYPE):
+                continue
+            interval = _signed(block.data) / _EMU_PER_POINT
+            if 1.0 <= interval <= 1584.0:
+                return interval
+            log.info("default tab interval out of range (%.2fpt), ignored", interval)
+    return None
+
+
 def read_structure(source: Path) -> Optional[FileStructure]:
     """Masters, field presence, cell insets and tab stops, or None."""
+    # Also the document's default tab interval, which is what the great
+    # majority of tabs in a Publisher file are actually lined up on.
     try:
         data = Path(source).read_bytes()
         contents = _read_stream(data, *_CONTENTS_STREAM)
@@ -1238,6 +1290,7 @@ def read_structure(source: Path) -> Optional[FileStructure]:
             wordart=_read_wordart(data),
             paragraph_stops=_paragraph_stops(quill),
             gradients=_read_gradients(data, _read_palette(contents, refs)),
+            default_tab_stop=_default_tab_stop(quill),
         )
         for seq, kind, offset in refs:
             if kind != _PAGE_CHUNK:

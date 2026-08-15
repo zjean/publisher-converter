@@ -610,18 +610,39 @@ def _restore_gradient_ramps(
         log.info("gradient ramps read from the file for %d shape(s)", restored)
 
 
+def _text_width(frame: model.TextFrame) -> float:
+    """How wide one column of a frame's text is, in points."""
+    _top, right, _bottom, left = frame.padding
+    inside = frame.width - left - right
+    columns = max(frame.columns, 1)
+    return max((inside - frame.column_gap * (columns - 1)) / columns, 0.0)
+
+
+def _cell_width(table: model.Table, cell: model.TableCell) -> float:
+    """How wide one cell's text is, in points, spans and insets included."""
+    widths = table.column_widths or [table.width / table.column_count]
+    span = widths[cell.column:cell.column + max(cell.column_span, 1)]
+    inside = sum(span) if span else 0.0
+    if cell.insets:
+        inside -= cell.insets.left + cell.insets.right
+    return max(inside, 0.0)
+
+
 def _tabbed_paragraphs(document: model.Document):
-    """Every paragraph in the document that contains a tab."""
+    """Every paragraph in the document that contains a tab, with the width
+    its tabs have to run across."""
     for item in document.all_items():
         stories = []
         if isinstance(item, model.TextFrame):
-            stories.append(item.story)
+            stories.append((item.story, _text_width(item)))
         elif isinstance(item, model.Table):
-            stories += [cell.story for cell in item.cells]
-        for story in stories:
+            stories += [
+                (cell.story, _cell_width(item, cell)) for cell in item.cells
+            ]
+        for story, width in stories:
             for paragraph in story.paragraphs:
                 if "\t" in paragraph.text():
-                    yield paragraph
+                    yield paragraph, width
 
 
 def _apply_tab_stops(
@@ -640,11 +661,16 @@ def _apply_tab_stops(
     is not saying which paragraph is which, and neither is applied --
     the same rule two tables drawing one grid get.
 
-    What is left over is named rather than passed over in silence: in this
-    corpus most tabs belong to paragraphs the file records no stop for at
-    all, and those still land on the reader's grid.
+    The rest -- most of them, 200 of the corpus's 203 tabs -- were lined up
+    on the document's own default grid instead, the "Default tab stops"
+    interval of Publisher's Format -> Tabs dialog. That interval is in the
+    file (`pubfile._default_tab_stop`) and is written out as an explicit
+    ruler of left stops, because InDesign has a default grid of its own at
+    half an inch and would otherwise put every one of those tabs somewhere
+    else. A document that leaves the interval unstated is already on half
+    an inch and gets no ruler.
     """
-    if structure is None or not structure.paragraph_stops:
+    if structure is None:
         return
 
     stated: Dict[str, Optional[tuple]] = {}
@@ -655,27 +681,86 @@ def _apply_tab_stops(
         if stated.setdefault(key, stops) != stops:
             stated[key] = None
 
-    placed = unplaced = 0
-    for paragraph in _tabbed_paragraphs(document):
+    widest_page = max((page.width for page in document.pages), default=0.0)
+
+    placed = ruled = unplaced = 0
+    for paragraph, width in _tabbed_paragraphs(document):
         stops = stated.get(paragraph.text())
-        if not stops:
-            unplaced += 1
+        if stops:
+            paragraph.tab_stops = [
+                model.TabStop(position=position, alignment=alignment)
+                for position, alignment in stops
+            ]
+            placed += 1
             continue
-        paragraph.tab_stops = [
-            model.TabStop(position=position, alignment=alignment)
-            for position, alignment in stops
-        ]
-        placed += 1
+        ruler = _default_ruler(structure.default_tab_stop, width, widest_page)
+        if ruler:
+            paragraph.tab_stops = ruler
+            ruled += 1
+        else:
+            unplaced += 1
 
     if placed:
         log.info("tab stops read for %d paragraph(s)", placed)
     if unplaced:
-        document.warnings.append(
-            f"{unplaced} paragraph(s) use tabs the file states no stop for: "
-            f"Publisher lined them up on its own default grid, which is not "
-            f"recorded anywhere in the file, so they fall on the reader's "
-            f"instead and anything tabbed into columns needs checking"
+        # Only reachable while the document is already on the grid the
+        # reader would use, so there is nothing for a reader to check.
+        log.info(
+            "%d paragraph(s) left on the reader's own tab grid", unplaced
         )
+    if ruled:
+        interval = structure.default_tab_stop
+        log.info(
+            "%d paragraph(s) given the document's default grid of %.4fpt",
+            ruled, interval,
+        )
+        document.warnings.append(
+            f"{ruled} paragraph(s) state no tab stop of their own and were "
+            f"put on the document's default grid of {interval:.2f}pt, read "
+            f"from a field that matches Publisher's per-document setting but "
+            f"has not been confirmed against Publisher itself (actions.md "
+            f"§10): anything tabbed into columns is worth a look"
+        )
+
+
+# A ruler is written out stop by stop, so a narrow interval across a wide
+# frame is a lot of them. Publisher allows an interval down to 1pt, which
+# over a full page would be some 600 stops on every tabbed paragraph; past
+# this many the ruler stops early and the remaining tabs fall back on the
+# reader's grid, which is no worse than what they had before.
+_MAX_RULER_STOPS = 120
+
+
+def _default_ruler(
+    interval: Optional[float], width: float, fallback_width: float
+) -> List[model.TabStop]:
+    """The document's default grid, as stops a paragraph can state.
+
+    A stop is measured from the frame's text edge, not from the
+    paragraph's indent -- the same edge the hanging-indent stop in `idml`
+    is measured from -- so the grid is the same for every paragraph in a
+    frame and an indent does not move it. An indent only makes the stops
+    behind it unreachable, which costs nothing.
+
+    One frame in the corpus reports a width of 5.5pt while holding 34
+    paragraphs of text, so a frame too narrow to hold a single stop is
+    taken as a width not worth believing and the page's width is used
+    instead. Erring long is free: a stop the text never reaches does
+    nothing, where a ruler that stops short drops the tabs after it back
+    onto the reader's grid, which is the error being fixed.
+    """
+    if not interval or interval <= 0:
+        return []
+    # Nothing to carry when the document is already on the grid InDesign
+    # would use: writing the ruler out anyway would only add noise.
+    if abs(interval - pubfile.PUBLISHER_DEFAULT_TAB_STOP) < 0.01:
+        return []
+    room = width if width >= interval else fallback_width
+    count = min(int(room // interval), _MAX_RULER_STOPS)
+    return [
+        model.TabStop(position=interval * step)
+        for step in range(1, count + 1)
+    ]
 
 
 def _frame_text(frame: model.TextFrame) -> str:
