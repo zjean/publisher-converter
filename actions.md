@@ -643,7 +643,9 @@ not been found in the file. So they land on the reader's grid instead,
 half an inch in InDesign, and every tabbed column in the document sits
 somewhere other than where it was typed. A run of eight tabs, which is
 how these authors push a signature to the right, ends up 61pt further
-along than Publisher put it, or wraps.
+along than Publisher put it, or wraps — and in the three `kerkbode`
+issues, if the candidate below is the setting, 223pt further, which is
+wider than the page they are set on.
 
 One number would fix all 200: with the interval known, a tabbed
 paragraph can be written with an explicit ruler of stops at that spacing
@@ -655,10 +657,34 @@ Established here, so don't re-derive it:
 
 - **libmspub never reads it.** It reads per-paragraph stops (and drops
   them); there is no default-interval block id in `MSPUBBlockID.h` at all.
-- **Document chunk block `0x15` is not it.** It reads 359410 EMU — 566
-  twips, 1 cm truncated — which looks exactly right until you notice it
-  is the same 359410 in the US-Letter `Blank Note Card`, where a metric
-  default cannot be. It is a constant of the format.
+- **Publisher names the setting.** It is `DefaultTabStop` on the Document
+  object in Publisher's own VBA — "the default tab stop for all text in
+  the active publication", valid range 1 to 1584 points, always returned
+  in points. So it is a per-publication value, not an application
+  preference, and it must be saved with the file. Factory default is
+  0.5in / 36pt, which is also what InDesign assumes, so a document that
+  never touched the dialog needs nothing done to it.
+- **Document chunk block `0x15` is not it.** It reads 359410 EMU in every
+  corpus file that carries it and is absent from the two that do not,
+  and the three `kerkbode` issues carry it while stating something else
+  entirely in the Quill stream. (The reason given here before was wrong:
+  it said the US-Letter `Blank Note Card` reads 359410 as well, and that
+  file does not carry the block at all. The conclusion still holds, for
+  the better reason that the block never varies.)
+- **The `SGP ` chunk of the Quill stream is the candidate.** It is a bare
+  U32 length and then at most one block — id `0x00`, the same id a tab
+  position carries inside a paragraph's stops, type `0x22`, holding a
+  U32 of EMU. Length 4 means the block is absent, length 10 means the
+  document states one. `research/default_tab.py` prints it. Across the
+  corpus it is **absent from both files that contain no tab** and
+  **present in all seven that contain one**, and unlike block `0x15` it
+  varies: 28.3000pt in `Cantico_dei_Cantici`, `MISSAL` and
+  `rotated_text`, 28.2898pt in `Lisa Hoogendijk`, 8.0787pt in all three
+  `kerkbode` issues. 8.0787pt against InDesign's 36pt is a
+  four-and-a-half-fold error on every tab in the three biggest files in
+  the corpus, which is the size of mistake the warning describes.
+  It is not proven, though: a document-wide length could be a
+  hyphenation zone as easily as a tab interval.
 - **The stops themselves are decoded**, so whatever holds the interval is
   a plain length, and Publisher measures in **EMU, 914400 per inch**:
   0.5in reads 457200, 1cm reads 360000, 0.25in reads 228600.
@@ -666,45 +692,52 @@ Established here, so don't re-derive it:
   the `Contents` stream directly, which is where a per-document setting
   is more likely to live.
 
-### Step 1 — produce the sample files (on Windows, with Publisher, ~5 min)
-
-**Change only the default tab interval between saves**, and use two
-values that share no digits with the page size or anything else.
-
-1. New blank document. Add a text box with one paragraph reading
-   `a<tab>b<tab>c` so the setting has something to act on.
-2. **Format → Tabs** (Home → Paragraph → Tabs in 2010 and later), set
-   **Default tab stops: 0.5"**. Save as `tabs-a.pub`.
-3. Change *only* that value to **2.0"** and *Save As* `tabs-b.pub`.
-4. Copy both to `files/tab-samples/` on the Mac.
-
-0.5in and 2.0in are 457200 and 1828800 EMU, four times apart, so a block
-holding one cannot be confused with a block holding the other.
-
-### Step 2 — run the diff (on the Mac, ~1 min)
+### Step 1 — print what the corpus states (on the Mac, ~1 min)
 
 ```sh
 cd ~/prive/tools/affinity-converter
-python3 research/diff_blocks.py \
-  a=files/tab-samples/tabs-a.pub b=files/tab-samples/tabs-b.pub
+python3 research/default_tab.py files
 ```
 
-It prints every block that changed, with any plausible length in inches
-beside the raw value.
+Nine files, nine numbers, three distinct values. Keep the output; the
+`SGP ` column is what Step 2 is checking.
+
+### Step 2 — read the property in Publisher (on Windows, ~5 min)
+
+No sample file needs authoring. `DefaultTabStop` is a document property,
+so it can be read straight off the files we already have. Copy `files/`
+to the Windows box, and for each one: open it, `Alt+F11` for the VBA
+editor, `Ctrl+G` for the immediate window, and type
+
+```vba
+? ActiveDocument.DefaultTabStop
+```
+
+Points come back either way. Write the number next to the file name.
+The three `kerkbode` issues and `Lisa Hoogendijk` are the ones that
+matter — they are the files whose `SGP ` value differs.
 
 ### Step 3 — read the result
 
-You are looking for one block reading `457200` under `a` and `1828800`
-under `b`. If nothing in `Contents` moves, the setting is in the Quill
-stream's `STSH` chunk — the document's default styles — and
+Nine pairs against nine `SGP ` readings:
 
-```sh
-python3 research/tab_stops.py files/tab-samples/tabs-a.pub
-python3 research/tab_stops.py files/tab-samples/tabs-b.pub
-```
+- **They match** — 8.0787 for the `kerkbode` issues, 28.30 for
+  `Cantico`, `MISSAL` and `rotated_text`, 28.2898 for `Lisa Hoogendijk`,
+  and 36 for the two files with no `SGP ` block. The field is identified,
+  and Step 4 can be wired against it.
+- **They don't** — the true numbers are now known per file, which is a
+  far better starting point than a blind diff: grep each file for its own
+  number as a length in EMU (`value_in_points × 12700`), and if nothing
+  turns up, fall back to authoring two files that differ only in the
+  setting (0.5" and 2.0", four times apart so no block holding one can be
+  confused with a block holding the other) and running
+  `research/diff_blocks.py a=… b=…` over the pair.
 
-will show it as a default style whose stops are spaced by the interval,
-in which case the answer is to read the spacing rather than a field.
+While reading these, also note whether the number is one the author could
+have typed. 8.0787pt is 2.85mm exactly and 28.2898pt is 9.98mm exactly —
+neither is a value anybody types into a dialog, so if these *are* default
+tab stops they arrived by some route other than the Format → Tabs box,
+and that is worth understanding before trusting them.
 
 ### Step 4 — wire it in
 
