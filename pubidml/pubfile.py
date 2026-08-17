@@ -589,9 +589,17 @@ def _read_stream(data: bytes, *path: str) -> Optional[bytes]:
         for i in range(min(fat_count, 109))
     ]
     sec = difat_start
-    for _ in range(difat_count):
-        if sec >= 0xFFFFFFFE or at(sec) + sector > len(data):
+    # Both the count and the chain pointers are the file's own claim, so a
+    # sector pointing at itself would otherwise run to the U32 limit: a 1KB
+    # file is enough to hang the read for ever, and a hung worker costs a
+    # whole batch its report rather than one file its structure. A file
+    # cannot hold more DIFAT sectors than it holds sectors, and none of them
+    # is worth visiting twice -- the same guard `chain` below already uses.
+    seen_difat: set = set()
+    for _ in range(min(difat_count, len(data) // sector + 1)):
+        if sec >= 0xFFFFFFFE or sec in seen_difat or at(sec) + sector > len(data):
             break
+        seen_difat.add(sec)
         base = at(sec)
         for i in range((sector // 4) - 1):
             entry = struct.unpack_from("<I", data, base + i * 4)[0]

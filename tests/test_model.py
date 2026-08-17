@@ -267,10 +267,6 @@ class ParseColorTest(unittest.TestCase):
                 self.assertIsNone(model.parse_color(bad))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class GradientTest(unittest.TestCase):
     """Publisher gradients, as libmspub reports them.
 
@@ -686,3 +682,7 @@ class TextScaleTest(unittest.TestCase):
             ])
         )
         self.assertAlmostEqual(support.only_span(doc).horizontal_scale, 90.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

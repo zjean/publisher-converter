@@ -9,16 +9,29 @@ cannot.
 from __future__ import annotations
 
 import struct
+import threading
 import unittest
 from pathlib import Path
 
 from pubidml import convert, model, pubfile
+from pubidml.pubfile import _read_stream
 
 REPO = Path(__file__).resolve().parent.parent
 SAMPLES = REPO / "files"
 
 needs_samples = unittest.skipUnless(
     (SAMPLES / "MISSAL MARIANA E PEDRO.pub").exists(), "sample .pub files absent"
+)
+
+#: The newsletters are the only samples carrying threaded stories or tables,
+#: and they are not in the repository -- they are somebody's own documents.
+#: So a test reading one is a canary over this machine's corpus, and what the
+#: reading *rests* on has to be pinned synthetically to be checked anywhere
+#: else. `needs_samples` does not cover these: it asks after a file that is
+#: tracked, and would let a newsletter test run and fail on a fresh clone.
+NEWSLETTER = SAMPLES / "cgk" / "1336 kerkbode.pub"
+needs_newsletter = unittest.skipUnless(
+    NEWSLETTER.exists(), f"{NEWSLETTER.name} absent (not tracked)"
 )
 
 
@@ -83,6 +96,34 @@ class RobustnessTest(unittest.TestCase):
 
     def test_a_missing_file_returns_none(self):
         self.assertIsNone(pubfile.read_structure(Path("/nonexistent/nope.pub")))
+
+    def test_a_difat_sector_pointing_at_itself_does_not_spin(self):
+        # 1KB is enough: the header states a DIFAT count of 4 billion and
+        # the sector it names points back at itself. Without a cycle guard
+        # this never returns -- and a worker that never returns costs the
+        # whole batch its report, since nothing can kill a thread.
+        sector = 512
+        data = bytearray(sector * 2)
+        data[:8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        struct.pack_into("<H", data, 30, 9)            # 1 << 9 == 512
+        struct.pack_into("<H", data, 32, 6)
+        struct.pack_into("<I", data, 48, 0xFFFFFFFE)   # no directory
+        struct.pack_into("<I", data, 68, 0)            # DIFAT starts at 0
+        struct.pack_into("<I", data, 72, 0xFFFFFFFF)   # ... 4 billion of them
+        struct.pack_into("<I", data, sector * 2 - 4, 0)  # which points at 0
+
+        # Run it off-thread so a regression fails the suite instead of
+        # hanging it: an unguarded walk would never reach the assertion.
+        done = threading.Event()
+
+        def read():
+            _read_stream(bytes(data), "Contents")
+            done.set()
+
+        worker = threading.Thread(target=read, daemon=True)
+        worker.start()
+        worker.join(timeout=30)
+        self.assertTrue(done.is_set(), "the DIFAT walk did not terminate")
 
 
 @needs_samples
@@ -209,8 +250,13 @@ class RealFileTest(unittest.TestCase):
                     else:
                         stated += 1
                         zeros += cell[side] == 0
+        # A canary over whatever samples this machine has, not a claim that
+        # any particular one is here: the files that carry tables are the
+        # newsletters, which are not in the repository. What the rule rests
+        # on is checked everywhere by the synthetic tests below.
+        if not (stated and omitted):
+            self.skipTest("no sample present carries a table cell")
         self.assertEqual(zeros, 0)
-        self.assertTrue(stated and omitted)
 
     def test_a_cell_leaves_sides_out_sparsely_rather_than_truncating(self):
         # The stated counts fall away towards the last side -- 1056, 1037,
@@ -218,13 +264,14 @@ class RealFileTest(unittest.TestCase):
         # It is not that: cells state the top inset while leaving out the
         # left one, so each side is written on its own and a side that is
         # absent says nothing about the sides after it.
-        sparse = [
+        cells = [
             cell
             for source in sorted(SAMPLES.rglob("*.pub"))
             for cell in cell_records(source)
-            if 0x0B in cell and 0x0A not in cell
         ]
-        self.assertTrue(sparse)
+        if not cells:
+            self.skipTest("no sample present carries a table cell")
+        self.assertTrue([c for c in cells if 0x0B in c and 0x0A not in c])
 
 
 class BackgroundDetectionTest(unittest.TestCase):
@@ -497,6 +544,18 @@ class CellInsetReadingTest(unittest.TestCase):
         table = self.one_table((0, 0, {0x0A: 9525, 0x0B: 9525, 0x0C: 9525}))
         self.assertEqual([round(v, 4) for v in table.insets[(0, 0)]], [0.75, 0.75, 0.75, 0.0])
 
+    def test_a_side_left_out_of_the_middle_is_zero_too(self):
+        # The reading only holds because omission is per-side rather than a
+        # truncation of the trailing fields: a cell states the top inset and
+        # leaves the left one out. The corpus says Publisher writes cells
+        # this way; this says the reader believes it, on any machine.
+        table = self.one_table((0, 0, {0x0B: 44450}))
+        self.assertEqual([round(v, 4) for v in table.insets[(0, 0)]], [0.0, 3.5, 0.0, 0.0])
+
+    def test_a_cell_stating_no_side_at_all_is_four_zeros(self):
+        table = self.one_table((0, 0, {}))
+        self.assertEqual(table.insets[(0, 0)], (0.0, 0.0, 0.0, 0.0))
+
     def test_a_cell_is_keyed_by_the_row_and_column_it_starts_in(self):
         table = self.one_table((3, 1, {0x0A: 12700}), heights=(18.0, 18.0, 18.0, 18.0))
         self.assertIn((3, 1), table.insets)
@@ -608,14 +667,14 @@ class StoryChainReadingTest(unittest.TestCase):
                 self.read(payload[:cut], shape_chunk(77))
 
 
-@needs_samples
+@needs_newsletter
 class RealStoryChainTest(unittest.TestCase):
     def test_the_chains_of_a_real_file_are_read_in_order(self):
         # Three chains, and the file states an order for each. The last is
         # the pair the old text-and-capacity guess could not see: 1,905
         # characters in a frame roomy enough for about 2,325, so nothing
         # oversets and nothing gave the link away.
-        structure = pubfile.read_structure(SAMPLES / "cgk" / "1336 kerkbode.pub")
+        structure = pubfile.read_structure(NEWSLETTER)
         self.assertEqual(
             structure.story_chains,
             [
@@ -624,6 +683,15 @@ class RealStoryChainTest(unittest.TestCase):
                 [527, 490],
             ],
         )
+
+
+@needs_samples
+class TrackedStoryChainTest(unittest.TestCase):
+    """The half of the chain reading a fresh clone can still check.
+
+    Kept apart from the newsletter test above so it survives the machines
+    that do not have the newsletters -- which is every machine but one.
+    """
 
     def test_a_file_that_links_nothing_states_no_chain(self):
         structure = pubfile.read_structure(SAMPLES / "MISSAL MARIANA E PEDRO.pub")
@@ -2240,10 +2308,6 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(before, after)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class GradientReadingTest(unittest.TestCase):
     """The ramp libmspub drops the ends of."""
 
@@ -2543,3 +2607,7 @@ class GradientAngleTest(unittest.TestCase):
 
     def test_a_shape_stating_no_angle_has_none(self):
         self.assertEqual(pubfile._gradient_angle({}), 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
