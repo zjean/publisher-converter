@@ -15,21 +15,26 @@ from pubidml import model, wmf
 
 META_EOF = 0x0000
 META_SAVEDC = 0x001E
+META_CREATEPALETTE = 0x00F7
 META_SETPOLYFILLMODE = 0x0106
 META_RESTOREDC = 0x0127
 META_SELECTOBJECT = 0x012D
+META_DIBCREATEPATTERNBRUSH = 0x0142
 META_DELETEOBJECT = 0x01F0
+META_CREATEPATTERNBRUSH = 0x01F9
 META_SETWINDOWORG = 0x020B
 META_SETWINDOWEXT = 0x020C
 META_LINETO = 0x0213
 META_MOVETO = 0x0214
 META_CREATEPENINDIRECT = 0x02FA
+META_CREATEFONTINDIRECT = 0x02FB
 META_CREATEBRUSHINDIRECT = 0x02FC
 META_POLYGON = 0x0324
 META_POLYLINE = 0x0325
 META_ELLIPSE = 0x0418
 META_RECTANGLE = 0x041B
 META_POLYPOLYGON = 0x0538
+META_CREATEREGION = 0x06FF
 META_ARC = 0x0817  # deliberately unsupported: nothing in the corpus uses it
 
 PS_SOLID, PS_NULL = 0, 5
@@ -90,6 +95,24 @@ def create_brush(style: int, colour: int) -> bytes:
 
 def create_pen(style: int, width: int, colour: int) -> bytes:
     return record(META_CREATEPENINDIRECT, struct.pack("<HhhI", style, width, width, colour))
+
+
+# None of these carry anything the drawing code reads; what matters is
+# that each one claims a slot, so a plausible payload length is enough.
+def create_font() -> bytes:
+    return record(META_CREATEFONTINDIRECT, struct.pack("<5h8B", *([0] * 13)) + b"Arial\x00")
+
+
+def create_palette() -> bytes:
+    return record(META_CREATEPALETTE, struct.pack("<HH", 0x0300, 0))
+
+
+def create_region() -> bytes:
+    return record(META_CREATEREGION, bytes(20))
+
+
+def create_pattern_brush(function: int = META_CREATEPATTERNBRUSH) -> bytes:
+    return record(function, bytes(14))
 
 
 def select(index: int) -> bytes:
@@ -289,6 +312,92 @@ class StyleTest(unittest.TestCase):
         self.assertEqual(
             [s.style.fill for s in art.items], [(1, 1, 1), (2, 2, 2)]
         )
+
+
+class ObjectTableTest(unittest.TestCase):
+    """One table, shared by every object a metafile creates.
+
+    Pens and brushes are the only objects that reach the page, but they do
+    not get a table to themselves: fonts, palettes, regions and pattern
+    brushes are numbered alongside them. Passing over one because it paints
+    nothing shifts every index after it, and the shapes still come out --
+    wearing the wrong colours.
+    """
+
+    def _fill_after(self, *creates: bytes):
+        """Fill of a shape drawn with the object in the last created slot."""
+        art = convert(
+            *UNIT_WINDOW,
+            *creates,
+            create_brush(BS_SOLID, colour_ref(2, 2, 2)),
+            select(len(creates)),
+            polygon((0, 0), (10, 0), (10, 10)),
+        )
+        return art.items[0].style.fill
+
+    def test_a_font_takes_a_slot(self):
+        self.assertEqual(
+            self._fill_after(create_brush(BS_SOLID, colour_ref(1, 1, 1)), create_font()),
+            (2, 2, 2),
+        )
+
+    def test_a_palette_takes_a_slot(self):
+        self.assertEqual(self._fill_after(create_palette()), (2, 2, 2))
+
+    def test_a_region_takes_a_slot(self):
+        self.assertEqual(self._fill_after(create_region()), (2, 2, 2))
+
+    def test_a_pattern_brush_takes_a_slot(self):
+        for function in (META_CREATEPATTERNBRUSH, META_DIBCREATEPATTERNBRUSH):
+            with self.subTest(function=hex(function)):
+                self.assertEqual(
+                    self._fill_after(create_pattern_brush(function)), (2, 2, 2)
+                )
+
+    def test_a_create_we_cannot_read_still_takes_its_slot(self):
+        # A pen record too short to parse is still a pen record. Skipping
+        # the slot would misnumber everything created after it.
+        self.assertEqual(
+            self._fill_after(record(META_CREATEPENINDIRECT, struct.pack("<H", PS_SOLID))),
+            (2, 2, 2),
+        )
+
+    def test_selecting_a_font_leaves_the_pen_and_brush_alone(self):
+        # GDI keeps one selection per object type; a font replaces the font.
+        art = convert(
+            *UNIT_WINDOW,
+            create_brush(BS_SOLID, colour_ref(1, 1, 1)),
+            select(0),
+            create_font(),
+            select(1),
+            polygon((0, 0), (10, 0), (10, 10)),
+        )
+        self.assertEqual(art.items[0].style.fill, (1, 1, 1))
+
+    def test_selecting_a_pattern_brush_does_not_leave_the_last_colour(self):
+        # A bitmap pattern has no flat colour to carry. Keeping whatever was
+        # selected before would paint the shape a colour it never had.
+        art = convert(
+            *UNIT_WINDOW,
+            create_brush(BS_SOLID, colour_ref(1, 1, 1)),
+            select(0),
+            create_pattern_brush(),
+            select(1),
+            polygon((0, 0), (10, 0), (10, 10)),
+        )
+        self.assertIsNone(art.items[0].style.fill)
+
+    def test_a_deleted_font_slot_is_reused_like_any_other(self):
+        art = convert(
+            *UNIT_WINDOW,
+            create_font(),                                   # slot 0
+            create_brush(BS_SOLID, colour_ref(1, 1, 1)),     # slot 1
+            delete(0),
+            create_brush(BS_SOLID, colour_ref(3, 3, 3)),     # slot 0 again
+            select(0),
+            polygon((0, 0), (10, 0), (10, 10)),
+        )
+        self.assertEqual(art.items[0].style.fill, (3, 3, 3))
 
 
 class ReportingTest(unittest.TestCase):

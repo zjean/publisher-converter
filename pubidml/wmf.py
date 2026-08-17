@@ -17,10 +17,10 @@ in the sample corpus is one of 22 types, and only six of them draw:
     META_POLYGON  META_POLYLINE  META_POLYPOLYGON
     META_RECTANGLE  META_ELLIPSE  META_LINETO
 
-The rest set up the object table (pens and brushes), the coordinate
-window, or device state. Anything outside that -- text, arcs, regions,
-bitmap blits -- is counted and reported rather than silently skipped, so
-the conversion never claims artwork it did not carry.
+The rest set up the object table, the coordinate window, or device
+state. Anything outside that -- text, arcs, regions, bitmap blits -- is
+counted and reported rather than silently skipped, so the conversion
+never claims artwork it did not carry.
 
 Two deliberate simplifications, both visible in the output rather than
 hidden:
@@ -44,20 +44,42 @@ from . import metafile, model
 
 META_EOF = 0x0000
 META_SAVEDC = 0x001E
+META_CREATEPALETTE = 0x00F7
 META_RESTOREDC = 0x0127
 META_SELECTOBJECT = 0x012D
+META_DIBCREATEPATTERNBRUSH = 0x0142
 META_DELETEOBJECT = 0x01F0
+META_CREATEPATTERNBRUSH = 0x01F9
 META_SETWINDOWORG = 0x020B
 META_SETWINDOWEXT = 0x020C
 META_LINETO = 0x0213
 META_MOVETO = 0x0214
 META_CREATEPENINDIRECT = 0x02FA
+META_CREATEFONTINDIRECT = 0x02FB
 META_CREATEBRUSHINDIRECT = 0x02FC
 META_POLYGON = 0x0324
 META_POLYLINE = 0x0325
 META_ELLIPSE = 0x0418
 META_RECTANGLE = 0x041B
 META_POLYPOLYGON = 0x0538
+META_CREATEREGION = 0x06FF
+
+# A brush whose fill is a bitmap pattern: a real brush occupying a real
+# slot, with no flat colour to hand the writer.
+_PATTERN_BRUSHES = frozenset({META_CREATEPATTERNBRUSH, META_DIBCREATEPATTERNBRUSH})
+
+# Everything MS-WMF 2.3.4 defines as creating an object. They share one
+# table with the pens and brushes, so all of them have to be numbered even
+# though only pens and brushes reach the page.
+_OBJECT_RECORDS = frozenset(
+    {
+        META_CREATEPENINDIRECT,
+        META_CREATEBRUSHINDIRECT,
+        META_CREATEFONTINDIRECT,
+        META_CREATEPALETTE,
+        META_CREATEREGION,
+    }
+) | _PATTERN_BRUSHES
 
 PS_NULL = 5
 BS_NULL = 1
@@ -83,6 +105,14 @@ class _Pen:
 @dataclass
 class _Brush:
     colour: Optional[model.Color] = None
+
+
+class _Opaque:
+    """An object that holds its slot and nothing else.
+
+    A font, a palette, a region, or a create too short to read: never
+    selected as a pen or a brush, but numbered among them all the same.
+    """
 
 
 def _colour(value: int) -> model.Color:
@@ -125,8 +155,8 @@ class _Interpreter:
     """Replays the records, accumulating shapes.
 
     Publisher's own output is the reference: window mapping first, then an
-    object table of pens and brushes selected by index, then the drawing
-    records that consume whatever is currently selected.
+    object table selected from by index, then the drawing records that
+    consume whichever pen and brush are currently selected.
     """
 
     def __init__(self, box: Tuple[float, float, float, float]):
@@ -154,6 +184,30 @@ class _Interpreter:
                 self.objects[index] = obj
                 return
         self.objects.append(obj)
+
+    def _create(self, function: int, payload: bytes) -> None:
+        """Put a created object in the lowest free slot, whatever it is.
+
+        The table is shared. A metafile that creates a font between two
+        brushes numbers the second brush 2, not 1, so passing over the font
+        because it paints nothing does not merely lose the font -- it hands
+        every later shape the wrong pen and brush. The artwork still comes
+        out, in the wrong colours, which is why this has to be exact.
+        """
+        if function == META_CREATEPENINDIRECT and len(payload) >= 10:
+            style, width, _wy, colour = struct.unpack_from("<HhhI", payload, 0)
+            self._add(_Pen(None if style == PS_NULL else _colour(colour), abs(width)))
+        elif function == META_CREATEBRUSHINDIRECT and len(payload) >= 8:
+            style, colour, _hatch = struct.unpack_from("<HIH", payload, 0)
+            self._add(_Brush(None if style == BS_NULL else _colour(colour)))
+        elif function in _PATTERN_BRUSHES:
+            # A brush with no colour, deliberately: leaving the previous
+            # brush selected would paint the shape a colour it never had.
+            # The lost pattern is counted, not swallowed.
+            self._add(_Brush(None))
+            self.unsupported += 1
+        else:
+            self._add(_Opaque())
 
     def _select(self, index: int) -> None:
         if 0 <= index < len(self.objects):
@@ -188,20 +242,14 @@ class _Interpreter:
         self._flush_run()
 
     def _dispatch(self, function: int, payload: bytes) -> None:
-        if function == META_SETWINDOWORG and len(payload) >= 4:
+        if function in _OBJECT_RECORDS:
+            self._create(function, payload)
+        elif function == META_SETWINDOWORG and len(payload) >= 4:
             y, x = struct.unpack_from("<hh", payload, 0)
             self.origin = (x, y)
         elif function == META_SETWINDOWEXT and len(payload) >= 4:
             height, width = struct.unpack_from("<hh", payload, 0)
             self.extent = (width, height)
-        elif function == META_CREATEPENINDIRECT and len(payload) >= 10:
-            style, width, _wy, colour = struct.unpack_from("<HhhI", payload, 0)
-            self._add(
-                _Pen(None if style == PS_NULL else _colour(colour), abs(width))
-            )
-        elif function == META_CREATEBRUSHINDIRECT and len(payload) >= 8:
-            style, colour, _hatch = struct.unpack_from("<HIH", payload, 0)
-            self._add(_Brush(None if style == BS_NULL else _colour(colour)))
         elif function == META_SELECTOBJECT and len(payload) >= 2:
             self._select(struct.unpack_from("<H", payload, 0)[0])
         elif function == META_DELETEOBJECT and len(payload) >= 2:
@@ -321,7 +369,6 @@ class _Interpreter:
 _STATE_RECORDS = frozenset(
     {
         0x0035,  # META_REALIZEPALETTE
-        0x00F7,  # META_CREATEPALETTE
         0x0102,  # META_SETBKMODE
         0x0103,  # META_SETMAPMODE
         0x0104,  # META_SETROP2
@@ -339,12 +386,10 @@ _STATE_RECORDS = frozenset(
         0x0220,  # META_OFFSETCLIPRGN
         0x0231,  # META_SETMAPPERFLAGS
         0x0234,  # META_SELECTPALETTE
-        0x02FB,  # META_CREATEFONTINDIRECT
         0x0410,  # META_SCALEWINDOWEXT
         0x0412,  # META_SCALEVIEWPORTEXT
         0x0416,  # META_INTERSECTCLIPRECT
         0x0626,  # META_ESCAPE
-        0x06FF,  # META_CREATEREGION
     }
 )
 

@@ -346,8 +346,11 @@ because the vocabulary is closed: every WMF record in the whole sample
 corpus is one of 22 types and only six of them draw (`META_POLYGON`,
 `META_POLYLINE`, `META_POLYPOLYGON`, `META_RECTANGLE`, `META_ELLIPSE`,
 `META_LINETO`), each mapping onto a shape the writer already emits. The
-rest set up the pen/brush object table, the coordinate window, or device
-state. Records outside that set are counted and reported, so a partial
+rest set up the object table, the coordinate window, or device state.
+Every object a metafile creates is numbered in one shared table -- fonts
+and regions alongside the pens and brushes -- so all of them take a slot,
+or a later `META_SELECTOBJECT` paints a shape in another shape's colours.
+Records outside that set are counted and reported, so a partial
 conversion says so instead of looking complete.
 
 **EMF line art is rasterised** to PNG if two optional tools are present:
