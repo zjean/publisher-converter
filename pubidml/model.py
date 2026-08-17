@@ -618,6 +618,7 @@ class ModelBuilder:
         self._list_stack: List[bool] = []  # True where the level is ordered
         self._in_master = False
         self._dropped = 0
+        self._empty_tables = 0
 
     # -- event dispatch ---------------------------------------------------
 
@@ -636,6 +637,11 @@ class ModelBuilder:
         if self._dropped:
             self.doc.warnings.append(
                 f"{self._dropped} item(s) dropped: geometry outside sane bounds"
+            )
+        if self._empty_tables:
+            self.doc.warnings.append(
+                f"{self._empty_tables} empty table(s) dropped: "
+                "no text, no fill, no stroke"
             )
         return self.doc
 
@@ -835,9 +841,13 @@ class ModelBuilder:
         if table is None:
             return
         # An empty grid with no fill or stroke contributes nothing, the same
-        # rule an empty text frame follows.
+        # rule an empty text frame follows. Unlike a frame it is worth
+        # saying so: these are the layout grids a page is built on, so a
+        # reader looking for one in the package should be told it went and
+        # why, rather than left to find the absence.
         if all(cell.story.is_empty() for cell in table.cells):
             if not table.style.fill and not table.style.stroke:
+                self._empty_tables += 1
                 return
         if table.cells:
             self._place(table)

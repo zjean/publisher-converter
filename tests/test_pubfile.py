@@ -36,6 +36,27 @@ def frame_saying(text: str) -> model.TextFrame:
     return frame
 
 
+def cell_records(source: Path):
+    """Every table cell of a real .pub, as the raw {block id: value} it is.
+
+    `read_structure` hands back insets already resolved, which is the wrong
+    end for asking what the writer chose to state and what it left out.
+    """
+    contents = pubfile._read_stream(source.read_bytes(), *pubfile._CONTENTS_STREAM)
+    if not contents:
+        return
+    for _seq, kind, offset in pubfile._chunk_references(contents):
+        if kind != pubfile._CELLS_CHUNK:
+            continue
+        for block in pubfile._chunk_blocks(contents, offset):
+            if block.id != pubfile._CELL_ARRAY:
+                continue
+            for record in pubfile._children(contents, block):
+                if record.id != pubfile._ARRAY_ENTRY:
+                    continue
+                yield {sub.id: sub.data for sub in pubfile._children(contents, record)}
+
+
 def structure_for(page_count: int, *, fields: bool, shapes: int = 1):
     master = pubfile.PageStructure(seq=263, is_master=True, shape_count=shapes)
     s = pubfile.FileStructure(masters={263: master}, has_fields=fields)
@@ -155,7 +176,9 @@ class RealFileTest(unittest.TestCase):
         self.assertEqual(structure.wordart, [])
 
     def test_page_count_matches_what_libmspub_emits(self):
-        # The whole approach depends on these lining up index by index.
+        # The two halves hold the same number of pages -- but not in the same
+        # order (§14), so this is what lets an unsettled page take the master
+        # the remaining chunks agree on, and nothing more than that.
         if not convert.PUBDUMP.exists():
             self.skipTest("pubdump not built")
         for source in sorted(SAMPLES.glob("*.pub")):
@@ -164,11 +187,44 @@ class RealFileTest(unittest.TestCase):
                 document = convert.parse_document(source)
                 self.assertEqual(len(s.pages), len(document.pages))
 
-    def test_every_page_names_the_master_it_applies(self):
+    def test_every_page_chunk_names_the_master_it_applies(self):
         s = pubfile.read_structure(SAMPLES / "MISSAL MARIANA E PEDRO.pub")
-        for index in range(len(s.pages)):
-            with self.subTest(page=index):
-                self.assertIsNotNone(s.master_for(index))
+        for chunk in s.pages:
+            with self.subTest(chunk=chunk.seq):
+                self.assertIsNotNone(s.master_of_chunk(chunk.seq))
+
+    def test_a_cell_states_an_inset_exactly_when_it_has_one(self):
+        # This is what makes reading an absent side as zero safe, and it is
+        # a fact about the writer rather than an assumption. Across the
+        # corpus 3289 sides are stated and 1751 left out, and **not one
+        # stated side is zero** -- so an omission cannot be a stated zero
+        # that went missing, and it cannot be the 0.04in default either,
+        # since the tables that mean the default write all four out.
+        stated = omitted = zeros = 0
+        for source in sorted(SAMPLES.rglob("*.pub")):
+            for cell in cell_records(source):
+                for side in pubfile._CELL_INSETS:
+                    if side not in cell:
+                        omitted += 1
+                    else:
+                        stated += 1
+                        zeros += cell[side] == 0
+        self.assertEqual(zeros, 0)
+        self.assertTrue(stated and omitted)
+
+    def test_a_cell_leaves_sides_out_sparsely_rather_than_truncating(self):
+        # The stated counts fall away towards the last side -- 1056, 1037,
+        # 1001, 195 -- which reads like trailing fields being truncated.
+        # It is not that: cells state the top inset while leaving out the
+        # left one, so each side is written on its own and a side that is
+        # absent says nothing about the sides after it.
+        sparse = [
+            cell
+            for source in sorted(SAMPLES.rglob("*.pub"))
+            for cell in cell_records(source)
+            if 0x0B in cell and 0x0A not in cell
+        ]
+        self.assertTrue(sparse)
 
 
 class BackgroundDetectionTest(unittest.TestCase):
@@ -491,6 +547,87 @@ class CellInsetReadingTest(unittest.TestCase):
                     (0x10, table_chunk((72.0,), (18.0,), cells_seqnum=1)),
                     (0x63, payload[:cut]),
                 )
+
+
+def shape_chunk(story_id=None, chain_index=None) -> bytes:
+    """A SHAPE chunk saying which story it holds and where in it."""
+    blocks = []
+    if story_id is not None:
+        blocks.append(_u32(0x27, story_id))
+    if chain_index is not None:
+        blocks.append(_u32(0x28, chain_index))
+    return _chunk(blocks)
+
+
+class StoryChainReadingTest(unittest.TestCase):
+    """Which text frames Publisher linked, and in what order.
+
+    libmspub hands the whole story to every frame of a chain and says
+    nothing about the link, so the order used to be the order the frames
+    turned up in. The file states it outright: a shape names the story it
+    holds and its own place in it.
+    """
+
+    def read(self, *shapes):
+        contents, refs = b"\x00" * 8, []
+        for seq, payload in enumerate(shapes):
+            refs.append((seq, 0x01, len(contents)))
+            contents += payload
+        return pubfile._read_story_chains(contents, refs)
+
+    def test_shapes_sharing_a_story_are_a_chain_in_the_stated_order(self):
+        chains = self.read(
+            shape_chunk(77, 2), shape_chunk(77, 0), shape_chunk(77, 1),
+        )
+        self.assertEqual(chains, [[1, 2, 0]])
+
+    def test_the_first_link_states_no_index(self):
+        # The same writing rule the cell insets follow: a field is written
+        # when it has something to say, so the head of a chain leaves the
+        # index out rather than writing a zero.
+        chains = self.read(shape_chunk(77, 1), shape_chunk(77))
+        self.assertEqual(chains, [[1, 0]])
+
+    def test_a_story_held_by_one_shape_is_not_a_chain(self):
+        # This is what keeps a repeated label out: a page-number footer is
+        # one master shape replayed onto every page, not a chain of frames.
+        self.assertEqual(self.read(shape_chunk(2), shape_chunk(3)), [])
+
+    def test_a_shape_naming_no_story_is_passed_over(self):
+        self.assertEqual(self.read(shape_chunk(), shape_chunk()), [])
+
+    def test_two_shapes_claiming_one_place_are_not_a_chain(self):
+        # Nothing in the corpus does this, and a chain whose order is
+        # contradicted is not an order.
+        self.assertEqual(self.read(shape_chunk(77, 1), shape_chunk(77, 1)), [])
+
+    def test_a_truncated_shape_chunk_does_not_raise(self):
+        payload = shape_chunk(77, 1)
+        for cut in range(1, len(payload)):
+            with self.subTest(cut=cut):
+                self.read(payload[:cut], shape_chunk(77))
+
+
+@needs_samples
+class RealStoryChainTest(unittest.TestCase):
+    def test_the_chains_of_a_real_file_are_read_in_order(self):
+        # Three chains, and the file states an order for each. The last is
+        # the pair the old text-and-capacity guess could not see: 1,905
+        # characters in a frame roomy enough for about 2,325, so nothing
+        # oversets and nothing gave the link away.
+        structure = pubfile.read_structure(SAMPLES / "cgk" / "1336 kerkbode.pub")
+        self.assertEqual(
+            structure.story_chains,
+            [
+                [316, 317, 311, 489],
+                [337, 338, 387, 402, 392, 354, 553, 555],
+                [527, 490],
+            ],
+        )
+
+    def test_a_file_that_links_nothing_states_no_chain(self):
+        structure = pubfile.read_structure(SAMPLES / "MISSAL MARIANA E PEDRO.pub")
+        self.assertEqual(structure.story_chains, [])
 
 
 class CellInsetApplicationTest(unittest.TestCase):
@@ -945,7 +1082,7 @@ def wordart_bools(**flags) -> int:
 def wordart_shape(
     text="Kerkdiensten", font="Monotype Corsiva", size=20.0, rotation=None,
     box=(-100, -50, 100, -20), anchor=True, spacing=None, bools=None,
-    shape_type=None,
+    shape_type=None, shape_seq=None,
 ) -> bytes:
     """One Escher shape container carrying WordArt, as Publisher writes it."""
     entries = []
@@ -969,6 +1106,11 @@ def wordart_shape(
             (0x2001, box[0] * 12700), (0x2002, box[1] * 12700),
             (0x2003, box[2] * 12700), (0x2004, box[3] * 12700),
         ]))
+    if shape_seq is not None:
+        # Client data, which is where the shape's own seqnum lives -- the
+        # number its page chunk lists it by, and the only thing tying an
+        # Escher shape to the page it is on.
+        children.append(_escher_values(0xF011, [(0x6801, shape_seq)]))
     return _escher_container(0xF004, children)
 
 
@@ -1193,6 +1335,79 @@ class SentenceTest(unittest.TestCase):
         self.assertEqual(
             convert._sentence(["one", "two", "three"]), "one, two, and three"
         )
+
+
+class ShapeSeqnumReadingTest(unittest.TestCase):
+    """A shape's own seqnum, which is what says which page it is on."""
+
+    def test_client_data_carries_the_shapes_seqnum(self):
+        art = pubfile._wordart_shapes(wordart_shape(shape_seq=311))[0]
+        self.assertEqual(art.shape_seq, 311)
+
+    def test_a_shape_stating_no_client_data_has_no_seqnum(self):
+        self.assertIsNone(pubfile._wordart_shapes(wordart_shape())[0].shape_seq)
+
+    def test_every_shape_with_a_seqnum_and_a_box_becomes_an_anchor(self):
+        # Not just WordArt: any shape libmspub *did* report is what ties a
+        # page chunk to the page libmspub emitted for it.
+        stream = (
+            wordart_shape(text=None, shape_seq=297, box=(-100, -50, 100, -20))
+            + wordart_shape(text="Headline", shape_seq=311, box=(0, 0, 40, 60))
+        )
+        anchors = pubfile._shape_anchors(stream)
+        self.assertEqual([a.shape_seq for a in anchors], [297, 311])
+        self.assertAlmostEqual(anchors[0].centre_x, 0.0)
+        self.assertAlmostEqual(anchors[0].centre_y, -35.0)
+        self.assertAlmostEqual(anchors[1].centre_x, 20.0)
+        self.assertAlmostEqual(anchors[1].centre_y, 30.0)
+
+    def test_a_shape_missing_either_half_is_not_an_anchor(self):
+        self.assertEqual(pubfile._shape_anchors(wordart_shape(shape_seq=None)), [])
+        self.assertEqual(
+            pubfile._shape_anchors(wordart_shape(shape_seq=311, anchor=False)), []
+        )
+
+    def test_a_truncated_stream_does_not_raise(self):
+        payload = wordart_shape(shape_seq=311)
+        for cut in range(1, len(payload)):
+            with self.subTest(cut=cut):
+                pubfile._shape_anchors(payload[:cut])
+
+    def test_the_page_a_seqnum_belongs_to_is_looked_up(self):
+        structure = pubfile.FileStructure(shape_pages={311: 266, 574: 308})
+        self.assertEqual(structure.page_seq_of(311), 266)
+        self.assertEqual(structure.page_seq_of(574), 308)
+        self.assertIsNone(structure.page_seq_of(999))
+        self.assertIsNone(structure.page_seq_of(None))
+
+    def test_a_real_file_states_the_page_of_the_shape_it_never_reported(self):
+        # The whole of backlog §10 rests on this: 'I venerdì 2006 di Avvento'
+        # has no shape in the event stream, and the file still says which
+        # page it is on -- the same page as the sibling that *was* reported.
+        structure = pubfile.read_structure(SAMPLES / "Cantico_dei_Cantici.pub")
+        orphan = next(a for a in structure.wordart if "Avvento" in a.text)
+        sibling = next(
+            a for a in structure.wordart if a.text == "Il Cantico dei Cantici"
+        )
+        self.assertEqual(orphan.shape_seq, 311)
+        self.assertEqual(structure.page_seq_of(orphan.shape_seq), 266)
+        self.assertEqual(
+            structure.page_seq_of(sibling.shape_seq),
+            structure.page_seq_of(orphan.shape_seq),
+        )
+
+    def test_no_page_lists_a_shape_twice(self):
+        # A shape belonging to one page is what makes the lists usable as
+        # "which page is this on"; two pages claiming one shape would not be.
+        for name in ("Cantico_dei_Cantici.pub", "MISSAL MARIANA E PEDRO.pub"):
+            with self.subTest(source=name):
+                structure = pubfile.read_structure(SAMPLES / name)
+                listed = [
+                    seqnum
+                    for page in list(structure.pages) + list(structure.masters.values())
+                    for seqnum in page.shape_seqnums
+                ]
+                self.assertEqual(len(listed), len(set(listed)))
 
 
 class WordArtRecoveryTest(unittest.TestCase):
@@ -1556,6 +1771,396 @@ class WordArtRecoveryTest(unittest.TestCase):
         self.assertFalse(any("enclose no area" in w for w in document.warnings))
 
 
+class PageByChunkTest(unittest.TestCase):
+    """Which page libmspub emitted for each of the file's page chunks.
+
+    Not the chunk order: in every newsletter in the corpus the two are a
+    permutation of one another, so the mapping is measured from the shapes
+    both sides describe.
+    """
+
+    def document(self, *pages) -> model.Document:
+        return model.Document(pages=list(pages))
+
+    def page_holding(self, *centres) -> model.Page:
+        """A page of 612 x 792 with an item at each page-relative centre."""
+        page = model.Page(width=612.0, height=792.0)
+        for x, y in centres:
+            page.items.append(
+                model.Rectangle(x=306.0 + x - 5.0, y=396.0 + y - 5.0,
+                                width=10.0, height=10.0)
+            )
+        return page
+
+    def structure(self, anchors, shape_pages) -> pubfile.FileStructure:
+        return pubfile.FileStructure(
+            anchors=[pubfile.ShapeAnchor(*a) for a in anchors],
+            shape_pages=shape_pages,
+        )
+
+    def test_a_chunk_is_the_page_its_shapes_were_drawn_on(self):
+        document = self.document(
+            self.page_holding((-100.0, -200.0)),
+            self.page_holding((50.0, 75.0)),
+        )
+        found = convert._page_by_chunk(document, self.structure(
+            [(311, -100.0, -200.0), (574, 50.0, 75.0)], {311: 266, 574: 308}
+        ))
+        self.assertEqual(found, {266: 0, 308: 1})
+
+    def test_chunk_order_is_not_taken_for_page_order(self):
+        # The kerkbode case: chunk 266 is libmspub's page 2 and chunk 335
+        # its page 0. Anything indexing the chunk list would have these
+        # exactly the wrong way round.
+        document = self.document(
+            self.page_holding((10.0, 10.0)),
+            self.page_holding((20.0, 20.0)),
+            self.page_holding((30.0, 30.0)),
+        )
+        found = convert._page_by_chunk(document, self.structure(
+            [(323, 30.0, 30.0), (472, 10.0, 10.0)], {323: 266, 472: 335}
+        ))
+        self.assertEqual(found, {266: 2, 335: 0})
+
+    def test_several_shapes_of_one_chunk_agreeing_is_still_one_page(self):
+        document = self.document(
+            self.page_holding((10.0, 10.0), (40.0, 40.0)),
+            self.page_holding((20.0, 20.0)),
+        )
+        found = convert._page_by_chunk(document, self.structure(
+            [(1, 10.0, 10.0), (2, 40.0, 40.0)], {1: 308, 2: 308}
+        ))
+        self.assertEqual(found, {308: 0})
+
+    def test_a_chunk_whose_shapes_disagree_settles_nothing(self):
+        document = self.document(
+            self.page_holding((10.0, 10.0)),
+            self.page_holding((20.0, 20.0)),
+        )
+        found = convert._page_by_chunk(document, self.structure(
+            [(1, 10.0, 10.0), (2, 20.0, 20.0)], {1: 308, 2: 308}
+        ))
+        self.assertEqual(found, {})
+
+    def test_a_shape_drawn_on_every_page_settles_nothing(self):
+        # Which is how a master keeps out of this: libmspub replays its
+        # shapes onto every page, so the anchor matches all of them.
+        document = self.document(
+            self.page_holding((10.0, 10.0)),
+            self.page_holding((10.0, 10.0)),
+        )
+        found = convert._page_by_chunk(document, self.structure(
+            [(1, 10.0, 10.0)], {1: 263}
+        ))
+        self.assertEqual(found, {})
+
+    def test_a_shape_no_page_lists_settles_nothing(self):
+        document = self.document(self.page_holding((10.0, 10.0)))
+        found = convert._page_by_chunk(document, self.structure(
+            [(1, 10.0, 10.0)], {}
+        ))
+        self.assertEqual(found, {})
+
+    def test_the_two_sides_need_only_agree_to_a_fraction_of_a_point(self):
+        # Both measure the same EMU by different routes, so requiring an
+        # exact match would turn rounding into a cliff.
+        document = self.document(self.page_holding((10.0, 10.0)))
+        found = convert._page_by_chunk(document, self.structure(
+            [(1, 10.3, 9.7)], {1: 266}
+        ))
+        self.assertEqual(found, {266: 0})
+
+
+class MasterAttributionTest(unittest.TestCase):
+    """Which master each page applies, taken from that page's own chunk.
+
+    The file's chunk list is not in libmspub's page order (§14), so the
+    master a page applies has to be reached through the mapping the shapes
+    measure rather than by indexing the list. Where the mapping settles
+    nothing, what the remaining chunks agree on is still a fact; where they
+    disagree, the page is left alone.
+    """
+
+    def page_at(self, x: float) -> model.Page:
+        """A page with two leading items and one of its own, at `x`.
+
+        The leading pair is what a master's shapes look like once replayed:
+        identical on every page, and so no help in telling pages apart. The
+        third item is the page's own, and the only thing an anchor can match
+        to one page rather than all of them.
+        """
+        page = model.Page(width=612.0, height=792.0)
+        for y in (10.0, 80.0):
+            page.items.append(model.Rectangle(x=10.0, y=y, width=50.0, height=50.0))
+        page.items.append(model.Rectangle(x=x, y=300.0, width=20.0, height=20.0))
+        return page
+
+    def anchor_for(self, shape_seq: int, page: model.Page) -> pubfile.ShapeAnchor:
+        """An anchor sitting exactly where that page's own item was drawn."""
+        item = page.items[-1]
+        return pubfile.ShapeAnchor(
+            shape_seq=shape_seq,
+            centre_x=item.x + item.width / 2.0 - page.width / 2.0,
+            centre_y=item.y + item.height / 2.0 - page.height / 2.0,
+        )
+
+    def structure(self, document, chunks, masters) -> pubfile.FileStructure:
+        """A file stating these page chunks, in this order.
+
+        `chunks` is (chunk seq, the master it applies, the index of the page
+        whose own shape it lists) -- and None for that last one where the
+        chunk lists nothing libmspub drew, which is a chunk the mapping
+        cannot settle. `masters` is master seq -> how many shapes it holds.
+        """
+        s = pubfile.FileStructure(
+            masters={
+                seq: pubfile.PageStructure(seq=seq, is_master=True, shape_count=count)
+                for seq, count in masters.items()
+            }
+        )
+        for offset, (seq, applied, page_index) in enumerate(chunks):
+            chunk = pubfile.PageStructure(seq=seq, applied_master=applied)
+            if page_index is not None:
+                shape_seq = 500 + offset
+                chunk.shape_seqnums.append(shape_seq)
+                s.shape_pages[shape_seq] = seq
+                s.anchors.append(
+                    self.anchor_for(shape_seq, document.pages[page_index])
+                )
+            s.pages.append(chunk)
+        return s
+
+    def document(self, *pages) -> model.Document:
+        return model.Document(pages=list(pages))
+
+    def test_a_page_takes_the_master_its_own_chunk_applies(self):
+        # The kerkbode case in miniature: chunk 300 is libmspub's page 1 and
+        # chunk 301 its page 0, so indexing the chunk list hands each page
+        # the other one's master.
+        document = self.document(self.page_at(100.0), self.page_at(400.0))
+        structure = self.structure(
+            document, [(300, 263, 1), (301, 294, 0)], {263: 1, 294: 2}
+        )
+        attributed = convert._attribute_masters(document, structure)
+        self.assertEqual([key[0] for _items, key in attributed], [294, 263])
+        self.assertEqual([len(items) for items, _key in attributed], [2, 1])
+
+    def test_the_one_chunk_left_over_settles_the_one_page_left_over(self):
+        # Chunk 300's shape puts it on page 1, which leaves page 0 and chunk
+        # 301 as the only pair either could be -- so page 0 applies 294 even
+        # though nothing of 301 was ever drawn. `1336 kerkbode.pub` has
+        # exactly one such page.
+        document = self.document(self.page_at(100.0), self.page_at(400.0))
+        structure = self.structure(
+            document, [(300, 263, 1), (301, 294, None)], {263: 1, 294: 2}
+        )
+        attributed = convert._attribute_masters(document, structure)
+        self.assertEqual([key[0] for _items, key in attributed], [294, 263])
+
+    def test_a_page_no_chunk_identifies_gets_no_master(self):
+        # Two chunks left over and two pages to put them on, and the masters
+        # they apply do not even agree on how many shapes they hold -- so
+        # there is no telling how much of either page came from a master.
+        document = self.document(
+            self.page_at(100.0), self.page_at(400.0), self.page_at(500.0)
+        )
+        structure = self.structure(
+            document,
+            [(300, 263, 0), (301, 294, None), (302, 265, None)],
+            {263: 1, 294: 2, 265: 1},
+        )
+        attributed = convert._attribute_masters(document, structure)
+        self.assertEqual(attributed[0][1][0], 263)
+        self.assertEqual(attributed[1], ([], None))
+        self.assertEqual(attributed[2], ([], None))
+
+    def test_a_master_every_remaining_chunk_applies_needs_no_mapping(self):
+        # A document with one master cannot be got wrong by mis-ordering:
+        # whichever chunk a page turns out to be, the master is the same.
+        document = self.document(self.page_at(100.0), self.page_at(400.0))
+        structure = self.structure(
+            document, [(300, 263, None), (301, 263, None)], {263: 1}
+        )
+        attributed = convert._attribute_masters(document, structure)
+        self.assertEqual([key[0] for _items, key in attributed], [263, 263])
+        self.assertEqual([len(items) for items, _key in attributed], [1, 1])
+
+    def test_an_unsettled_page_keeps_its_items_when_only_the_master_is_in_doubt(self):
+        # MISSAL's shape: two masters holding one shape each, and pages whose
+        # every shape sits where every other page's does. How much of the
+        # page came from a master is settled -- both say one item -- but
+        # which master it was is not, so the items stay where they are.
+        document = self.document(self.page_at(100.0), self.page_at(400.0))
+        structure = self.structure(
+            document, [(300, 263, None), (301, 294, None)], {263: 1, 294: 1}
+        )
+        attributed = convert._attribute_masters(document, structure)
+        self.assertEqual([len(items) for items, _key in attributed], [1, 1])
+        self.assertEqual([key for _items, key in attributed], [None, None])
+
+    def test_items_whose_master_is_in_doubt_are_numbered_but_not_lifted(self):
+        # A page number can still be resolved without knowing the master --
+        # it comes from the page's own index. Lifting cannot: two shapes
+        # this alike may still belong to two different masters.
+        document = model.Document()
+        for x in (100.0, 400.0):
+            page = model.Page(width=612.0, height=792.0)
+            page.items.append(frame_saying(" #"))
+            page.items.append(model.Rectangle(x=10.0, y=730.0, width=400.0, height=2.0))
+            page.items.append(model.Rectangle(x=x, y=300.0, width=20.0, height=20.0))
+            document.pages.append(page)
+        structure = self.structure(
+            document, [(300, 263, None), (301, 294, None)], {263: 2, 294: 2}
+        )
+        structure.has_fields = True
+        convert._apply_master_pages(document, structure)
+        numbered = [
+            p.items[0].story.paragraphs[0].spans[0].text for p in document.pages
+        ]
+        self.assertEqual(numbered, [" 1", " 2"])
+        self.assertEqual(document.masters, [])
+        for page in document.pages:
+            self.assertEqual(len(page.items), 3)
+            self.assertIsNone(page.master)
+
+
+class UnreportedWordArtTest(unittest.TestCase):
+    """Placing a headline libmspub reported no shape for at all.
+
+    The file has the words, the band, the rotation and the page. What the
+    event stream has to supply is two confirmations: another shape of the
+    same page chunk, which says which page this is, and nothing standing in
+    the band, which says the headline is not already there.
+    """
+
+    BAND = dict(centre_x=-100.0, centre_y=-200.0, width=64.0, height=63.0)
+
+    def art(self, **kwargs):
+        defaults = dict(
+            text="I venerdì\r\n2006\r\ndi Avvento", font="Comic Sans MS",
+            size=15.9, shape_seq=311, warp="button curve", **self.BAND,
+        )
+        defaults.update(kwargs)
+        return pubfile.WordArt(**defaults)
+
+    def sibling(self) -> model.Rectangle:
+        """A shape libmspub did report, elsewhere on the same page."""
+        return model.Rectangle(x=100.0, y=100.0, width=50.0, height=20.0)
+
+    def structure(self, art, **kwargs) -> pubfile.FileStructure:
+        # The sibling sits at (125, 110) on a 612 x 792 page, which is
+        # (-181, -286) from its centre -- where the file's anchor puts it.
+        defaults = dict(
+            wordart=[art],
+            anchors=[pubfile.ShapeAnchor(shape_seq=313, centre_x=-181.0,
+                                         centre_y=-286.0)],
+            shape_pages={311: 266, 313: 266},
+        )
+        defaults.update(kwargs)
+        return pubfile.FileStructure(**defaults)
+
+    def document(self, *items) -> model.Document:
+        return model.Document(pages=[page_with(self.sibling(), *items)])
+
+    def band_of(self, art, page) -> tuple:
+        return (
+            page.width / 2.0 + art.centre_x - art.width / 2.0,
+            page.height / 2.0 + art.centre_y - art.height / 2.0,
+        )
+
+    def test_the_headline_is_placed_on_the_page_the_file_puts_it_on(self):
+        art = self.art()
+        document = self.document()
+        convert._recover_wordart(document, self.structure(art))
+        frames = [
+            i for i in document.pages[0].items if isinstance(i, model.TextFrame)
+        ]
+        self.assertEqual(len(frames), 1)
+        x, y = self.band_of(art, document.pages[0])
+        self.assertAlmostEqual(frames[0].x, x)
+        self.assertAlmostEqual(frames[0].y, y)
+        self.assertAlmostEqual(frames[0].width, 64.0)
+        self.assertAlmostEqual(frames[0].height, 63.0)
+
+    def test_the_words_the_font_and_the_size_come_with_it(self):
+        document = self.document()
+        convert._recover_wordart(document, self.structure(self.art()))
+        frame = next(
+            i for i in document.pages[0].items if isinstance(i, model.TextFrame)
+        )
+        self.assertEqual(
+            ["".join(s.text for s in p.spans) for p in frame.story.paragraphs],
+            ["I venerdì", "2006", "di Avvento"],
+        )
+        span = frame.story.paragraphs[0].spans[0]
+        self.assertEqual(span.font, "Comic Sans MS")
+        self.assertAlmostEqual(span.size_pt, 15.9)
+
+    def test_with_no_shape_reported_there_is_no_paint_to_take(self):
+        # libmspub reported nothing, so there is no fill, ramp or shadow to
+        # read off it, and the words are left to the reader's own black
+        # rather than given a colour the file never stated here.
+        document = self.document()
+        convert._recover_wordart(document, self.structure(self.art()))
+        frame = next(
+            i for i in document.pages[0].items if isinstance(i, model.TextFrame)
+        )
+        span = frame.story.paragraphs[0].spans[0]
+        self.assertIsNone(span.color)
+        self.assertIsNone(span.gradient)
+        self.assertIsNone(span.stroke)
+        self.assertIsNone(frame.style.shadow)
+
+    def test_placing_it_is_reported_as_resting_on_the_file(self):
+        document = self.document()
+        convert._recover_wordart(document, self.structure(self.art()))
+        warning = next(w for w in document.warnings if "placed from the file" in w)
+        self.assertIn("I venerdì 2006 di Avvento", warning)
+        self.assertIn("(button curve)", warning)
+
+    def test_a_shape_whose_page_cannot_be_settled_is_not_placed(self):
+        # Nothing else of its page chunk reached the event stream, so there
+        # is no telling which page libmspub turned that chunk into.
+        document = self.document()
+        convert._recover_wordart(
+            document, self.structure(self.art(), anchors=[], shape_pages={311: 266})
+        )
+        self.assertFalse(
+            any(isinstance(i, model.TextFrame) for i in document.pages[0].items)
+        )
+        warning = next(w for w in document.warnings if "not placed" in w)
+        self.assertIn("no telling which page", warning)
+
+    def test_a_band_with_something_already_drawn_in_it_is_left_alone(self):
+        # The case this guard exists for: a WordArt whose words also came
+        # through as an ordinary frame would otherwise be written twice.
+        art = self.art()
+        document = self.document()
+        x, y = self.band_of(art, document.pages[0])
+        document.pages[0].items.append(
+            model.TextFrame(x=x + 10.0, y=y + 10.0, width=40.0, height=20.0)
+        )
+        convert._recover_wordart(document, self.structure(art))
+        placed = [
+            i for i in document.pages[0].items if isinstance(i, model.TextFrame)
+        ]
+        self.assertEqual(len(placed), 1)      # the one that was already there
+        warning = next(w for w in document.warnings if "not placed" in w)
+        self.assertIn("already drawn across the band", warning)
+
+    def test_a_page_background_is_not_something_in_the_way(self):
+        # It covers every band on the page, so counting it as an
+        # obstruction would turn this off for any page that has one.
+        art = self.art()
+        document = self.document(
+            model.Rectangle(x=0.0, y=0.0, width=612.0, height=792.0)
+        )
+        convert._recover_wordart(document, self.structure(art))
+        self.assertTrue(
+            any(isinstance(i, model.TextFrame) for i in document.pages[0].items)
+        )
+
+
 @needs_samples
 @unittest.skipUnless(convert.PUBDUMP.exists(), "pubdump not built")
 class EndToEndTest(unittest.TestCase):
@@ -1570,6 +2175,57 @@ class EndToEndTest(unittest.TestCase):
                 s.text for p in frame.story.paragraphs for s in p.spans
             ).strip())
         self.assertEqual(footers, [str(n) for n in range(1, 16)])
+
+    def test_the_headline_libmspub_reports_nothing_for_reaches_its_page(self):
+        # backlog §10, end to end: 'I venerdì 2006 di Avvento' has no shape
+        # in the event stream at all. Its page comes from the file, checked
+        # against the sibling shapes libmspub *does* report on that page --
+        # page chunk 266, which for this file is page 0.
+        source = SAMPLES / "Cantico_dei_Cantici.pub"
+        document = convert.parse_document(source)
+        structure = pubfile.read_structure(source)
+        convert._recover_wordart(document, structure)
+        words = {
+            " ".join(
+                " ".join(s.text for p in item.story.paragraphs for s in p.spans).split()
+            ): index
+            for index, page in enumerate(document.pages)
+            for item in model._walk(page.items)
+            if isinstance(item, model.TextFrame)
+        }
+        placed = {text: index for text, index in words.items() if "Avvento" in text}
+        self.assertEqual(placed, {"I venerdì 2006 di Avvento": 0})
+        self.assertTrue(
+            any("placed from the file alone" in w for w in document.warnings)
+        )
+        self.assertFalse(any("not placed" in w for w in document.warnings))
+
+    def test_a_newsletter_page_takes_its_own_master_not_its_neighbours(self):
+        # backlog §14: this file's chunk list is a permutation of libmspub's
+        # page order, so indexing it hands 16 of the 28 pages the other
+        # master of the pair. Every chunk here settles, so the measured
+        # answer is complete and simply disagrees with the indexed one.
+        source = SAMPLES / "cgk" / "1338 kerkbode.pub"
+        if not source.exists():
+            self.skipTest("newsletter sample absent")
+        document = convert.parse_document(source)
+        structure = pubfile.read_structure(source)
+        attributed = convert._attribute_masters(document, structure)
+        taken = [None if key is None else key[0] for _items, key in attributed]
+        indexed = [page.applied_master for page in structure.pages]
+        self.assertEqual(set(taken), {263, 294})
+        self.assertEqual(sum(1 for a, b in zip(taken, indexed) if a != b), 16)
+
+    def test_the_missal_masters_survive_pages_the_mapping_cannot_settle(self):
+        # Ten of its fifteen pages hold one full-page frame apiece, all at
+        # the same place, so no shape tells those pages apart. Both masters
+        # hold one shape, which is enough to say how much of each page came
+        # from a master even where it cannot say which master it was.
+        source = SAMPLES / "MISSAL MARIANA E PEDRO.pub"
+        document = convert.parse_document(source)
+        structure = pubfile.read_structure(source)
+        attributed = convert._attribute_masters(document, structure)
+        self.assertEqual([len(items) for items, _key in attributed], [1] * 15)
 
     def test_a_document_without_page_numbers_is_untouched(self):
         source = SAMPLES / "Cantico_dei_Cantici.pub"

@@ -13,7 +13,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import idml, logsetup, metafile, model, pubfile, textrepair, wmf
 
@@ -373,26 +373,77 @@ def _carries_page_number(item: model.Item, has_fields: bool) -> bool:
     )
 
 
+def _agreed_master(
+    structure: "pubfile.FileStructure", chunks: List["pubfile.PageStructure"]
+) -> Optional[tuple]:
+    """What the masters these page chunks apply agree on.
+
+    Asked of the chunks a page could still be, so that a page the mapping
+    cannot place is not thereby lost: whichever of them it turns out to be,
+    anything they all say is true of it. They may agree on how many shapes
+    the master holds -- which is all it takes to know how much of the page
+    came from one -- without agreeing on which master that was.
+
+    Returns (shape count, master seq or None), or None where they agree on
+    nothing useful. A chunk applying no master at all is such a case: its
+    page has no master content, and so nothing to agree about.
+    """
+    masters = [structure.master_of_chunk(chunk.seq) for chunk in chunks]
+    if not masters or any(master is None for master in masters):
+        return None
+    counts = {master.shape_count for master in masters}
+    if len(counts) != 1:
+        return None
+    seqs = {master.seq for master in masters}
+    return counts.pop(), (seqs.pop() if len(seqs) == 1 else None)
+
+
 def _attribute_masters(
     document: model.Document, structure: "pubfile.FileStructure"
-) -> Optional[List[List[model.Item]]]:
+) -> Optional[List[tuple]]:
     """Which leading items on each page came from that page's master.
 
-    Returns None when the attribution cannot be trusted, which is the
-    common case for anything unusual: the two halves must line up page for
-    page, and pages sharing a master must have been given the same shapes.
+    Each page is asked of the page chunk its own shapes identify, never of
+    the chunk sitting at its index: the file's chunk order is a permutation
+    of libmspub's page order, and indexing hands 16 of `1338 kerkbode.pub`'s
+    28 pages the other master of the pair (`backlog.md` §14).
+
+    A page no chunk identifies falls back to what the chunks still going
+    spare agree on, which is a fact rather than a guess -- and to nothing
+    where they disagree. Returns None when the whole attribution cannot be
+    trusted, because pages sharing a master were not given the same shapes.
     """
-    if len(structure.pages) != len(document.pages):
-        log.info("page structure did not align with the event stream")
-        return None
+    by_seq = {chunk.seq: chunk for chunk in structure.pages}
+    settled = _page_by_chunk(document, structure)
+    claimed: Dict[int, List[int]] = {}
+    for chunk, index in settled.items():
+        claimed.setdefault(index, []).append(chunk)
+
+    # The fallback needs the two halves to hold the same number of pages,
+    # since it rests on every page being one of the chunks left over. Where
+    # they do not, an unplaced page is simply unplaced.
+    spare = None
+    if len(structure.pages) == len(document.pages):
+        spare = _agreed_master(
+            structure, [c for seq, c in by_seq.items() if seq not in settled]
+        )
 
     attributed: List[tuple] = []
     for index, page in enumerate(document.pages):
-        master = structure.master_for(index)
-        if master is None or not master.shape_count:
+        chunks = claimed.get(index, [])
+        if len(chunks) == 1:
+            agreed = _agreed_master(structure, [by_seq[chunks[0]]])
+        elif chunks:
+            # Two chunks measured onto one page. The chunks are disjoint, so
+            # one of them is wrong and there is no telling which.
+            agreed = None
+        else:
+            agreed = spare
+        if agreed is None or not agreed[0]:
             attributed.append(([], None))
             continue
-        items = _master_items(page, master.shape_count)
+        count, seq = agreed
+        items = _master_items(page, count)
         # The sheet is part of the identity as well as the shapes: content
         # can only be shared by pages of one size, or lifting it would put
         # it on a page of the wrong dimensions.
@@ -401,7 +452,10 @@ def _attribute_masters(
             round(page.width, 3),
             round(page.height, 3),
         )
-        attributed.append((items, (master.seq, signature)))
+        # No seq means the chunks agreed on the count but not on the master.
+        # The items are known; where they belong is not, so they get no key
+        # and stay where they are.
+        attributed.append((items, None if seq is None else (seq, signature)))
 
     # A Publisher master covers either one page or a facing pair, so one
     # master sequence number may legitimately present two different
@@ -446,7 +500,7 @@ def _apply_master_pages(
 
     masters: dict = {}
     names = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    lifted = numbered = 0
+    lifted = numbered = flattened = 0
 
     for index, (items, key) in enumerate(attributed):
         if not items:
@@ -469,6 +523,16 @@ def _apply_master_pages(
                         numbered += 1
 
         if not move:
+            continue
+
+        if key is None:
+            # The page's own chunk was never identified, and the chunks it
+            # could be name different masters (§14). The number above needed
+            # only the page's index, but lifting needs to know whose content
+            # this is: two shapes alike enough to share a signature can
+            # still belong to two different masters, and merging them would
+            # put one master's content on the other's pages.
+            flattened += len(move)
             continue
 
         # Keyed by layout, not just by master: a facing-pages master holds
@@ -498,6 +562,12 @@ def _apply_master_pages(
         document.warnings.append(
             f"{lifted} repeated item(s) moved onto {len(masters)} master "
             f"page(s) rather than copied onto every page"
+        )
+    if flattened:
+        document.warnings.append(
+            f"{flattened} repeated item(s) left copied onto their pages: the "
+            f"file does not say which page libmspub drew them on, and the "
+            f"pages it could be apply different masters"
         )
 
 
@@ -796,7 +866,111 @@ def _frame_capacity(frame: model.TextFrame, point_size: Optional[float] = None) 
     return max(0.0, columns * rows)
 
 
-def _thread_duplicate_stories(document: model.Document) -> None:
+def _frames_by_shape(
+    document: model.Document, structure: "pubfile.FileStructure"
+) -> Dict[int, model.TextFrame]:
+    """The text frame each Escher shape turned into, where that is certain.
+
+    The same handle everything else matched from the .pub uses: both sides
+    measure the same shape, so both put its centre in the same place. Only
+    text frames are candidates, since only a text frame can be a link, and
+    a centre two of them share settles nothing and is dropped.
+
+    The search is one page wide, not the document, and that is what makes
+    it work at all: a newsletter repeats its two-column layout, so a column
+    on page 10 sits exactly where the column on page 12 does. The file says
+    which page chunk holds the shape and §14's mapping says which page
+    libmspub made of that chunk, which narrows the question to one page
+    before the centre is asked at all.
+    """
+    page_of_chunk = _page_by_chunk(document, structure)
+    frames: Dict[int, model.TextFrame] = {}
+    for anchor in structure.anchors:
+        index = page_of_chunk.get(structure.page_seq_of(anchor.shape_seq))
+        if index is None or index >= len(document.pages):
+            continue
+        page = document.pages[index]
+        seen = [
+            item for item in model._walk(page.items)
+            if isinstance(item, model.TextFrame)
+            and abs(item.x + item.width / 2.0 - page.width / 2.0 - anchor.centre_x) <= 0.5
+            and abs(item.y + item.height / 2.0 - page.height / 2.0 - anchor.centre_y) <= 0.5
+        ]
+        if len(seen) == 1:
+            frames[anchor.shape_seq] = seen[0]
+    return frames
+
+
+def _stated_chains(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> List[List[model.TextFrame]]:
+    """The chains the .pub states, as frames, in the order the story flows.
+
+    A chain survives only where the event stream drew *every* link and all
+    of them agree about the text. libmspub hands the complete story to each
+    frame of a chain, so links that disagree are not what this models, and
+    emptying them would throw text away rather than thread it.
+
+    Every link, rather than the ones that happened to resolve, because
+    threading part of a chain is worse than threading none of it: the links
+    left out keep their copy of the story and the article still arrives
+    twice. A chain that does not resolve whole is left to the measured
+    pass, which reaches `Cantico_dei_Cantici.pub`'s three columns even
+    though only two of its three shapes can be placed.
+    """
+    if structure is None or not structure.story_chains:
+        return []
+
+    frames_by_shape = _frames_by_shape(document, structure)
+    chains = []
+    for shapes in structure.story_chains:
+        if len(shapes) < 2 or not all(seq in frames_by_shape for seq in shapes):
+            continue
+        frames = [frames_by_shape[seq] for seq in shapes]
+        texts = {_frame_text(frame) for frame in frames}
+        if len(texts) != 1 or not next(iter(texts)).strip():
+            continue
+        chains.append(frames)
+    return chains
+
+
+def _measured_chains(
+    document: model.Document, already: set
+) -> List[List[model.TextFrame]]:
+    """The chains no record names, inferred from the text and the room.
+
+    Identical text alone is not enough -- a page-number field repeats a
+    single "#" across every page, and a running header repeats its title.
+    Those are genuine copies, and blanking all but the first would erase
+    them. What distinguishes a chain is that the story cannot fit the frame
+    holding it: that is *why* the boxes were linked. So a group is threaded
+    only when the text oversets even the roomiest frame in it, which leaves
+    repeated labels alone.
+
+    This is what a file whose shapes cannot be read still gets, and it can
+    only see a chain that oversets -- the pair in `1336 kerkbode.pub` with
+    1,905 characters against room for about 2,325 is invisible to it.
+    """
+    groups: dict = {}
+    for page in document.pages:
+        for item in model._walk(page.items):
+            if not isinstance(item, model.TextFrame) or id(item) in already:
+                continue
+            text = _frame_text(item)
+            if text.strip():
+                groups.setdefault(text, []).append(item)
+
+    return [
+        frames
+        for text, frames in groups.items()
+        if len(frames) > 1
+        and len(text) > max(_frame_capacity(frame) for frame in frames)
+    ]
+
+
+def _thread_duplicate_stories(
+    document: model.Document, structure: Optional["pubfile.FileStructure"] = None
+) -> None:
     """Collapse a story duplicated across linked frames into one chain.
 
     Publisher lets an article flow through a row of linked text boxes.
@@ -809,29 +983,17 @@ def _thread_duplicate_stories(document: model.Document) -> None:
     The frames are threaded instead: the first keeps the text and the rest
     continue it, which is what IDML models natively.
 
-    Identical text alone is not enough to infer a chain -- a page-number
-    field repeats a single "#" across every page, and a running header
-    repeats its title. Those are genuine copies, and blanking all but the
-    first would erase them. What distinguishes a chain is that the story
-    cannot fit the frame holding it: that is *why* the boxes were linked.
-    So a group is threaded only when the text oversets even the roomiest
-    frame in it, which leaves repeated labels alone.
+    Which frames are linked, and in what order, is the .pub's to say -- a
+    shape names its story and its place in it -- and the order matters:
+    taking it from the page sequence arrives backwards for an article that
+    flowed against that sequence. Where the file cannot be read the frames
+    are measured instead, which is weaker but costs a damaged file nothing.
     """
-    groups: dict = {}
-    for page in document.pages:
-        for item in model._walk(page.items):
-            if not isinstance(item, model.TextFrame):
-                continue
-            text = _frame_text(item)
-            if text.strip():
-                groups.setdefault(text, []).append(item)
+    chains = _stated_chains(document, structure)
+    stated = len(chains)
+    chains += _measured_chains(document, {id(f) for c in chains for f in c})
 
-    for text, frames in groups.items():
-        if len(frames) < 2:
-            continue
-        if len(text) <= max(_frame_capacity(frame) for frame in frames):
-            continue
-
+    for frames in chains:
         chain_id = f"chain{len(document.text_chains) + 1}"
         document.text_chains[chain_id] = frames
         for position, frame in enumerate(frames):
@@ -842,10 +1004,17 @@ def _thread_duplicate_stories(document: model.Document) -> None:
 
     if document.text_chains:
         threaded = sum(len(c) for c in document.text_chains.values())
+        # Which half a chain came from is the difference between an order
+        # the file stated and one inferred from where the frames sat, so a
+        # reader deciding what to check is told them apart.
+        guessed = len(document.text_chains) - stated
+        source = f"{stated} stated by the file"
+        if guessed:
+            source += f", {guessed} inferred from the text"
         document.warnings.append(
             f"{threaded} linked text frame(s) threaded into "
-            f"{len(document.text_chains)} story/stories: check where the text "
-            f"breaks between frames"
+            f"{len(document.text_chains)} story/stories ({source}): check where "
+            f"the text breaks between frames"
         )
 
 
@@ -1032,25 +1201,29 @@ def _recover_wordart(
             f"straight in that band — " + _sentence(detail)
         )
 
-    # A WordArt shape libmspub reported nothing at all for. Its words are in
-    # the file and its band says where they went, but with nothing in the
-    # event stream to confirm either, placing it would be placing content on
-    # the strength of the .pub alone. Naming it is what stops it being a
-    # silent loss.
+    # A WordArt shape libmspub reported nothing at all for. Its words, its
+    # band and its page are all in the file; what is missing is a shape in
+    # the event stream at that band. Which page it belongs to is the part
+    # that has to be earned rather than assumed -- see `_place_unreported`.
     missing = [art for art in structure.wordart if id(art) not in placed]
     if missing:
-        # Named with the shape it was bent into, since whoever retypes it
-        # has to know whether they are typing a headline or drawing one.
-        words = ", ".join(
-            repr(" ".join(art.text.split())[:40]) + (f" ({art.warp})" if art.warp else "")
-            for art in missing[:3]
-        )
-        if len(missing) > 3:
-            words += f" and {len(missing) - 3} more"
-        document.warnings.append(
-            f"{len(missing)} WordArt shape(s) not placed: libmspub reports no "
-            f"shape where the file puts them, so {words} need retyping"
-        )
+        settled, unplaced = _place_unreported(document, structure, missing)
+        if settled:
+            document.warnings.append(
+                f"{len(settled)} WordArt headline(s) placed from the file "
+                f"alone: libmspub reports no shape at their band, so the "
+                f"words, the band and the page come from the .pub — the page "
+                f"confirmed by the shapes libmspub *does* report on it, and "
+                f"the band by nothing else being drawn there; check "
+                f"{_wordart_names(settled)}"
+            )
+        if unplaced:
+            document.warnings.append(
+                f"{len(unplaced)} WordArt shape(s) not placed: libmspub "
+                f"reports no shape where the file puts them and "
+                f"{_unplaced_reason(unplaced)}; retype "
+                f"{_wordart_names([art for art, _why in unplaced])}"
+            )
 
 
 # WordArt states character spacing as a multiple of normal -- 1.2 is what
@@ -1071,6 +1244,153 @@ def _sentence(clauses: List[str]) -> str:
     if len(clauses) == 1:
         return clauses[0]
     return ", ".join(clauses[:-1]) + f", and {clauses[-1]}"
+
+
+def _wordart_names(shapes: List["pubfile.WordArt"]) -> str:
+    """A few headlines by their words, each with the shape it was bent into."""
+    named = ", ".join(
+        repr(" ".join(art.text.split())[:40]) + (f" ({art.warp})" if art.warp else "")
+        for art in shapes[:3]
+    )
+    return named + (f" and {len(shapes) - 3} more" if len(shapes) > 3 else "")
+
+
+# Why a shape the file states could not be put on a page, in the order the
+# report prefers to explain it: no page settled beats a page whose band was
+# already occupied, because the first is ignorance and the second a choice.
+_NO_PAGE, _BAND_OCCUPIED = "no page", "band occupied"
+_UNPLACED_REASONS = {
+    _NO_PAGE: "nothing else on their page chunk reached the event stream, so "
+              "there is no telling which page libmspub turned it into",
+    _BAND_OCCUPIED: "something libmspub did report is already drawn across "
+                    "the band, which is what a headline arriving twice looks "
+                    "like",
+}
+
+
+def _unplaced_reason(unplaced: List[tuple]) -> str:
+    reasons = {why for _art, why in unplaced}
+    return _sentence([_UNPLACED_REASONS[why] for why in sorted(reasons)])
+
+
+def _pages_by_chunk(
+    document: model.Document, structure: "pubfile.FileStructure"
+) -> Dict[int, set]:
+    """Which of libmspub's pages each of the file's page chunks could be.
+
+    The file states the page of every shape -- each page chunk lists the
+    seqnums on it, and the lists are disjoint -- but it does not state them
+    in libmspub's page order. In every multi-page file in the corpus the two
+    orders are a permutation of one another: in `1336 kerkbode.pub` page
+    chunk 266 is libmspub's page 2 and chunk 335 its page 0. So the mapping
+    is measured rather than assumed, by the one thing both sides state about
+    the same shape: where it sits.
+
+    Each shape of a chunk narrows the chunk down to the pages holding an
+    item at that spot, and the chunk is somewhere all of its shapes allow --
+    so the sets are intersected. A shape libmspub drew nowhere narrows
+    nothing and is passed over: silence is not a constraint. A chunk left
+    with two pages is a chunk the shapes do not tell apart, which is how a
+    master -- replayed onto every page, and so matching all of them -- is
+    kept from claiming a page of its own; one left with none is a
+    contradiction, and says as little.
+    """
+    centres: List[tuple] = []
+    for index, page in enumerate(document.pages):
+        for item in model._walk(page.items):
+            centres.append((
+                item.x + item.width / 2.0 - page.width / 2.0,
+                item.y + item.height / 2.0 - page.height / 2.0,
+                index,
+            ))
+
+    possible: Dict[int, set] = {}
+    for anchor in structure.anchors:
+        chunk = structure.page_seq_of(anchor.shape_seq)
+        if chunk is None:
+            continue
+        # The same tolerance `wordart_near` uses: both sides measure the
+        # same EMU by different routes and agree to a fraction of a point.
+        seen = {
+            index for x, y, index in centres
+            if abs(x - anchor.centre_x) <= 0.5 and abs(y - anchor.centre_y) <= 0.5
+        }
+        if not seen:
+            continue
+        possible[chunk] = possible[chunk] & seen if chunk in possible else seen
+    return possible
+
+
+def _page_by_chunk(
+    document: model.Document, structure: "pubfile.FileStructure"
+) -> Dict[int, int]:
+    """The page chunks the shapes settle on one page, and which page."""
+    return {
+        chunk: next(iter(pages))
+        for chunk, pages in _pages_by_chunk(document, structure).items()
+        if len(pages) == 1
+    }
+
+
+def _band_is_occupied(page: model.Page, frame: model.TextFrame) -> bool:
+    """Is anything libmspub drew already standing in this band?
+
+    The risk being guarded against is a headline arriving twice: a WordArt
+    whose words also came through as an ordinary frame would be written
+    once by libmspub and once from the file. Anything at all overlapping
+    the band is treated as that, since a band with something in it is not a
+    band this converter should be filling on the file's word alone.
+
+    A page background is not something in the way -- it covers every band
+    on the page by definition, and treating it as an obstruction would
+    quietly turn this whole recovery off for any page that has one.
+    """
+    for item in model._walk(page.items):
+        if item is frame or _is_page_background(item, page):
+            continue
+        if (
+            item.x < frame.x + frame.width
+            and frame.x < item.x + item.width
+            and item.y < frame.y + frame.height
+            and frame.y < item.y + item.height
+        ):
+            return True
+    return False
+
+
+def _place_unreported(
+    document: model.Document,
+    structure: "pubfile.FileStructure",
+    missing: List["pubfile.WordArt"],
+) -> Tuple[List["pubfile.WordArt"], List[tuple]]:
+    """Put the headlines libmspub reported no shape for on their pages.
+
+    Everything needed is in the .pub -- the anchor gives the band and the
+    rotation, the properties the words, the font and the size -- and what
+    used to be missing was any confirmation from the event stream. There
+    are now two pieces of it, and both are required: libmspub must have
+    reported *other* shapes of the same page chunk, which is what says
+    which page this is, and it must have reported nothing standing in the
+    band, which is what says the headline is not already there.
+
+    Returns the shapes placed, and the ones left alone with the reason.
+    """
+    by_chunk = _page_by_chunk(document, structure)
+    settled: List["pubfile.WordArt"] = []
+    unplaced: List[tuple] = []
+    for art in missing:
+        index = by_chunk.get(structure.page_seq_of(art.shape_seq))
+        if index is None or not 0 <= index < len(document.pages):
+            unplaced.append((art, _NO_PAGE))
+            continue
+        page = document.pages[index]
+        frame = _wordart_frame([], art, page.width, page.height)
+        if _band_is_occupied(page, frame):
+            unplaced.append((art, _BAND_OCCUPIED))
+            continue
+        page.items.append(frame)
+        settled.append(art)
+    return settled, unplaced
 
 
 def _wordart_tracking(spacing: Optional[float]) -> Optional[float]:
@@ -1389,7 +1709,7 @@ def _convert(
     # After the master pass: threading empties the continuation frames, and
     # a run of identical empty frames is exactly what master lifting looks
     # for, so doing this first would sweep the chain onto a master spread.
-    _thread_duplicate_stories(document)
+    _thread_duplicate_stories(document, structure)
     # After threading, so that a paragraph is counted once rather than once
     # per frame the story was copied into before the links were made.
     _apply_tab_stops(document, structure)

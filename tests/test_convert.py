@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-from pubidml import convert, model
+from pubidml import convert, model, pubfile
 
 from . import support, test_metafile
 from .support import event
@@ -535,6 +535,155 @@ class ThreadDuplicateStoriesTest(unittest.TestCase):
         convert._check_overset_text(document)
 
         self.assertEqual(len([w for w in document.warnings if "too small" in w]), 1)
+
+
+class FileStatedChainTest(unittest.TestCase):
+    """Threading what the .pub says is linked, rather than what looks it.
+
+    The measured guess below can only see a chain whose story oversets its
+    roomiest frame, because identical text alone also describes a repeated
+    label. The file has no such difficulty: it names the story each frame
+    holds and that frame's place in it.
+    """
+
+    SHORT = "a short paragraph that fits its frame with room to spare"
+    LONG = "word " * 300
+
+    def _frames(self, document: model.Document):
+        return [
+            item
+            for page in document.pages
+            for item in model._walk(page.items)
+            if isinstance(item, model.TextFrame)
+        ]
+
+    def _anchored(self, document: model.Document, *chains) -> pubfile.FileStructure:
+        """Give every frame a shape seqnum, and state the chains by it.
+
+        Seqnums run 100, 101, ... in the order the frames arrived, so a
+        chain written [1, 0] is the file saying the second frame comes
+        first. Each frame is nudged sideways first so that no two share a
+        centre, which is what lets §14's mapping tell the page chunks
+        apart -- the real files manage it because their pages differ.
+        """
+        structure = pubfile.FileStructure()
+        for index, (page_index, page, frame) in enumerate(
+            (page_index, page, item)
+            for page_index, page in enumerate(document.pages)
+            for item in model._walk(page.items)
+            if isinstance(item, model.TextFrame)
+        ):
+            frame.x += 12.0 * index
+            structure.anchors.append(pubfile.ShapeAnchor(
+                shape_seq=100 + index,
+                centre_x=frame.x + frame.width / 2.0 - page.width / 2.0,
+                centre_y=frame.y + frame.height / 2.0 - page.height / 2.0,
+            ))
+            structure.shape_pages[100 + index] = 300 + page_index
+        structure.story_chains = [[100 + i for i in chain] for chain in chains]
+        return structure
+
+    def _chain_of(self, count: int, text: str, **frame) -> model.Document:
+        return support.paged_document(
+            *[support.text_frame(text, **frame) for _ in range(count)]
+        )
+
+    def test_the_file_s_order_beats_the_order_the_frames_arrived_in(self):
+        # The whole of the item: page order is a guess, and a story that
+        # flowed against the page sequence used to arrive threaded backwards.
+        document = self._chain_of(3, self.LONG)
+        first, second, third = self._frames(document)
+        convert._thread_duplicate_stories(
+            document, self._anchored(document, [2, 0, 1])
+        )
+        self.assertEqual(
+            list(document.text_chains.values()), [[third, first, second]]
+        )
+
+    def test_a_chain_whose_text_fits_its_first_frame_is_threaded(self):
+        # What the measured guess cannot reach. `1336 kerkbode.pub` carries
+        # exactly this: 1,905 characters in a frame roomy enough for about
+        # 2,325, duplicated into the frame it flows on to.
+        document = self._chain_of(2, self.SHORT)
+        convert._thread_duplicate_stories(
+            document, self._anchored(document, [0, 1])
+        )
+        first, second = self._frames(document)
+        self.assertEqual(first.chain_id, second.chain_id)
+        self.assertIsNotNone(first.chain_id)
+        self.assertFalse(first.story.is_empty())
+        self.assertTrue(second.story.is_empty())
+
+    def test_frames_the_file_links_to_nothing_are_left_alone(self):
+        document = self._chain_of(2, self.SHORT)
+        convert._thread_duplicate_stories(document, self._anchored(document))
+        for frame in self._frames(document):
+            self.assertIsNone(frame.chain_id)
+            self.assertFalse(frame.story.is_empty())
+
+    def test_a_chain_whose_frames_disagree_about_the_text_is_left_alone(self):
+        # libmspub hands the whole story to every frame of a chain, so links
+        # that do not agree are not the thing this pass models -- and
+        # blanking them would throw text away rather than thread it.
+        document = support.paged_document(
+            support.text_frame(self.LONG),
+            support.text_frame(self.LONG.replace("word", "other")),
+        )
+        convert._thread_duplicate_stories(
+            document, self._anchored(document, [0, 1])
+        )
+        self.assertEqual(document.text_chains, {})
+        for frame in self._frames(document):
+            self.assertFalse(frame.story.is_empty())
+
+    def test_a_chain_that_does_not_resolve_whole_is_threaded_by_neither(self):
+        # Threading the links that did resolve would leave the rest holding
+        # their copy of the story, so the article still arrives twice --
+        # worse than leaving it alone, and harder to see.
+        document = self._chain_of(2, self.SHORT)
+        structure = self._anchored(document, [0, 1])
+        structure.anchors = structure.anchors[:1]
+        convert._thread_duplicate_stories(document, structure)
+        self.assertEqual(document.text_chains, {})
+        for frame in self._frames(document):
+            self.assertFalse(frame.story.is_empty())
+
+    def test_a_chain_that_does_not_resolve_whole_falls_back_to_the_guess(self):
+        # And where the guess can see it, it still gets threaded -- which is
+        # `Cantico_dei_Cantici.pub`, whose three columns overset plainly
+        # while only two of its three shapes can be placed.
+        document = self._chain_of(3, self.LONG)
+        structure = self._anchored(document, [0, 1, 2])
+        structure.anchors = structure.anchors[:2]
+        convert._thread_duplicate_stories(document, structure)
+        self.assertEqual([len(c) for c in document.text_chains.values()], [3])
+
+    def test_the_measured_guess_still_runs_for_what_the_file_leaves_out(self):
+        # Two chains: one the file states, one it does not. The file's is
+        # threaded from the record and the other from the oversetting, so a
+        # file whose shapes cannot be read loses nothing it used to have.
+        document = support.paged_document(
+            support.text_frame(self.SHORT),
+            support.text_frame(self.SHORT),
+            support.text_frame(self.LONG),
+            support.text_frame(self.LONG),
+        )
+        convert._thread_duplicate_stories(
+            document, self._anchored(document, [0, 1])
+        )
+        self.assertEqual([len(c) for c in document.text_chains.values()], [2, 2])
+
+    def test_a_frame_already_in_a_stated_chain_is_not_threaded_twice(self):
+        document = self._chain_of(3, self.LONG)
+        convert._thread_duplicate_stories(
+            document, self._anchored(document, [0, 1, 2])
+        )
+        self.assertEqual([len(c) for c in document.text_chains.values()], [3])
+
+    def test_no_structure_at_all_changes_nothing(self):
+        document = self._chain_of(3, self.LONG)
+        convert._thread_duplicate_stories(document, None)
+        self.assertEqual([len(c) for c in document.text_chains.values()], [3])
 
 
 @needs_parser

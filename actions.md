@@ -499,22 +499,68 @@ drawn, which is a separate question from whether they are guides.
   sized from the band using the ratio the 39 sized shapes measure — 1.33,
   spread 1.02 to 1.59 — and the report says so. Nothing more precise is
   available without laying out the font.
-- **One shape in `Cantico_dei_Cantici.pub` cannot be placed.** libmspub
-  reports no shape at all where the file puts it, so there is no guide
-  path to replace and no confirmation of where the words went. It is named
-  in the report instead: `'I venerdì 2006 di Avvento'`. Placing it on the
-  strength of the .pub alone is possible — the anchor gives a band — but it
-  would be the only content in the converter put on the page without the
-  event stream agreeing, and the first version of this feature is not the
-  place to start.
-- **WordArt is not WordArt any more.** Arched, stretched and outlined type
-  has no IDML equivalent; the headline arrives as straight text and the
-  file is flagged `review`. Straight text is placed centred in the band
-  both ways, since fitting the glyphs to the shape is what WordArt does
-  and the band therefore *is* the words. The frame stays exactly the
-  band; a taller one with room for a wrapped headline was tried and taken
-  back out, because it depends on the reader centring vertically and
-  misplaces the headline by half a band if it does not.
+- **The one shape libmspub reports nothing for is now placed too, and the
+  page came out of the file.** `'I venerdì 2006 di Avvento'` in
+  `Cantico_dei_Cantici.pub` has no guide path at all, so there was nothing
+  to replace and no confirmation of where the words went. The confirmation
+  turned out to be one record away: every Escher shape carries its own
+  seqnum in `CLIENT_DATA` (`0xF011`, field `0x6801`), and every page chunk
+  lists the seqnums of the shapes on it — 519 shapes across the corpus, none
+  listed by two pages. So the file says which page the orphan is on.
+
+  Which page *libmspub* made of that chunk is a separate question, and the
+  chunk order is not the answer — it is a permutation of the event stream's
+  page order in every multi-page file in the corpus, which is a bug in the
+  master pass and is written up as `backlog.md` §14. So the mapping is
+  measured: match each shape's anchor to the items libmspub drew, and a
+  shape landing on exactly one page settles its whole page chunk. A chunk
+  whose shapes disagree settles nothing, which is how a master — replayed
+  onto every page — stays out of it.
+
+  Placing then needs both halves of the event stream's agreement: another
+  shape of the same page chunk reported, so the page is known, and nothing
+  drawn across the band, so a headline that also arrived as an ordinary
+  frame cannot be written twice. Missing either, the shape is named in the
+  report as before, with which of the two was missing. 48 of the corpus's
+  48 WordArt shapes now convert.
+- **WordArt is not WordArt any more — but ask the file how much of it was
+  WordArt.** The shape record's `instance` is the shape type, and 136
+  (`msosptTextPlainText`) is unbent type that is only fitted to its band.
+  **47 of the corpus's 48 shapes read 136.** The one that does not is 147,
+  a *button curve*, and it is the shape libmspub reports nothing for
+  anyway. So the report no longer tells every reader that fifteen
+  headlines may need restyling: it says none of them is bent where none
+  is, and names the preset where one is. Bending is still the one part
+  that cannot be carried — IDML has no warped type — and a file with a
+  bent shape is still flagged `review`.
+
+  Straight text is placed centred in the band both ways, since fitting the
+  glyphs to the shape is what WordArt does and the band therefore *is* the
+  words. The frame stays exactly the band; a taller one with room for a
+  wrapped headline was tried and taken back out, because it depends on the
+  reader centring vertically and misplaces the headline by half a band if
+  it does not.
+- **The character formatting was on the shape, and was being dropped with
+  it.** WordArt states bold, italic, underline, strikethrough, small caps
+  and the rest as sixteen booleans packed into property `0x00FF`: the low
+  half their values, the high half which of them the file states at all. A
+  bit the file leaves out is unstated, not false. MS-ODRAW writes a boolean
+  set with the *highest* id in the group in the low bit, so bit *n* is
+  property `0xFF - n` — italic `0xFB`, bold `0xFA`. Reading it the other
+  way round makes every headline in the corpus bold *and* small caps
+  *and* tight while `gtextSpacing` says loose, which is how the order was
+  settled. 40 of the 48 shapes are italic and one is bold; all of them
+  used to come out regular.
+
+  Spacing (`0x00C4`) is a multiple of normal — 1.2 is the gallery's Loose,
+  and 36 shapes state it — where IDML's tracking is the space *added*, in
+  thousandths of an em. The multiple scales each glyph's advance and an
+  advance is not an em, so it is converted against an average of half an em
+  per glyph and the report says the tracking is close rather than exact.
+  Small caps and WordArt's own shadow flag sit two bits away in the same
+  word and are deliberately left alone: no shape in the corpus sets either,
+  so there is nothing to check a reading of them against, and the model has
+  nowhere to put small caps yet (`backlog.md` §10).
 
 ---
 

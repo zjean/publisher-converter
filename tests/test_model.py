@@ -626,6 +626,30 @@ class EmptyTableTest(unittest.TestCase):
         )
         self.assertEqual(len(doc.pages[0].items), 1)
 
+    def test_dropping_one_is_said_rather_than_done_in_silence(self):
+        # A grid Publisher drew and the package does not have is worth a
+        # line even when dropping it is right: 13 of the corpus's 31 tables
+        # go this way, and until now nothing said so.
+        doc = support.document(
+            *table_events(["1in", "1in"], [("0.5in", [(None, 1, 1), (None, 1, 1)])])
+        )
+        self.assertEqual(
+            doc.warnings, ["1 empty table(s) dropped: no text, no fill, no stroke"]
+        )
+
+    def test_they_are_counted_into_one_line_rather_than_one_each(self):
+        empty = table_events(["1in"], [("0.5in", [(None, 1, 1)])])
+        doc = support.document(*(empty * 3))
+        self.assertEqual(
+            doc.warnings, ["3 empty table(s) dropped: no text, no fill, no stroke"]
+        )
+
+    def test_a_table_that_is_kept_says_nothing(self):
+        doc = support.document(
+            *table_events(["1in", "1in"], [("0.5in", [(None, 1, 1), ("x", 1, 1)])])
+        )
+        self.assertEqual(doc.warnings, [])
+
 
 class TextScaleTest(unittest.TestCase):
     """Horizontal glyph scaling, which arrives a hundred times too large.

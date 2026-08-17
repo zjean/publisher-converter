@@ -479,12 +479,23 @@ These are real and deliberate, not bugs to be surprised by later.
   does not. Centring inside the band is safe either way — ignored, it
   lands on the top of the band, where the words went before.
 
-  A WordArt shape libmspub reported *nothing* for cannot be placed this
-  way: without a shape in the event stream there is nothing to confirm
-  where the words went, and putting them on the page on the strength of
-  the .pub alone is how invented content gets in. One shape in
-  `Cantico_dei_Cantici.pub` is in that position, and the report names its
-  words so they can be retyped.
+  **A WordArt shape libmspub reported *nothing* for is placed from the file
+  instead, once the file has been made to prove where it goes.** There is no
+  guide path to replace, so the words, the band and the rotation all come
+  from the .pub — and the page does too: every Escher shape carries its own
+  seqnum, every page chunk lists the shapes on it, and no shape in the
+  corpus is listed by two pages. Which page libmspub *emitted* for a given
+  chunk is then measured rather than assumed, by matching the shapes both
+  sides describe: the file's page order and libmspub's turn out to be a
+  permutation of one another in every multi-page file here.
+
+  Placement waits for two confirmations from the event stream and declines
+  without either — another shape of the same page chunk, which says which
+  page this is, and an empty band, which says the headline has not already
+  arrived by another route. The one shape in `Cantico_dei_Cantici.pub` that
+  needed this satisfies both, so all 48 WordArt shapes in the corpus now
+  convert; a shape that cannot satisfy them is still named in the report so
+  its words can be retyped, along with which confirmation was missing.
 - **A filled path of disconnected edges that is *not* WordArt still cannot
   be filled.** libmspub reports most paths as several subpaths — 50 of the
   56 in the sample corpus — and where each is a bare two-point segment, a
@@ -508,8 +519,11 @@ These are real and deliberate, not bugs to be surprised by later.
   master spreads, so a running header is stored once rather than copied
   onto every page. A Publisher master covering a facing pair becomes two
   masters, which looks identical and differs only in editing structure.
-  Anything that does not line up cleanly stays flattened, exactly as
-  before — nothing is ever moved on a guess.
+  Which master a page applies is measured rather than assumed: the file
+  lists its pages in an order that is not libmspub's, so each page is
+  matched to the chunk describing it by the shapes both halves state the
+  position of. Anything that does not line up cleanly stays flattened,
+  exactly as before — nothing is ever moved on a guess.
 - **Page numbers are resolved, not live.** Publisher stores a page-number
   field as a literal `#` and libmspub has no field handling at all, so
   the converter reads the master-page structure out of the `.pub` itself
@@ -633,21 +647,37 @@ These are real and deliberate, not bugs to be surprised by later.
   hanging indent implies a stop at its left indent, because that is where
   the wrapped lines start and what the tab after the outdented label is
   reaching for. Publisher and Word both honour it without recording it.
-- **Story threading is inferred, not read.** librevenge's drawing
+- **Story threading is read from the file.** librevenge's drawing
   interface cannot say "this frame continues that one", so libmspub hands
   the *complete* story to every frame in a linked chain — one sample
   carried the same 11,121-character article eight times, 73% of that
   file's apparent text. Written through verbatim that puts the article on
-  the page once per frame, each one overset. The converter instead
-  recognises a chain by the one thing that distinguishes it from a
+  the page once per frame, each one overset. The frames are threaded into
+  a single IDML story that reflows across them instead.
+
+  **Which frames are linked, and in what order, comes out of the .pub.**
+  Each shape names the story it holds and its own place in that story, so
+  the frames sharing a story *are* the chain and the index puts them in
+  flow order — no inference, and in particular no assumption that the
+  story flowed with the page sequence. A story only one shape holds is
+  not a chain, which is how a page-number footer stays a footer: it is
+  one master shape replayed onto every page, not a run of frames.
+
+  A shape is matched to the frame libmspub drew for it by centre, and the
+  search is one page wide rather than document wide, since a newsletter
+  repeats its layout and a column on one page sits exactly where the
+  column on another does. The file says which page chunk holds the shape
+  and the chunk-to-page mapping says which page that is.
+
+  **Where the record cannot be reached, the frames are measured instead**
+  — a chain is recognised by the one thing that distinguishes it from a
   genuinely repeated label: the story does not fit the frame holding it,
-  which is *why* the boxes were linked. Those frames are threaded into a
-  single IDML story that reflows across them, in page order. A repeated
-  caption or a page-number field fits its frame and is left alone. Two
-  consequences worth knowing: a chain whose text happens to fit its first
-  frame is not detected and still arrives duplicated, and the link order
-  is page order, so an article that flowed against the page sequence needs
-  re-linking by hand. Files where this fires are flagged `review`.
+  which is *why* the boxes were linked. That is what a file whose
+  structure will not read still gets, and what covers a chain the event
+  stream drew only part of. It can only see a chain that oversets, so a
+  chain whose text fits its first frame is invisible to it — which is
+  what reading the record fixes. The report says which of the two each
+  chain came from. Files where this fires are flagged `review`.
 - **Groups are flattened.** Children keep their absolute positions;
   nothing moves, but the grouping is gone.
 - **Gradients are carried, with every stop.** They become real IDML
@@ -756,7 +786,12 @@ These are real and deliberate, not bugs to be surprised by later.
   plus any spans on every cell — so it becomes a real IDML table rather
   than cells flowed into one frame as consecutive paragraphs. Cells that a
   span covers are not emitted twice. An all-empty grid with no fill or
-  stroke is dropped, the same rule an empty text frame follows.
+  stroke is dropped, the same rule an empty text frame follows — **and
+  the report says how many went**, one counted line per document rather
+  than one per table. These are the layout grids a Publisher page is
+  built on and they draw nothing, so dropping them is right; 13 of the 31
+  tables in the three newsletters go this way, and a reader looking for a
+  grid in the package should be told rather than left to find the gap.
 
   **Cell insets are carried**, read out of the .pub rather than from
   libmspub, which stops at a cell's row and column and marks the rest of
@@ -791,13 +826,23 @@ These are real and deliberate, not bugs to be surprised by later.
   Cell *fill and ruling* are still not carried, and this is a property of
   the corpus rather than a gap in the reader: no table in any sample file
   records either. Every cell record holds only its row and column bounds,
-  its insets, and two cached extents, and a field the file leaves out is
-  absent rather than defaulted — one table writes its insets as
-  Publisher's own 0.04in default on all four sides explicitly, so the
-  writer states what it means. A ruled or shaded table therefore still
-  needs a sample before it can be read; `actions.md` says how to make
-  one. A table's *own* fill and border do arrive, as the rectangle
+  its insets, and two cached extents. A ruled or shaded table therefore
+  still needs a sample before it can be read; `actions.md` says how to
+  make one. A table's *own* fill and border do arrive, as the rectangle
   libmspub draws behind it.
+
+  **A field the file leaves out is absent rather than defaulted**, which
+  is what lets a missing inset be read as zero, and it is measured rather
+  than assumed. A cell states an inset exactly when it has one: 3,289
+  sides are stated across the corpus and **not one of them is zero**,
+  against 1,751 left out. The tables that mean Publisher's own 0.04in
+  default write all four sides out explicitly, so omission cannot be the
+  default either. And the geometry agrees independently — a cell caches
+  the height of its laid-out text, and on the 454 rows grown to fit that
+  text the row height less the top inset and that cached height leaves
+  about nothing over, where a 0.04in bottom inset would leave 2.88pt.
+  Omission is per-side rather than a truncation of the trailing ones:
+  cells state a top inset while leaving the left one out.
 
   Two fields in each cell record remain unidentified and are not
   converted: one holding 1 or 2, uniform across a table — plausibly

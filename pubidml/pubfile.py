@@ -36,7 +36,23 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
       bare U32 length, then blocks:
         0x0E  non-empty string -> this page is a master
         0x0D  seqnum of the master this page applies
-        0x02  the page's own shape list
+        0x02  the page's own shape list, one 0x70 entry per shape holding
+              that shape's seqnum. The lists are disjoint across pages --
+              519 shapes across the corpus, none listed twice -- so this
+              is where every shape's page is stated. It is *not* stated in
+              libmspub's page order: the two are a permutation of one
+              another in every newsletter in the corpus.
+
+    Shape chunk (chunk type 0x01)
+      bare U32 length, then blocks:
+        0x27  the story this shape holds. Shapes sharing one are the
+              frames Publisher linked, which is the whole of what
+              librevenge's drawing interface cannot say.
+        0x28  this shape's place in that story, 1 upwards; the head of a
+              chain leaves it out, the same way an inset that is zero is
+              left out. A story only one shape holds is not a chain, which
+              is what keeps a page-number footer -- one master shape
+              replayed onto every page -- from reading as a run of frames.
 
     Table chunk (chunk type 0x10)
       bare U32 length, then blocks:
@@ -53,11 +69,22 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
                 0x01/0x02  first and last row      0x03/0x04  ditto columns
                 0x0A-0x0D  left, top, right and bottom inset, in EMU
                 0x07       1 or 2, uniform across a table -- unidentified
-                0x09/0x0E  cached extents -- unidentified
-              A field left out is absent, not defaulted: one table in the
-              corpus writes 0x0A-0x0D as 36576 EMU on every cell, which is
-              Publisher's own 0.04in default, so the writer states the
-              value it means and omission is zero.
+                0x09       cached height of the cell's laid-out text: it
+                             grows with the wrapping and is what makes the
+                             row arithmetic below come out
+                0x0E       cached extent, 9pt or 18pt -- unidentified
+              A cell states an inset exactly when it has one, so a side
+              left out is zero rather than a default. Three readings agree
+              on that. **No stated side is ever zero** -- 3289 stated
+              across the corpus against 1751 left out, and not one of the
+              3289 reads 0. The tables that mean Publisher's own 0.04in
+              default *write it*, all four sides, 36576 EMU each. And the
+              geometry says the same independently: on the 454 rows grown
+              to fit their text, the row's height less its top inset and
+              its 0x09 text height leaves a residual of about zero, where
+              a 0.04in bottom inset would leave 2.88pt.
+              Omission is per-side, not truncation of the trailing ones:
+              cells state 0x0B while leaving 0x0A out.
 
     EscherStm stream, from libmspub 0.1.5 MSPUBParser.cpp again
       OfficeArt records: U16 version|instance<<4, U16 type, U32 length.
@@ -74,6 +101,10 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
           0xF010  anchor, an (U16 id, U32 value) list:
                     0x2001-0x2004 xs, ys, xe, ye in EMU, measured from
                     the centre of the page (Coordinate::getXIn)
+          0xF011  client data, the same (U16 id, U32 value) layout:
+                    0x6801 this shape's seqnum, which is the number the
+                    page chunks list. It is the only thing tying an Escher
+                    shape to the rest of the file.
           0xF00B/0xF121/0xF122  property tables: `instance` six-byte
                     entries of (U16 opid, U32 value), then the payload of
                     every entry whose opid has 0x8000 set, in order. The
@@ -151,6 +182,8 @@ _SHAPE_SEQNUM = 0x70
 _PAGE_CHUNK = 0x43
 
 _TABLE_CHUNK, _CELLS_CHUNK = 0x10, 0x63
+_SHAPE_CHUNK = 0x01
+_SHAPE_STORY_ID, _SHAPE_CHAIN_INDEX = 0x27, 0x28
 _TABLE_ROW_COUNT, _TABLE_COLUMN_COUNT = 0x66, 0x67
 _TABLE_CELLS_SEQNUM = 0x6B
 _TABLE_ROWCOL_ARRAY, _TABLE_ROWCOL_SIZE = 0x6D, 0x02
@@ -171,6 +204,10 @@ _ESCHER_STREAM = ("Escher", "EscherStm")
 _QUILL_STREAM = ("Quill", "QuillSub", "CONTENTS")
 _SHAPE_CONTAINER = 0xF004
 _CLIENT_ANCHOR = 0xF010
+# Client data, which for Publisher holds one thing worth having: the
+# shape's own seqnum, the number its page chunk lists it by.
+_CLIENT_DATA = 0xF011
+_CLIENT_DATA_SEQNUM = 0x6801
 _PROPERTY_RECORDS = frozenset({0xF00B, 0xF121, 0xF122})
 # Publisher's own departures from OfficeArt's record layout.
 _ESCHER_TAIL = {0xF000: 4, 0xF002: 4}
@@ -292,6 +329,9 @@ class PageStructure:
     is_master: bool = False
     applied_master: Optional[int] = None
     shape_count: int = 0
+    #: The seqnum of every shape this page lists, which is how the file
+    #: states what is on it. Disjoint from every other page's list.
+    shape_seqnums: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -337,6 +377,24 @@ class WordArt:
     #: Character spacing as a multiple of normal, stated only when it is
     #: not normal. Publisher's gallery calls 1.2 loose and 0.9 tight.
     spacing: Optional[float] = None
+    #: This shape's seqnum, the number its page chunk lists it by. The only
+    #: way to the page a shape libmspub never reported belongs to.
+    shape_seq: Optional[int] = None
+
+
+@dataclass
+class ShapeAnchor:
+    """Where one Escher shape sits, and which shape the file says it is.
+
+    Only the shapes libmspub *does* report matter here: matching an anchor
+    to an item it drew is what says which libmspub page a page chunk turned
+    into. Coordinates are measured from the centre of the page, like
+    everything else the Escher stream states.
+    """
+
+    shape_seq: int
+    centre_x: float
+    centre_y: float
 
 
 @dataclass
@@ -361,10 +419,21 @@ class ShapeGradient:
 class FileStructure:
     """What the file says that libmspub does not pass on."""
 
-    #: Pages in the order libmspub emits them, so index i lines up with
-    #: document.pages[i].
+    #: Every page chunk carrying shapes, in the order the file holds them,
+    #: which is *not* libmspub's page order: matching Escher anchors to the
+    #: items libmspub drew shows the two are a permutation of one another in
+    #: every multi-page file in the corpus (`backlog.md` §14). Anything
+    #: needing the page a *particular* shape sits on should ask
+    #: `page_seq_of` and take that to a page through the event stream, as
+    #: `convert._page_by_chunk` does, rather than index into this list.
     pages: List[PageStructure] = field(default_factory=list)
     masters: Dict[int, PageStructure] = field(default_factory=dict)
+    #: Which page chunk each shape seqnum belongs to, across pages and
+    #: masters alike. The file's own statement of what is on which page.
+    shape_pages: Dict[int, int] = field(default_factory=dict)
+    #: Where every Escher shape sits, for tying page chunks to the pages
+    #: libmspub emitted.
+    anchors: List[ShapeAnchor] = field(default_factory=list)
     #: True when the document contains at least one field of any kind. A
     #: document with none cannot contain a page-number field, so every
     #: '#' in it is literal text.
@@ -394,6 +463,10 @@ class FileStructure:
     #: of half an inch -- the same grid InDesign falls back to, so there is
     #: then nothing to carry.
     default_tab_stop: Optional[float] = None
+    #: Every run of linked text frames, as shape seqnums in the order the
+    #: story flows through them. libmspub says nothing about a link, so
+    #: without this the order is whatever order the frames turned up in.
+    story_chains: List[List[int]] = field(default_factory=list)
 
     def gradient_for(
         self,
@@ -429,6 +502,12 @@ class FileStructure:
                 return None
         return near[0]
 
+    def page_seq_of(self, shape_seq: Optional[int]) -> Optional[int]:
+        """The page chunk that lists this shape, if the file lists it."""
+        if shape_seq is None:
+            return None
+        return self.shape_pages.get(shape_seq)
+
     def wordart_near(
         self, centre_x: float, centre_y: float, tolerance: float = 0.5
     ) -> Optional[WordArt]:
@@ -446,11 +525,17 @@ class FileStructure:
         ]
         return near[0] if len(near) == 1 else None
 
-    def master_for(self, page_index: int) -> Optional[PageStructure]:
-        if not 0 <= page_index < len(self.pages):
+    def master_of_chunk(self, page_seq: Optional[int]) -> Optional[PageStructure]:
+        """The master this page chunk applies, as the file states it.
+
+        Asked by chunk rather than by page index: the chunk list is not in
+        libmspub's page order, so which chunk a page is has to be measured
+        first (`convert._page_by_chunk`).
+        """
+        chunk = next((p for p in self.pages if p.seq == page_seq), None)
+        if chunk is None or chunk.applied_master is None:
             return None
-        applied = self.pages[page_index].applied_master
-        return self.masters.get(applied) if applied is not None else None
+        return self.masters.get(chunk.applied_master)
 
     def cell_insets(
         self, column_widths: List[float], row_heights: List[float]
@@ -707,11 +792,12 @@ def _page_structure(contents: bytes, seq: int, offset: int) -> PageStructure:
         elif block.id == _APPLIED_MASTER_NAME:
             page.applied_master = block.data
         elif block.id == _PAGE_SHAPES:
-            page.shape_count += sum(
-                1
+            page.shape_seqnums += [
+                entry.data
                 for entry in _children(contents, block)
                 if entry.type == _SHAPE_SEQNUM
-            )
+            ]
+            page.shape_count = len(page.shape_seqnums)
     return page
 
 
@@ -763,6 +849,43 @@ def _table_cells(contents: bytes, offset: int) -> TableStructure:
                 cell.get(side, 0) / _EMU_PER_POINT for side in _CELL_INSETS
             )
     return table
+
+
+def _read_story_chains(contents: bytes, refs) -> List[List[int]]:
+    """Every linked run of text frames, as shape seqnums in flow order.
+
+    A shape names the story it holds and its own place in that story, so
+    the frames sharing a story *are* the chain and the index puts them in
+    order. The head leaves the index out, the way every field in this
+    format is left out when it has nothing to say.
+
+    Two things this rules out that guessing from the text cannot. A story
+    one shape holds is not a chain, which is what keeps a page-number
+    footer -- one master shape replayed onto every page -- from being read
+    as a run of linked frames. And two shapes claiming the same place in
+    one story contradict each other, so that story states no order at all.
+    """
+    stories: Dict[int, List[tuple]] = {}
+    for seq, kind, offset in refs:
+        if kind != _SHAPE_CHUNK:
+            continue
+        fields = {block.id: block.data for block in _chunk_blocks(contents, offset)}
+        story = fields.get(_SHAPE_STORY_ID)
+        if story is None:
+            continue
+        stories.setdefault(story, []).append((fields.get(_SHAPE_CHAIN_INDEX, 0), seq))
+
+    chains = []
+    for links in stories.values():
+        if len(links) < 2:
+            continue
+        if len({index for index, _seq in links}) != len(links):
+            continue
+        chains.append([seq for _index, seq in sorted(links)])
+    # A shape belongs to one story, so no two chains share a head and
+    # sorting by it is a total order -- worth having, since the caller
+    # reports what it threaded.
+    return sorted(chains)
 
 
 def _read_tables(contents: bytes, refs) -> Dict[tuple, Optional[TableStructure]]:
@@ -873,6 +996,51 @@ def _read_wordart(data: bytes) -> List[WordArt]:
     return _wordart_shapes(escher) if escher else []
 
 
+def _read_shape_anchors(data: bytes) -> List[ShapeAnchor]:
+    """Where every Escher shape sits, by the seqnum the file knows it as.
+
+    Nothing in the event stream says which page chunk libmspub turned into
+    which page, and the chunk order is not the answer. What is available is
+    this: the file says which page lists a shape, and libmspub draws the
+    shape somewhere. Line the two up by where the shape sits and the pages
+    identify themselves -- which is the only route to the page of a shape
+    libmspub never reported at all.
+    """
+    escher = _read_stream(data, *_ESCHER_STREAM)
+    return _shape_anchors(escher) if escher else []
+
+
+def _shape_anchors(escher: bytes) -> List[ShapeAnchor]:
+    """Every shape in an Escher stream that states both a seqnum and a box."""
+    found: List[ShapeAnchor] = []
+    for body, end in _escher_shapes(escher, 0, len(escher)):
+        shape_seq = box = None
+        for _version, _instance, rec_type, sub_body, sub_end in _escher_records(
+            escher, body, end
+        ):
+            if rec_type == _CLIENT_DATA:
+                shape_seq = _escher_values(escher, sub_body, sub_end).get(
+                    _CLIENT_DATA_SEQNUM
+                )
+            elif rec_type == _CLIENT_ANCHOR:
+                anchor = _escher_values(escher, sub_body, sub_end)
+                if all(side in anchor for side in _ANCHOR_SIDES):
+                    box = [
+                        _signed(anchor[side]) / _EMU_PER_POINT
+                        for side in _ANCHOR_SIDES
+                    ]
+        if shape_seq is None or box is None:
+            continue
+        found.append(
+            ShapeAnchor(
+                shape_seq=shape_seq,
+                centre_x=(box[0] + box[2]) / 2.0,
+                centre_y=(box[1] + box[3]) / 2.0,
+            )
+        )
+    return found
+
+
 def _wordart_boolean(value, bit: int) -> bool:
     """One of WordArt's packed booleans, false unless the file states it."""
     if not isinstance(value, int):
@@ -888,7 +1056,7 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
         size = rotation = spacing = None
         box = None
         shape_type = _WORDART_PLAIN
-        flags = None
+        flags = shape_seq = None
         for _version, instance, rec_type, sub_body, sub_end in _escher_records(
             escher, body, end
         ):
@@ -906,6 +1074,10 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
                     flags = props[_PROP_WORDART_BOOLS]
             elif rec_type == _SHAPE_RECORD:
                 shape_type = instance
+            elif rec_type == _CLIENT_DATA:
+                shape_seq = _escher_values(escher, sub_body, sub_end).get(
+                    _CLIENT_DATA_SEQNUM
+                )
             elif rec_type == _CLIENT_ANCHOR:
                 anchor = _escher_values(escher, sub_body, sub_end)
                 if all(side in anchor for side in _ANCHOR_SIDES):
@@ -944,6 +1116,7 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
                 strikethrough=_wordart_boolean(flags, _WORDART_STRIKETHROUGH),
                 warp=_WORDART_WARPS.get(shape_type),
                 spacing=spacing if spacing is not None and spacing != 1.0 else None,
+                shape_seq=shape_seq,
             )
         )
     return found
@@ -1291,11 +1464,17 @@ def read_structure(source: Path) -> Optional[FileStructure]:
             paragraph_stops=_paragraph_stops(quill),
             gradients=_read_gradients(data, _read_palette(contents, refs)),
             default_tab_stop=_default_tab_stop(quill),
+            anchors=_read_shape_anchors(data),
+            story_chains=_read_story_chains(contents, refs),
         )
         for seq, kind, offset in refs:
             if kind != _PAGE_CHUNK:
                 continue
             page = _page_structure(contents, seq, offset)
+            # Masters list shapes the same way, and a shape belongs to one
+            # page either way, so both go in the one index.
+            for shape_seq in page.shape_seqnums:
+                structure.shape_pages[shape_seq] = seq
             if page.is_master:
                 structure.masters[seq] = page
             elif seq not in _DUMMY_PAGE_SEQNUMS and page.shape_count:

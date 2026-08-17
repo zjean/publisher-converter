@@ -116,24 +116,62 @@ missing.
 
 ---
 
-## 5. Story-threading residuals
+## 5. Story-threading residuals — **done**
 
-Threading landed in `a052d30`. Two known gaps, both documented in the
-README:
+Threading landed in `a052d30`, measuring a chain rather than reading one.
+Both gaps this item recorded came from that, and **the file states the
+answer to both outright.** A shape chunk (type `0x01`) carries the story
+it holds in block `0x27` and its own place in that story in `0x28`, so
+the frames sharing a story *are* the chain and the index puts them in
+order. The head leaves `0x28` out, the way every field in this format is
+left out when it has nothing to say — the same writing rule §11's cell
+insets turn on.
 
-- **A chain whose text fits its first frame is not detected.** A group is
-  only threaded when the story oversets even the roomiest frame in it,
-  because identical text alone also describes a repeated label — a
-  page-number field repeats a single `#` across 27 frames, and blanking
-  those would erase the numbers. `1336 kerkbode.pub` still carries one
-  undetected pair: two frames with the same 1905 characters against a
-  capacity of roughly 2325. Loosening the guard risks the page numbers,
-  so any change here needs the `#` case as a test.
-- **Link order is page order.** An article that flowed against the page
-  sequence arrives threaded in the wrong order and needs re-linking by
-  hand. Publisher's own chain order is not in the event stream; it would
-  have to come out of the `.pub` structure directly, the way page numbers
-  and masters already do (`pubfile.read_structure`).
+- **Link order was page order.** Now it is the order the file states.
+  Nothing in the corpus moves, because every chain in it happens to flow
+  with the page sequence, so this is a latent fix in the sense §14 was:
+  what changes is that the order is *read* rather than coincidental.
+- **A chain whose text fits its first frame was not detected.** Now it
+  is, and the pair this item named is exactly what turned up:
+  `1336 kerkbode.pub`'s two frames of 1,905 characters against room for
+  about 2,325 are threaded, and `1337` gains an 80-character pair the
+  same way. That is 1,905 and 80 characters of duplicated article no
+  longer written twice.
+
+**The page-number risk this item warned about does not arise**, and the
+reason is worth keeping: a page-number footer is *one* master shape
+replayed onto every page, not a run of frames. Its story is held by a
+single shape, and a story one shape holds is not a chain. `1336`'s
+stories 2 and 3 are exactly that — one shape each, appearing on 14 and 13
+pages — so the record tells a repeated label from a chain without the
+capacity guess having to.
+
+**The measured guess is kept, for what the record cannot reach.** A
+stated chain is used only when the event stream drew *every* link and all
+of them agree about the text; threading part of a chain leaves the rest
+holding their copy, so the article still arrives twice. Two cases in the
+corpus fall back:
+
+- `Cantico_dei_Cantici.pub`, where only two of a three-frame chain's
+  shapes can be placed. The guess sees it plainly — the story oversets —
+  and threads all three, so the fallback is what keeps it whole.
+- `1337`'s chain of shapes 435 and 410, which **libmspub never drew**:
+  their page chunks resolve to pages 22 and 23 and there is no frame at
+  either centre, anywhere in the document. The file states a chain of two
+  frames that are not in the event stream at all, so there is nothing to
+  thread. It was not threaded before this change either.
+
+Matching a shape to its frame is by centre, like WordArt and the
+gradients — but **one page wide rather than document wide**, which is
+what makes it work: a newsletter repeats its two-column layout, so a
+column on page 10 sits exactly where the column on page 12 does. §14's
+chunk-to-page mapping narrows it to one page before the centre is asked.
+Document-wide matching resolves 1 of `Cantico`'s 3 shapes; page-scoped
+resolves 2.
+
+The report now says which half a chain came from — "3 stated by the
+file", "1 inferred from the text" — since an order the file stated and
+one inferred from where the frames sat are worth checking differently.
 
 ---
 
@@ -281,30 +319,49 @@ table matched in the .pub or write the real weights and colours.
 
 ---
 
-## 10. The WordArt libmspub reports nothing for
+## 10. The WordArt libmspub reports nothing for — **done**
 
-WordArt headlines now convert (`actions.md` §8): the words come out of the
+WordArt headlines convert (`actions.md` §8): the words come out of the
 Escher stream and replace the guide path libmspub reports for the same
-shape. **One shape in `Cantico_dei_Cantici.pub` has no such path** —
-libmspub reports nothing at all where the file puts it — so it is named in
-the report rather than placed:
+shape. **One shape in `Cantico_dei_Cantici.pub` had no such path** —
+libmspub reports nothing at all where the file puts it — so it used to be
+named in the report rather than placed:
 
 ```
 'I venerdì 2006 di Avvento'      64.4 x  63.5pt, Comic Sans MS, no size stated
 ```
 
-Everything needed to place it is in the .pub: the anchor gives the band
-and the rotation, the properties give the text, font and size. What is
-missing is any confirmation from the event stream, and that is the whole
-reason to hesitate — it would be the only content the converter puts on a
-page without libmspub agreeing that something is there, and the corpus has
-one case where the guides were welded into a shape that did not exist
-(197368d).
+It is now placed, and the hesitation this item recorded is answered rather
+than overruled. Everything but the page was already in the .pub: the anchor
+gives the band and the rotation, the properties the words, the font and the
+size. **The page was the missing piece, and the file states that too.**
 
-Worth doing, carefully: place it, but only where nothing libmspub *did*
-report already overlaps the band, so a WordArt whose text also arrived as
-an ordinary frame cannot be written twice. The overlap test is the part to
-get right; `_recover_wordart` already has the geometry to do it.
+Every Escher shape carries a `CLIENT_DATA` record (`0xF011`) holding its own
+seqnum at `0x6801`, and every page chunk lists the seqnums of the shapes on
+it — 519 shapes across the corpus, no shape listed by two pages. So the file
+says which page the orphan belongs to. What it does **not** say is which
+page libmspub emitted for that chunk, and the chunk order is not the answer
+(§14). That mapping is measured instead: a shape whose anchor matches an
+item libmspub drew on exactly one page says its whole page chunk is that
+page, and a chunk whose shapes disagree says nothing — which is also how a
+master, replayed onto every page, keeps out of it.
+
+So placement now rests on two confirmations from the event stream, and
+needs both:
+
+- **another shape of the same page chunk was reported**, which says which
+  page this is. Without it the shape stays unplaced and named, as before.
+- **nothing libmspub reported is drawn across the band**, which says the
+  headline is not already there by another route — the overlap test this
+  item asked for. A page background does not count as something in the way,
+  since it covers every band on the page by definition.
+
+The orphan's band on Cantico's first page turns out to be empty — nothing
+libmspub drew comes near it — so the guard passes on its own terms rather
+than being written around it. Its size also had to be fixed to make this
+sane: it is a three-line headline stating no point size, and sizing it from
+the whole band instead of a line's share of it made it 48pt rather than
+16pt.
 
 **This item used to name two shapes, and was wrong about the second.**
 `'Il Cantico dei Cantici'` did have a path — at exactly its centre, in
@@ -317,6 +374,20 @@ say only *how* it was drawn placed it, with the confirmation this item
 wanted already in hand. Worth remembering when the remaining one is
 attempted: check what libmspub reports before concluding it reports
 nothing.
+
+**The shape now names itself, which makes the remaining one easier to
+judge.** Its type is 147, a *button curve* — the only bent shape in the
+corpus, and the report names it as such. A bent headline is the one kind
+straight text cannot stand in for, so if it is ever placed, it is placed
+knowing it needs redrawing rather than reviewing.
+
+**Two flags in the same property are read past.** WordArt's booleans
+(`0x00FF`) carry small caps at bit 1 and its own shadow at bit 2 beside the
+bold and italic now carried. Neither is set on any shape in the corpus, so
+neither has a case to check against, and small caps has nowhere to go in
+`model.Span` yet — IDML would take it as `Capitalization="SmallCaps"`. A
+file that sets either loses it silently, which is the one thing about this
+worth fixing when a sample turns up.
 
 ---
 
@@ -388,25 +459,61 @@ anything on `AutoGrow`; the probe's four treatments are there if it turns
 out to be needed for files whose fonts genuinely cannot be had.
 
 Separately, and found while measuring the above: **a cell's bottom inset
-is zero in all 974 cells of the corpus**, which no Publisher default
-produces. The four inset fields are `0x0A`–`0x0D`, and they are present
-354, 351, 336 and **65** times respectively — the count falls away
-towards the last, the signature of trailing fields left out when they
-match a default. `_table_cells` reads a missing field as zero, so the
-bottom inset is being invented rather than read. Where `0x0D` *is*
-present it is always 2.88pt, Publisher's 0.04in default, which says the
-default those fields are measured against is something else again. Worth
-settling; it makes rows want slightly more height, not less, so it is not
-the cause of the overflow above.
+is zero in almost every cell of the corpus** — which was written up here
+as an invention rather than a reading, on the grounds that the four inset
+fields `0x0A`–`0x0D` are present in falling numbers and that no Publisher
+default produces a zero bottom inset. **Both halves of that were wrong,
+and the reading was right.** Settled, so it does not get re-opened:
 
-Also unresolved and probably showing at the same time: **three full-page
-layout tables in `1336` never reach the package at all.** libmspub reports
-11 tables and 7 are written; the four missing are the 3-column full-page
-grids with a 9pt gutter, and one 1-column strip. They are gone before
-`_recover_wordart` runs — the parser drops them — and nothing says so in
-the report. Worth finding out whether they are dropped for being empty,
-which for a layout grid may be right, but it should be a decision rather
-than a silence.
+- **The counts fall away because fewer cells have a bottom inset, not
+  because the field is truncated.** Counted over all 1,260 cells rather
+  than the 974 matched ones, the four sides are stated 1056, 1037, 1001
+  and 195 times — but the omission is per-side, not trailing: 17 cells
+  state `0x0B` and leave `0x0A` out entirely. Each side is written on its
+  own.
+- **A cell states an inset exactly when it has one.** 3,289 sides are
+  stated across the corpus and **not one of them is zero**, against 1,751
+  left out. A writer that never writes a zero is a writer whose omission
+  means zero.
+- **The geometry says so independently.** `0x09` on each cell caches the
+  height of its laid-out text. On the 454 rows grown to fit that text,
+  the row height less the top inset and `0x09` leaves a residual of about
+  zero — spread ±1.3pt, clustered on 0.18 and −0.74 — where a 0.04in
+  bottom inset would leave a clean 2.88pt.
+- **The one table that states `0x0D` is not a counter-example.** It is
+  `1338`'s 9x3 full-page layout grid, whose rows are fixed at 103pt and
+  9.4pt rather than grown, so the arithmetic above does not apply to it —
+  and it states all four sides as 2.88pt, the 0.04in default, because
+  that grid's margins were never touched. A table that means the default
+  writes the default.
+
+So `_table_cells` reads it correctly and there is nothing to fix. Pinned
+by `test_a_cell_states_an_inset_exactly_when_it_has_one` and
+`test_a_cell_leaves_sides_out_sparsely_rather_than_truncating`, which
+fail the moment a file turns up whose writer states a zero.
+
+Also recorded here, and now **answered rather than open**: tables libmspub
+reports that never reach the package. It is 13 across the three
+newsletters, not the four in `1336` this item counted — 31 reported
+against 18 written, 4 in `1336`, 6 in `1337` and 3 in `1338`.
+
+They are dropped for being empty, by `_on_endTableObject`'s own rule: a
+grid whose every cell is empty and which has no fill and no stroke
+contributes nothing, exactly as an empty text frame does. Every one of the
+13 measures zero characters, no fill and no stroke, so the rule is doing
+what it says. The 3-column full-page grids with a 9pt gutter are the bulk
+of them, and dropping a layout grid that draws nothing is right — a
+converted page does not need the scaffolding the original was built on.
+
+What was wrong was the silence, and that is what changed. The count now
+reaches the report as one line per document rather than one per table,
+the `finish()` aggregation §2 asks for:
+
+```
+1336 kerkbode.pub   4 empty table(s) dropped: no text, no fill, no stroke
+1337 kerkbode.pub   6 empty table(s) dropped: no text, no fill, no stroke
+1338 kerkbode.pub   3 empty table(s) dropped: no text, no fill, no stroke
+```
 
 ---
 
@@ -553,6 +660,87 @@ decides, and two equally near is an ambiguity rather than a guess. The
 size cannot be *required* to match — the anchor measures the shape with
 its outline while libmspub reports the path inside it, 16pt apart on one
 shape in the corpus — so it only ever breaks a tie.
+
+---
+
+## 14. Page chunk order is not libmspub's page order — **done**
+
+Found while placing the WordArt of §10, and it is a bug in something else.
+`pubfile.read_structure` builds `FileStructure.pages` by walking the chunk
+references in order, and `convert._attribute_masters` reads that list
+**index by index against `document.pages`** — page *i* of the file taken to
+be page *i* of the event stream. The two are not in the same order.
+
+The evidence is the mapping §10 measures, which needs no assumption about
+order at all: match every Escher anchor against the items libmspub actually
+drew, and each page chunk identifies its own page. Across the corpus **519
+shapes matched and every page chunk resolved to exactly one page, with no
+chunk split across two.** For the three newsletters the result is a
+permutation rather than the identity:
+
+```
+1336 kerkbode.pub   chunk 266 -> page 2      chunk 335 -> page 0
+                    chunk 327 -> page 1      chunk 6150 -> page 3
+```
+
+Every single-page file in the corpus comes out as the identity, and so does
+`Cantico_dei_Cantici.pub`, which is why nothing ever looked wrong. The
+multi-page files are all mis-ordered: 25 of 26 settled chunks in `1336`, 29
+of 31 in `1337`, 28 of 28 in `1338`, and 4 of 5 in
+`MISSAL MARIANA E PEDRO.pub`.
+
+**What it costs.** Master attribution assigns each page the master its
+*wrongly indexed* page chunk applies. Where a document has one master that
+changes nothing — MISSAL is mis-ordered on 4 pages and gets the right master
+on all of them — but the newsletters alternate two, 263 and 294, and there
+the master really is wrong: **14 of 26 pages in `1336`, 14 of 31 in `1337`,
+16 of 28 in `1338`.** Each master holds a single shape, so the damage is one
+lifted item per page rather than a whole layout, and `_attribute_masters`'s
+own consistency check cannot catch it: with one shape per master, "pages
+sharing a master got the same shapes" is true either way.
+
+**Landed.** `_attribute_masters` now asks `_page_by_chunk` which chunk a
+page is and takes the master from that chunk, through the new
+`FileStructure.master_of_chunk`; `master_for(page_index)`, which was the
+bug, is gone. The ordering worry came to nothing: the mapping is built at
+the top of the master pass, before anything moves.
+
+**Pages the mapping cannot settle turned out to be the whole of the
+work,** and "fall back to no attribution" would have been a regression.
+MISSAL cannot settle 10 of its 15 pages — every page holds one full-page
+frame at the same spot, so no shape tells them apart — and dropping their
+attribution would have left 10 footers reading `#` instead of their page
+number. So a page no chunk identifies now falls back to whatever the
+chunks still *going spare* agree on, which is a fact about it rather than
+a guess, in two degrees:
+
+- **Which master, where they name the same one.** One spare chunk and one
+  spare page is the strongest case: it settles `1336`'s remaining page.
+- **How many shapes it holds, where they only agree on that.** Enough to
+  know how much of the page came from a master, and so to resolve the page
+  number — but not enough to lift, because two shapes alike enough to
+  share a signature can still belong to two different masters. Those items
+  stay flattened and are counted in a warning. This is MISSAL's case: both
+  its masters hold one shape, so all 15 pages keep their number and
+  nothing is attributed to the wrong master.
+
+`_pages_by_chunk` was split out of `_page_by_chunk` to hold the candidate
+sets the fallback needs, and it *intersects* each shape's matched pages
+rather than counting unanimous single matches — a shape libmspub drew
+nowhere constrains nothing and is passed over. Strictly stronger: it
+settles a chunk two of whose shapes each match several pages but only one
+page in common.
+
+**What it changed in the output: nothing, on this corpus.** Worth stating
+plainly, because it is not what §14 predicted. Every master in every
+corpus file holds exactly one shape, and in the newsletters that shape is
+the page-number footer — which stays on its page by design and is never
+lifted. **No file in the corpus lifts a single item onto a master**, so
+the wrong master identity had nothing to spend itself on: 14/14/16 pages
+now take a different master than before and every conversion is
+byte-for-byte what it was. This was a latent fix, and the only reason to
+have made it is the one §14 gave — that the next thing to trust the index
+would have inherited the bug.
 
 ---
 
