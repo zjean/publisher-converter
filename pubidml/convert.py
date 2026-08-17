@@ -1008,6 +1008,14 @@ def _wordart_frame(
                 gradient=gradient,
                 stroke=outline,
                 stroke_width=outline_width,
+                # WordArt states bold and italic on the shape rather than
+                # on the text, so they are lost with the shape unless they
+                # are put back here. Nearly every headline in the corpus
+                # is one or the other.
+                bold=art.bold,
+                italic=art.italic,
+                underline=art.underline,
+                strikethrough=art.strikethrough,
             )
         )
         frame.story.paragraphs.append(paragraph)

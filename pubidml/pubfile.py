@@ -68,6 +68,9 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
       (0xF011) repeats its own length before its contents.
 
         0xF004  shape container, holding
+          0xF00A  the shape itself, whose `instance` is its type: 136 is
+                    unwarped WordArt and 137-175 the warped presets
+                    (MS-ODRAW's MSO_SPT)
           0xF010  anchor, an (U16 id, U32 value) list:
                     0x2001-0x2004 xs, ys, xe, ye in EMU, measured from
                     the centre of the page (Coordinate::getXIn)
@@ -78,7 +81,12 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
                       0x0004  rotation, degrees in 16.16 fixed point
                       0x00C0  WordArt text, UTF-16LE
                       0x00C3  WordArt point size, 16.16 fixed point
+                      0x00C4  WordArt character spacing, 16.16 fixed
+                              point, as a multiple of normal
                       0x00C5  WordArt font name, UTF-16LE
+                      0x00FF  WordArt's sixteen booleans in one word:
+                              the low half their values, the high half
+                              which of them the file states at all
                       0x0180  fill type; 4-8 are the shaded ones
                       0x0181/0x0183  fill and fill-back colour
                       0x0197  shade list: U16 count, four bytes, then a
@@ -111,6 +119,7 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
 
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -166,6 +175,41 @@ _ESCHER_EXTRA_HEADER = {0xF010: 4, 0xF011: 4}
 _ANCHOR_SIDES = (0x2001, 0x2002, 0x2003, 0x2004)
 _PROP_ROTATION = 0x0004
 _PROP_WORDART_TEXT, _PROP_WORDART_SIZE, _PROP_WORDART_FONT = 0x00C0, 0x00C3, 0x00C5
+_PROP_WORDART_SPACING = 0x00C4
+
+# WordArt's character formatting, which is not the shape's: bold, italic
+# and the rest are booleans of its own, packed into one property. MS-ODRAW
+# writes a boolean set with the *highest* id in the group in the low bit,
+# so bit n is property 0xFF - n -- 0xFF strikethrough, 0xFE small caps,
+# 0xFD shadow, 0xFC underline, 0xFB italic, 0xFA bold, and the fitting
+# flags above those. The top half of the word says which bits the file
+# states at all; a bit it leaves out is not false, it is unstated.
+_PROP_WORDART_BOOLS = 0x00FF
+_WORDART_STRIKETHROUGH, _WORDART_UNDERLINE = 0x00, 0x03
+_WORDART_ITALIC, _WORDART_BOLD = 0x04, 0x05
+
+# The shape record, whose `instance` is the shape type. 136 is
+# msosptTextPlainText -- WordArt that is not warped at all, only fitted to
+# its band -- and 137 to 175 are the presets that bend the words. 47 of
+# the corpus's 48 WordArt shapes are 136, which is why a headline arriving
+# as straight text is usually no loss and worth saying apart from one that
+# is.
+_SHAPE_RECORD = 0xF00A
+_WORDART_PLAIN = 136
+_WORDART_WARPS = {
+    137: "stop sign", 138: "triangle up", 139: "triangle down",
+    140: "chevron up", 141: "chevron down", 142: "ring inside",
+    143: "ring outside", 144: "arch up curve", 145: "arch down curve",
+    146: "circle curve", 147: "button curve", 148: "arch up pour",
+    149: "arch down pour", 150: "circle pour", 151: "button pour",
+    152: "curve up", 153: "curve down", 154: "cascade up",
+    155: "cascade down", 156: "wave 1", 157: "wave 2", 158: "wave 3",
+    159: "wave 4", 160: "inflate", 161: "deflate", 162: "inflate bottom",
+    163: "deflate bottom", 164: "inflate top", 165: "deflate top",
+    166: "deflate inflate", 167: "deflate inflate deflate",
+    168: "fade right", 169: "fade left", 170: "fade up", 171: "fade down",
+    172: "slant up", 173: "slant down", 174: "can up", 175: "can down",
+}
 
 # A gradient fill, and the colours it ramps between. libmspub reads all of
 # these (EscherFieldIds.h) but builds the ramp from the shade list *alone*
@@ -196,8 +240,9 @@ _INTENSITY_BLACK_BASE, _INTENSITY_WHITE_BASE = 0x01, 0x02
 _FIXED_16_16 = 65536.0
 # WordArt stretches its glyphs to fill the shape, so the band is not a
 # fixed multiple of the size the file states: across the 39 sized shapes in
-# the corpus it runs 1.02 to 1.59, averaging this. Only ever used for a
-# shape that states no size at all, and reported when it is.
+# the corpus it runs 1.02 to 1.59, averaging this. Measured per line of the
+# headline, since a band holds as many lines as the words are set on. Only
+# ever used for a shape that states no size at all, and reported when it is.
 _BAND_TO_SIZE = 1.33
 
 # Sequence numbers libmspub hard-codes as dummy pages and never emits
@@ -259,6 +304,19 @@ class WordArt:
     rotation: float = 0.0
     #: True when the file stated no size and one was taken from the band.
     fitted: bool = False
+    #: WordArt's own character formatting, which is stated on the shape
+    #: rather than on the text and is therefore lost with it.
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+    strikethrough: bool = False
+    #: How the glyphs are bent, in the words Publisher's gallery uses, or
+    #: None for a shape that is not bent at all -- which is what nearly
+    #: every WordArt in a real document turns out to be.
+    warp: Optional[str] = None
+    #: Character spacing as a multiple of normal, stated only when it is
+    #: not normal. Publisher's gallery calls 1.2 loose and 0.9 tight.
+    spacing: Optional[float] = None
 
 
 @dataclass
@@ -790,13 +848,22 @@ def _read_wordart(data: bytes) -> List[WordArt]:
     return _wordart_shapes(escher) if escher else []
 
 
+def _wordart_boolean(value, bit: int) -> bool:
+    """One of WordArt's packed booleans, false unless the file states it."""
+    if not isinstance(value, int):
+        return False
+    return bool(value >> 16 & (1 << bit)) and bool(value & (1 << bit))
+
+
 def _wordart_shapes(escher: bytes) -> List[WordArt]:
     """The WordArt shapes in an Escher stream."""
     found: List[WordArt] = []
     for body, end in _escher_shapes(escher, 0, len(escher)):
         text = font = None
-        size = rotation = None
+        size = rotation = spacing = None
         box = None
+        shape_type = _WORDART_PLAIN
+        flags = None
         for _version, instance, rec_type, sub_body, sub_end in _escher_records(
             escher, body, end
         ):
@@ -806,8 +873,14 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
                 font = _escher_text(props.get(_PROP_WORDART_FONT)) or font
                 if isinstance(props.get(_PROP_WORDART_SIZE), int):
                     size = props[_PROP_WORDART_SIZE] / _FIXED_16_16
+                if isinstance(props.get(_PROP_WORDART_SPACING), int):
+                    spacing = props[_PROP_WORDART_SPACING] / _FIXED_16_16
                 if isinstance(props.get(_PROP_ROTATION), int):
                     rotation = _signed(props[_PROP_ROTATION]) / _FIXED_16_16
+                if isinstance(props.get(_PROP_WORDART_BOOLS), int):
+                    flags = props[_PROP_WORDART_BOOLS]
+            elif rec_type == _SHAPE_RECORD:
+                shape_type = instance
             elif rec_type == _CLIENT_ANCHOR:
                 anchor = _escher_values(escher, sub_body, sub_end)
                 if all(side in anchor for side in _ANCHOR_SIDES):
@@ -824,17 +897,28 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
         if width <= 0 or height <= 0:
             continue
         fitted = size is None
+        # A headline set on three lines stacks three of them into the same
+        # band, so it is a line's share of the band that stands for the
+        # size, not the whole of it. Sizing a three-line headline from the
+        # full band trebles it.
+        lines = len(re.split(r"\r\n|\r|\n", text)) or 1
         found.append(
             WordArt(
                 text=text,
                 font=font,
-                size=(height / _BAND_TO_SIZE) if fitted else size,
+                size=(height / lines / _BAND_TO_SIZE) if fitted else size,
                 centre_x=(box[0] + box[2]) / 2.0,
                 centre_y=(box[1] + box[3]) / 2.0,
                 width=width,
                 height=height,
                 rotation=rotation or 0.0,
                 fitted=fitted,
+                bold=_wordart_boolean(flags, _WORDART_BOLD),
+                italic=_wordart_boolean(flags, _WORDART_ITALIC),
+                underline=_wordart_boolean(flags, _WORDART_UNDERLINE),
+                strikethrough=_wordart_boolean(flags, _WORDART_STRIKETHROUGH),
+                warp=_WORDART_WARPS.get(shape_type),
+                spacing=spacing if spacing is not None and spacing != 1.0 else None,
             )
         )
     return found
