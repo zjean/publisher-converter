@@ -537,6 +537,37 @@ class ThreadDuplicateStoriesTest(unittest.TestCase):
         self.assertEqual(len([w for w in document.warnings if "too small" in w]), 1)
 
 
+class UnreadableStructureTest(unittest.TestCase):
+    """What the report says when the .pub's own structure will not read.
+
+    Every structure-driven pass returns early, which is right -- it must
+    never cost a conversion. But five of them going quiet at once used to
+    reach the operator as `ok`, the status meaning "nothing suspicious",
+    on a document whose page numbers all still read '#'.
+    """
+
+    def test_the_report_says_the_structure_could_not_be_read(self):
+        document = support.document(*support.text_frame("hello"))
+        convert._note_unreadable_structure(document, None)
+        self.assertEqual(len(document.warnings), 1)
+        said = document.warnings[0]
+        for expected in ("page-number", "master", "tab", "WordArt"):
+            self.assertIn(expected, said)
+
+    def test_a_structure_that_did_read_says_nothing(self):
+        document = support.document(*support.text_frame("hello"))
+        convert._note_unreadable_structure(document, pubfile.FileStructure())
+        self.assertEqual(document.warnings, [])
+
+    def test_the_file_no_longer_passes_as_nothing_suspicious(self):
+        document = support.document(*support.text_frame("hello"))
+        convert._note_unreadable_structure(document, None)
+        result = convert.Result(source=Path("x.pub"), output=Path("x.idml"), pages=1)
+        result.warnings = list(document.warnings)
+        convert._count_content(document, result)
+        self.assertTrue(result.needs_review)
+
+
 class FileStatedChainTest(unittest.TestCase):
     """Threading what the .pub says is linked, rather than what looks it.
 
@@ -758,10 +789,6 @@ class RealFileTest(unittest.TestCase):
                     self.assertTrue(result.error)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ContentCensusTest(unittest.TestCase):
     """The report has to count what the output actually carries.
 
@@ -847,3 +874,7 @@ class UnnamedLanguageTest(unittest.TestCase):
         document = self.document(None)
         convert._check_unnamed_languages(document)
         self.assertEqual(document.warnings, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

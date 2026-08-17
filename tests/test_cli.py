@@ -84,6 +84,111 @@ class ReportSurvivalTest(unittest.TestCase):
         self.assertEqual(code, 1)
 
 
+class SkippedFileTest(unittest.TestCase):
+    """A second run must not empty the report it wrote the first time.
+
+    Skipping a file that is already converted is right; leaving it out of
+    the report is not, because the report is written with "w" on every run.
+    A complete collection converted twice used to end up described by a
+    header row and nothing else.
+    """
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp())
+        self.source_dir = self.work / "in"
+        self.source_dir.mkdir()
+        for name in ("a.pub", "b.pub", "c.pub"):
+            (self.source_dir / name).write_bytes(b"stub")
+        self.output = self.work / "out"
+
+    def run_cli(self, *extra: str) -> int:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return cli.run(
+                [str(self.source_dir), "-o", str(self.output), "--no-log", *extra]
+            )
+
+    def _convert_for_real(self):
+        def stub(source, destination, **kwargs):
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            Path(destination).write_bytes(b"idml")
+            return convert.Result(
+                source=Path(source), output=Path(destination), pages=1, text_frames=1
+            )
+        return stub
+
+    def test_a_second_run_still_describes_every_file(self):
+        original = convert.convert
+        cli.convert.convert = self._convert_for_real()
+        try:
+            self.run_cli()
+            rows_first = read_report(self.output / "conversion-report.csv")
+            self.run_cli()
+            rows_second = read_report(self.output / "conversion-report.csv")
+        finally:
+            cli.convert.convert = original
+
+        self.assertEqual(len(rows_first), 3)
+        self.assertEqual(len(rows_second), 3, "the re-run emptied the report")
+        self.assertEqual(
+            {r["status"] for r in rows_second}, {"skipped"}
+        )
+
+    def test_a_skipped_row_still_names_the_output_it_stands_for(self):
+        original = convert.convert
+        cli.convert.convert = self._convert_for_real()
+        try:
+            self.run_cli()
+            self.run_cli()
+        finally:
+            cli.convert.convert = original
+        rows = read_report(self.output / "conversion-report.csv")
+        for row in rows:
+            self.assertTrue(row["output"].endswith(".idml"))
+
+    def test_a_skipped_file_is_not_counted_as_converted(self):
+        original = convert.convert
+        cli.convert.convert = self._convert_for_real()
+        try:
+            self.run_cli()
+            code = self.run_cli()
+        finally:
+            cli.convert.convert = original
+        self.assertEqual(code, 0)
+
+
+class ReportInjectionTest(unittest.TestCase):
+    """Font names come out of the .pub, and the report is opened in Excel."""
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp())
+        self.report = self.work / "report.csv"
+
+    def _row_for(self, **fields) -> dict:
+        result = convert.Result(
+            source=Path("a.pub"), output=Path("a.idml"), pages=1, text_frames=1,
+            **fields,
+        )
+        cli._write_report(self.report, [result])
+        return read_report(self.report)[0]
+
+    def test_a_font_name_cannot_become_a_formula(self):
+        # A font name is an arbitrary string from the file's font table, and
+        # a spreadsheet reads a leading '=' as code rather than text.
+        row = self._row_for(fonts=["=HYPERLINK(\"http://x\")"])
+        self.assertFalse(row["fonts"].startswith("="))
+        self.assertIn("HYPERLINK", row["fonts"])
+
+    def test_every_character_a_spreadsheet_treats_as_code_is_defused(self):
+        for lead in "=+-@\t\r":
+            with self.subTest(lead=lead):
+                row = self._row_for(warnings=[f"{lead}cmd|'/c calc'!A1"])
+                self.assertFalse(row["warnings"].startswith(lead))
+
+    def test_ordinary_text_is_left_exactly_as_it_was(self):
+        row = self._row_for(fonts=["Calibri", "Comic Sans MS"])
+        self.assertEqual(row["fonts"], "Calibri; Comic Sans MS")
+
+
 class CodepageValidationTest(unittest.TestCase):
     """A typo must be caught before an hour of conversion, not after."""
 

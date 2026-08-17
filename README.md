@@ -237,6 +237,12 @@ it, and moving one without the other loses the pictures.
 Start with the report, not the files: sort by `status`, deal with
 `failed` and `review` first, and trust the `ok` rows.
 
+**A `.idml` that exists is a `.idml` that finished.** The package is
+assembled beside its destination and moved onto it only once the archive
+and its images are both whole, so a run stopped by a full disk or a
+killed process leaves nothing behind — rather than a truncated file that
+every later run would skip as already converted.
+
 ## Logging
 
 Every run writes a diagnostic log, so a batch that misbehaves on another
@@ -388,9 +394,36 @@ needs, and a status:
 | `ok` | converted, nothing suspicious |
 | `review` | converted, but something was approximated or dropped — see `warnings` |
 | `failed` | not converted — see `error` |
+| `skipped` | passed over: the `.idml` was already there. Use `--force` to redo |
 
 Sort by `status`, then by `characters` descending, and you have a triage
 queue: the files worth a human's attention first.
+
+**A skipped file still gets a row**, and that is what makes the report
+survive being run twice. The CSV is rewritten from scratch on every run,
+so a file left out of the results is a file left out of the report — and
+a collection converted once and then run again used to come back
+described by a header row and nothing else, with the only way to
+regenerate it a full `--force` re-conversion.
+
+Two more things the report is careful about, both of which used to pass
+as `ok`:
+
+- **A `.pub` whose own structure cannot be read says so.** Every pass that
+  reads the file directly returns quietly in that case, which is the
+  contract — recovery is an improvement on the output, never a
+  prerequisite. But five of them going quiet together is not nothing: the
+  page-number fields stay `#`, the master content stays copied onto every
+  page, and the cell insets, tab stops, gradient ramps and WordArt are all
+  left as libmspub reported them. That is now one warning naming all of
+  it, so the file lands in `review` rather than in the bucket that means
+  "nothing suspicious".
+- **Nothing in a cell can be read as a formula.** Font names and locale
+  tags come out of the `.pub` verbatim and the report is meant to be
+  opened in a spreadsheet, so a cell starting `=`, `+`, `-`, `@`, a tab or
+  a carriage return is prefixed with an apostrophe. CSV quoting does not
+  cover this: it keeps the file parseable, and the spreadsheet still
+  evaluates what it parses.
 
 ## Known limitations
 

@@ -67,6 +67,13 @@ class Result:
     fonts: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    #: True for a file passed over because its .idml was already there. It
+    #: still gets a Result so that it reaches the report: the CSV is written
+    #: from scratch on every run, so a file absent from the results is a file
+    #: absent from the report -- and a collection converted once and then run
+    #: again would otherwise be described by a header row and nothing else.
+    #: None of the counts mean anything on one of these; nothing was read.
+    skipped: bool = False
 
     @property
     def ok(self) -> bool:
@@ -968,6 +975,30 @@ def _measured_chains(
     ]
 
 
+def _note_unreadable_structure(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> None:
+    """Say so when the .pub's own structure could not be read at all.
+
+    Every pass that reads the file directly returns early on a None
+    structure, which is the contract: recovery is an improvement on the
+    output, never a prerequisite for one. But five of them going quiet
+    together is not nothing, and it used to reach the operator as `ok` --
+    the status that means "converted, nothing suspicious" -- on a document
+    with a literal '#' on every page. What is lost is worth naming, since
+    a reader who knows can fix a footer by hand and a reader who does not
+    will trust the page numbers.
+    """
+    if structure is not None:
+        return
+    document.warnings.append(
+        "the .pub's own structure could not be read, so nothing that depends "
+        "on it was applied: page-number fields stay '#', master content stays "
+        "copied onto every page, and cell insets, tab stops, gradient ramps "
+        "and WordArt headlines are all left as libmspub reported them"
+    )
+
+
 def _thread_duplicate_stories(
     document: model.Document, structure: Optional["pubfile.FileStructure"] = None
 ) -> None:
@@ -1700,6 +1731,7 @@ def _convert(
 
     textrepair.repair_document(document, codepage)
     structure = pubfile.read_structure(source)
+    _note_unreadable_structure(document, structure)
     _apply_master_pages(document, structure)
     _apply_cell_insets(document, structure)
     # Before the WordArt pass, which takes a shape's paint as it finds it.

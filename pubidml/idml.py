@@ -30,6 +30,8 @@ centre rather than a corner.
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import replace
@@ -379,25 +381,52 @@ class IdmlWriter:
     # -- public API -------------------------------------------------------
 
     def write(self, idml_path: Path) -> None:
+        """Build the package, then put it where it belongs -- in that order.
+
+        The archive is written beside its destination and moved onto it
+        only once it is whole, because the batch driver decides a file is
+        already converted by asking whether the .idml exists. A package
+        left half-written by a full disk or a killed process would not
+        merely be broken: it would be skipped for ever after, and its
+        failed row overwritten by the next run's report.
+
+        `os.replace` is atomic within a directory on both Windows and
+        POSIX, which is why the temporary sits next to the destination
+        rather than in the system temp directory.
+        """
         idml_path = Path(idml_path)
         self._build()
 
         idml_path.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(idml_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            # The mimetype entry must be first and uncompressed.
-            archive.writestr(
-                zipfile.ZipInfo("mimetype"),
-                "application/vnd.adobe.indesign-idml-package",
-                compress_type=zipfile.ZIP_STORED,
-            )
-            for name, payload in self._parts.items():
-                archive.writestr(name, payload)
+        handle, temporary_name = tempfile.mkstemp(
+            dir=idml_path.parent, prefix=f".{idml_path.name}.", suffix=".part"
+        )
+        os.close(handle)
+        temporary = Path(temporary_name)
+        try:
+            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+                # The mimetype entry must be first and uncompressed.
+                archive.writestr(
+                    zipfile.ZipInfo("mimetype"),
+                    "application/vnd.adobe.indesign-idml-package",
+                    compress_type=zipfile.ZIP_STORED,
+                )
+                for name, payload in self._parts.items():
+                    archive.writestr(name, payload)
 
-        if self.image_files:
-            image_root = idml_path.parent / self.image_dir_name
-            image_root.mkdir(parents=True, exist_ok=True)
-            for relative_name, payload in self.image_files:
-                (idml_path.parent / relative_name).write_bytes(payload)
+            # Before the move, not after: a package whose pictures are
+            # missing is as unfinished as one whose parts are, and the
+            # move is what says the whole thing arrived.
+            if self.image_files:
+                image_root = idml_path.parent / self.image_dir_name
+                image_root.mkdir(parents=True, exist_ok=True)
+                for relative_name, payload in self.image_files:
+                    (idml_path.parent / relative_name).write_bytes(payload)
+
+            os.replace(temporary, idml_path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
 
     # -- assembly ---------------------------------------------------------
 

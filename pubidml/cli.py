@@ -74,6 +74,8 @@ def _force_utf8_console() -> None:
 def _status(result: convert.Result) -> str:
     if not result.ok:
         return "failed"
+    if result.skipped:
+        return "skipped"
     if result.needs_review:
         return "review"
     return "ok"
@@ -181,15 +183,20 @@ def run(argv=None) -> int:
     report_path = args.report or (output_root / "conversion-report.csv")
 
     jobs = []
-    skipped = 0
+    # Skipped files are carried as results, not just counted, so that the
+    # report keeps describing the whole tree that was walked rather than
+    # only the part this particular run happened to redo.
+    results: List[convert.Result] = []
     for source in sources:
         destination = destination_for(source, args.source, output_root)
         if destination.exists() and not args.force:
-            skipped += 1
+            results.append(convert.Result(
+                source=source, output=destination, skipped=True
+            ))
             continue
         jobs.append((source, destination))
 
-    results: List[convert.Result] = []
+    skipped = len(results)
     interrupted = False
     try:
         if jobs:
@@ -221,7 +228,9 @@ def run(argv=None) -> int:
                         _print_result(result)
     except KeyboardInterrupt:
         interrupted = True
-        log.warning("interrupted after %d of %d file(s)", len(results), len(jobs))
+        log.warning(
+            "interrupted after %d of %d file(s)", len(results) - skipped, len(jobs)
+        )
     finally:
         # The report is the point of the tool at collection scale, so it is
         # written even when the run ends badly: an interrupted or crashed
@@ -247,7 +256,8 @@ def run(argv=None) -> int:
     if skipped:
         print(f"  {skipped} skipped (already converted; use --force to redo)")
     if interrupted:
-        print(f"  interrupted: {len(jobs) - len(results)} file(s) not attempted")
+        attempted = len(results) - skipped
+        print(f"  interrupted: {len(jobs) - attempted} file(s) not attempted")
     print(f"Report: {report_path}")
     if log_path:
         print(f"Log:    {log_path}")
@@ -265,7 +275,9 @@ def run(argv=None) -> int:
 
 def _print_result(result: convert.Result) -> None:
     status = _status(result)
-    marker = {"ok": "  ok  ", "review": "review", "failed": "FAILED"}[status]
+    marker = {
+        "ok": "  ok  ", "review": "review", "failed": "FAILED", "skipped": " skip ",
+    }[status]
     name = result.source.name
     if status == "failed":
         print(f"[{marker}] {name}: {result.error}")
@@ -279,6 +291,20 @@ def _print_result(result: convert.Result) -> None:
         print(f"           ! {warning}")
 
 
+def _csv_safe(value: str) -> str:
+    """A cell a spreadsheet cannot mistake for a formula.
+
+    Font names, locale tags and libmspub's own diagnostics all come out of
+    the .pub verbatim, and the report exists to be opened in Excel or
+    LibreOffice -- both of which read a leading '=', '+', '-' or '@' as
+    code rather than text. csv quoting does not help: it keeps the file
+    parseable, and the spreadsheet still evaluates what it parses.
+    """
+    if value and value[0] in "=+-@\t\r":
+        return "'" + value
+    return value
+
+
 def _write_report(path: Path, results: List[convert.Result]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -287,17 +313,17 @@ def _write_report(path: Path, results: List[convert.Result]) -> None:
         for result in results:
             writer.writerow(
                 [
-                    str(result.source),
-                    str(result.output) if result.output else "",
+                    _csv_safe(str(result.source)),
+                    _csv_safe(str(result.output) if result.output else ""),
                     _status(result),
                     result.pages,
                     result.text_frames,
                     result.images,
                     result.shapes,
                     result.characters,
-                    "; ".join(result.fonts),
-                    "; ".join(result.warnings),
-                    result.error or "",
+                    _csv_safe("; ".join(result.fonts)),
+                    _csv_safe("; ".join(result.warnings)),
+                    _csv_safe(result.error or ""),
                 ]
             )
 

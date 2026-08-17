@@ -15,6 +15,92 @@ from . import support
 from .support import event
 
 
+class AtomicWriteTest(unittest.TestCase):
+    """A write that fails must leave nothing behind that looks finished.
+
+    The batch driver decides a file is already converted by asking whether
+    the .idml exists, so a package half-written by a full disk or a killed
+    process is not just broken -- it is permanently skipped, and its failed
+    row is overwritten by the next run's report.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.destination = self.root / "doc.idml"
+        self.document = support.document(*support.text_frame("hello"))
+
+    def _writer(self, **kwargs) -> idml.IdmlWriter:
+        return idml.IdmlWriter(
+            self.document, image_dir_name="doc_images", **kwargs
+        )
+
+    def test_a_failure_partway_through_leaves_no_destination(self):
+        writer = self._writer()
+        original = writer._parts
+
+        class Exploding(dict):
+            def items(self):
+                yield "designmap.xml", b"<xml/>"
+                raise OSError("no space left on device")
+
+        writer._build()
+        writer._parts = Exploding(original)
+        with self.assertRaises(OSError):
+            writer.write(self.destination)
+        self.assertFalse(
+            self.destination.exists(),
+            "a half-written package was left where a finished one goes",
+        )
+
+    def test_a_failure_does_not_disturb_the_package_already_there(self):
+        self._writer().write(self.destination)
+        good = self.destination.read_bytes()
+
+        writer = self._writer()
+        writer._build()
+        parts = dict(writer._parts)
+
+        class Exploding(dict):
+            def items(self):
+                yield "designmap.xml", b"<xml/>"
+                raise OSError("disk full")
+
+        writer._parts = Exploding(parts)
+        with self.assertRaises(OSError):
+            writer.write(self.destination)
+        self.assertEqual(self.destination.read_bytes(), good)
+
+    def test_the_temporary_file_is_not_left_lying_around(self):
+        writer = self._writer()
+        writer._build()
+
+        class Exploding(dict):
+            def items(self):
+                raise OSError("disk full")
+
+        writer._parts = Exploding()
+        with self.assertRaises(OSError):
+            writer.write(self.destination)
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_an_ordinary_write_still_lands_where_it_should(self):
+        self._writer().write(self.destination)
+        self.assertTrue(self.destination.exists())
+        with zipfile.ZipFile(self.destination) as archive:
+            self.assertEqual(archive.namelist()[0], "mimetype")
+
+    def test_images_are_written_before_the_package_is_declared_finished(self):
+        document = support.document(*support.text_frame("hello"))
+        document.pages[0].items.append(
+            model.Image(data=b"\x89PNG\r\n\x1a\n", mime_type="image/png",
+                        x=0.0, y=0.0, width=72.0, height=72.0)
+        )
+        writer = idml.IdmlWriter(document, image_dir_name="doc_images")
+        writer.write(self.destination)
+        written = sorted(p.name for p in (self.root / "doc_images").iterdir())
+        self.assertTrue(written, "the image sidecar was not written")
+
+
 def write_package(document: model.Document, name: str = "doc") -> Path:
     """Write a package into a temp directory and return the .idml path."""
     root = Path(tempfile.mkdtemp())
@@ -738,10 +824,6 @@ class ThreadedStoryTest(unittest.TestCase):
         for frame in frames:
             self.assertEqual(frame.get("PreviousTextFrame"), "n")
             self.assertEqual(frame.get("NextTextFrame"), "n")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class GradientFillTest(unittest.TestCase):
@@ -1539,3 +1621,7 @@ class LanguageOutputTest(unittest.TestCase):
         designmap, _story = self._package("nl-NL")
         tags = [child.tag for child in designmap]
         self.assertEqual(tags[0], "Language")
+
+
+if __name__ == "__main__":
+    unittest.main()
