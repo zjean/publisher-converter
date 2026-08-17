@@ -668,7 +668,18 @@ def _restore_gradient_ramps(
                 # A flattened fill never became a Gradient at all, so its
                 # angle went with the ramp; the file states it, and
                 # `pubfile` hands it over the way libmspub would have.
-                angle=model._fold_angle(found.angle),
+                #
+                # Plus the shape's own turn, because Publisher turns a shape
+                # and its shade together and libmspub reports the two
+                # apart: a polygon's turn goes into the order of its points,
+                # where the ramp cannot see it, which leaves every band in a
+                # newsletter shading the wrong way up. Where the reader
+                # turns the object itself the ramp goes round with it, so
+                # what the angle owes is the turn the item is *not* already
+                # carrying.
+                angle=model._fold_angle(
+                    found.angle + found.rotation - item.rotation
+                ),
                 radial=(
                     item.style.gradient.radial
                     if item.style.gradient is not None else False
@@ -1199,6 +1210,7 @@ def _recover_wordart(
     )
 
     spaced = sum(1 for art_id in groups if by_id[art_id].spacing)
+    wrapping = sum(1 for art_id in groups if by_id[art_id].wraps_text)
 
     if recovered:
         detail = [
@@ -1211,13 +1223,21 @@ def _recover_wordart(
         ]
         if fitted:
             detail.append(
-                f"{fitted} of them sized from that band because the file states none"
+                f"{fitted} of them sized to fill that band because the file "
+                f"states no size, which is what WordArt does with the size it "
+                f"does state — it stretches the glyphs to the shape"
             )
         if spaced:
             detail.append(
                 f"{spaced} of them set in WordArt's own character spacing, which "
                 f"it states as a multiple and IDML counts in ems, so the "
                 f"tracking on those is close rather than exact"
+            )
+        if wrapping:
+            detail.append(
+                f"{wrapping} of them float over copy that flows around them "
+                f"— a dropped initial does — so the text near those moves to "
+                f"make the same room the file says it kept"
             )
         if repainted:
             detail.append(
@@ -1488,6 +1508,17 @@ def _wordart_frame(
         # left and top would hang the headline off one corner with the
         # space the stretch used to fill left empty beside it.
         vertical_align="center",
+        # A headline is a shape floating over the page rather than a box
+        # the layout made room for, and the one place that shows is a
+        # dropped initial: its band overlaps the column it begins, and the
+        # paragraph is not indented to make room, so unasked the letter is
+        # drawn straight through the first lines of its own paragraph.
+        # libmspub reports no wrap for anything, and asking for one on
+        # every headline is worse than asking for none -- a band that
+        # merely clips the corner of a date box would push the date out of
+        # it. So it is taken from the file, per shape, and the shapes that
+        # state nothing about wrapping are left as they arrived.
+        wrap_text=art.wraps_text,
         # Only the shadow carries over: a fill here would paint a solid
         # block of the text colour across the band.
         style=model.GraphicStyle(shadow=first(lambda s: s.shadow)),
@@ -1496,7 +1527,19 @@ def _wordart_frame(
     # break as the same CR LF Publisher uses in body text; one paragraph
     # per line is what that means.
     for line in lines:
-        paragraph = model.Paragraph(align="center")
+        paragraph = model.Paragraph(
+            align="center",
+            # WordArt stretches its glyphs to the band, so a headline is set
+            # at the size that fills it -- and type that size has a line box
+            # taller than the band it inks. A line taller than its frame is
+            # overset text, which a reader hides rather than draws, and the
+            # frame cannot simply grow: it is what the copy flows around, so
+            # growing it would indent the paragraph further than Publisher
+            # did. What is stated instead is the line: the band's own share
+            # of its height, one share per line the words are set on, which
+            # is exactly the room Publisher gave them.
+            line_spacing_pt=art.height / max(len(lines), 1),
+        )
         paragraph.spans.append(
             model.Span(
                 text=model.clean_text(line),

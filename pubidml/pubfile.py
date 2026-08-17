@@ -216,6 +216,12 @@ _ANCHOR_SIDES = (0x2001, 0x2002, 0x2003, 0x2004)
 _PROP_ROTATION = 0x0004
 _PROP_WORDART_TEXT, _PROP_WORDART_SIZE, _PROP_WORDART_FONT = 0x00C0, 0x00C3, 0x00C5
 _PROP_WORDART_SPACING = 0x00C4
+# How far text kept clear of a shape, one property per side. Only a shape
+# whose wrapping is on has any of them: a distance is the room the wrap
+# leaves, so there is nothing to state without one. That is the only thing
+# in the file that separates a headline the copy flows around from one it
+# runs under, and libmspub reports neither.
+_PROP_WRAP_DISTANCES = (0x0384, 0x0385, 0x0386, 0x0387)
 
 # WordArt's character formatting, which is not the shape's: bold, italic
 # and the rest are booleans of its own, packed into one property. MS-ODRAW
@@ -278,12 +284,26 @@ _COLOR_FROM_PALETTE = 0x08
 _COLOR_CHANGE_INTENSITY = 0x10
 _INTENSITY_BLACK_BASE, _INTENSITY_WHITE_BASE = 0x01, 0x02
 _FIXED_16_16 = 65536.0
-# WordArt stretches its glyphs to fill the shape, so the band is not a
-# fixed multiple of the size the file states: across the 39 sized shapes in
-# the corpus it runs 1.02 to 1.59, averaging this. Measured per line of the
-# headline, since a band holds as many lines as the words are set on. Only
-# ever used for a shape that states no size at all, and reported when it is.
-_BAND_TO_SIZE = 1.33
+# WordArt stretches its glyphs to fill the shape -- every shape in the
+# corpus states the stretch flag -- so the band is the glyphs, and a shape
+# that states no size at all needs one that fills it.
+#
+# How much of an em a line of headline type inks, ascender to baseline:
+# measured off two rendered headlines, Monotype Corsiva at 20 pt inking
+# 14.1 pt and a substituted Pristina at 30.1 pt inking 20.8 pt. Publisher's
+# own page is the check on the result -- a dropped initial there inks 39.7
+# pt of a 40.1 pt band, and this puts it at 40.1. A headline with
+# descenders inks more of its em than this and comes out a little large;
+# nothing in the corpus states a size for one.
+_BAND_INK_PER_EM = 0.70
+# How wide an average headline glyph is, in ems. The width matters because
+# WordArt condenses glyphs to fit a band and straight text cannot, so a
+# headline sized by its band's height alone would overflow the band, wrap,
+# and be hidden as overset text -- the one failure worth erring away from.
+# 'Meditatie' set at 20 pt inks 95.5 pt across nine glyphs, which is 0.53;
+# this rounds that up, so a headline the width decides lands inside its
+# band rather than exactly on the edge of it.
+_BAND_EM_PER_GLYPH = 0.55
 
 # Sequence numbers libmspub hard-codes as dummy pages and never emits
 # (MSPUBParser::getPageTypeBySeqNum).
@@ -377,6 +397,9 @@ class WordArt:
     #: Character spacing as a multiple of normal, stated only when it is
     #: not normal. Publisher's gallery calls 1.2 loose and 0.9 tight.
     spacing: Optional[float] = None
+    #: True when the file states how far text keeps clear of this shape,
+    #: which only a shape the copy flows around has anything to say about.
+    wraps_text: bool = False
     #: This shape's seqnum, the number its page chunk lists it by. The only
     #: way to the page a shape libmspub never reported belongs to.
     shape_seq: Optional[int] = None
@@ -409,6 +432,9 @@ class ShapeGradient:
     stops: List[Tuple[float, tuple]] = field(default_factory=list)
     #: Degrees, as libmspub would have reported them in `draw:angle`.
     angle: float = 0.0
+    #: The turn the shape itself is stated at, which its shade turns with.
+    #: Stated as it was made, so a band turned over twice states -540.
+    rotation: float = 0.0
     centre_x: float = 0.0
     centre_y: float = 0.0
     width: float = 0.0
@@ -1056,6 +1082,30 @@ def _wordart_boolean(value, bit: int) -> bool:
     return bool(value >> 16 & (1 << bit)) and bool(value & (1 << bit))
 
 
+def _band_size(width: float, height: float, text: str) -> float:
+    """The point size that fills a band, for a shape stating none.
+
+    WordArt sets the words and then stretches them to the shape, so the
+    band is not a box the words sit inside -- it *is* the words, and the
+    size that fills it is the size Publisher drew. What the file leaves out
+    has to be worked back from that.
+
+    Both directions bind. A band holds as many lines as the words are set
+    on, so it is a line's share of the height that stands for the size --
+    sizing a three-line headline from the whole band trebles it -- and the
+    longest line is what the width has to hold. Publisher condenses glyphs
+    to fit a band and straight text cannot, so a headline sized by height
+    alone would overflow its band and wrap, which is worse than a headline
+    slightly small.
+    """
+    lines = re.split(r"\r\n|\r|\n", text) or [text]
+    longest = max((len(line) for line in lines), default=1) or 1
+    return min(
+        height / len(lines) / _BAND_INK_PER_EM,
+        width / (longest * _BAND_EM_PER_GLYPH),
+    )
+
+
 def _wordart_shapes(escher: bytes) -> List[WordArt]:
     """The WordArt shapes in an Escher stream."""
     found: List[WordArt] = []
@@ -1065,6 +1115,7 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
         box = None
         shape_type = _WORDART_PLAIN
         flags = shape_seq = None
+        wraps_text = False
         for _version, instance, rec_type, sub_body, sub_end in _escher_records(
             escher, body, end
         ):
@@ -1080,6 +1131,9 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
                     rotation = _signed(props[_PROP_ROTATION]) / _FIXED_16_16
                 if isinstance(props.get(_PROP_WORDART_BOOLS), int):
                     flags = props[_PROP_WORDART_BOOLS]
+                wraps_text = wraps_text or any(
+                    side in props for side in _PROP_WRAP_DISTANCES
+                )
             elif rec_type == _SHAPE_RECORD:
                 shape_type = instance
             elif rec_type == _CLIENT_DATA:
@@ -1102,16 +1156,11 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
         if width <= 0 or height <= 0:
             continue
         fitted = size is None
-        # A headline set on three lines stacks three of them into the same
-        # band, so it is a line's share of the band that stands for the
-        # size, not the whole of it. Sizing a three-line headline from the
-        # full band trebles it.
-        lines = len(re.split(r"\r\n|\r|\n", text)) or 1
         found.append(
             WordArt(
                 text=text,
                 font=font,
-                size=(height / lines / _BAND_TO_SIZE) if fitted else size,
+                size=_band_size(width, height, text) if fitted else size,
                 centre_x=(box[0] + box[2]) / 2.0,
                 centre_y=(box[1] + box[3]) / 2.0,
                 width=width,
@@ -1124,6 +1173,7 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
                 strikethrough=_wordart_boolean(flags, _WORDART_STRIKETHROUGH),
                 warp=_WORDART_WARPS.get(shape_type),
                 spacing=spacing if spacing is not None and spacing != 1.0 else None,
+                wraps_text=wraps_text,
                 shape_seq=shape_seq,
             )
         )
@@ -1340,6 +1390,14 @@ def _read_gradients(data: bytes, palette: List[tuple]) -> List[ShapeGradient]:
         found.append(
             ShapeGradient(
                 angle=_gradient_angle(props),
+                # A shape's shade turns with the shape. libmspub reports the
+                # two apart, and for a polygon the turn goes into the order
+                # of the points, where a ramp cannot see it -- so it is
+                # carried here and put back on the angle.
+                rotation=(
+                    _signed(props[_PROP_ROTATION]) / _FIXED_16_16
+                    if isinstance(props.get(_PROP_ROTATION), int) else 0.0
+                ),
                 stops=stops,
                 centre_x=(box[0] + box[2]) / 2.0,
                 centre_y=(box[1] + box[3]) / 2.0,

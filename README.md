@@ -203,7 +203,7 @@ The same flags apply on macOS; only the default paths differ.
 | `--force` | reconvert files whose `.idml` already exists. Without it, those are skipped, so an interrupted run resumes cheaply |
 | `--report PATH` | where to write the CSV. Default `conversion-report.csv` inside the output folder |
 | `--codepage MODE` | `auto` (default) detects and repairs non-Latin text, `none` disables repair, or force a codec such as `cp1251`, `cp932` |
-| `--no-image-wrap` | keep the source's exact stacking instead of flowing text around images. Images will then cover text |
+| `--no-image-wrap` | keep the source's exact stacking instead of flowing text around images and around the headlines the file says it flowed around. Both will then cover text |
 | `--facing-pages` | lay the pages out as reader's spreads — `1 \| 2-3 \| 4-5` — instead of singly. Use it for a booklet; libmspub never reports whether the publication was set up facing, so it has to be asked for |
 | `--log-file PATH` | write the log here instead of the per-user log folder (`%LOCALAPPDATA%\pub2idml\logs` on Windows, `~/Library/Logs/pub2idml` on macOS) |
 | `--no-log` | do not write a log file |
@@ -494,13 +494,31 @@ These are real and deliberate, not bugs to be surprised by later.
   headline, it *is* the headline, and the report now says so instead of
   telling every reader that fifteen headlines "may need restyling". The
   one bent shape in the corpus — a *button curve* — is named by the shape
-  Publisher asked for, so whoever redraws it knows what to draw. Two
-  shapes state no point size, because WordArt fits the glyphs to the shape
-  rather than setting a size, and those are sized from the band by the
-  ratio the sized shapes measure (1.33, spread 1.02 to 1.59) — measured
-  per line, since a band holds as many lines as the words are set on, and
-  sizing a three-line headline from the whole band trebles it. The warning
-  says that out loud too.
+  Publisher asked for, so whoever redraws it knows what to draw.
+
+  **A shape that states no point size is sized to fill its band**, because
+  that is what WordArt does with the size a shape *does* state: every
+  WordArt shape in the corpus states the stretch flag, which is the file
+  saying the glyphs are stretched to the shape. Measuring Publisher's own
+  page settles it — a dropped initial there inks 39.7 pt of a 40.1 pt band,
+  and its headline 27.6 pt of a 28.7 pt one. So the size is worked back
+  from the band, a line's share of its height at a time, since a band holds
+  as many lines as the words are set on and sizing a three-line headline
+  from the whole band trebles it. The width binds too: Publisher condenses
+  glyphs to fit a band and straight text cannot, so a headline sized by
+  height alone overflows and wraps, which is worse than one slightly small.
+  The earlier rule averaged the *stated* sizes against their bands (1.33,
+  spread 1.02 to 1.59) — a measure of how big a box someone dragged, not of
+  how big the letters came out, and it left a dropped initial at half the
+  height Publisher drew it. The warning says which headlines this sized.
+
+  What is *not* done is override a size the file does state. Publisher
+  stretches those to their bands as well — the *Meditatie* headline above
+  is stated at 20 pt and drawn at about 38 — so a stated size is a floor
+  rather than the truth, and matching it would mean reproducing WordArt's
+  horizontal condensation as well as its scale. That is a change to every
+  headline in a document rather than to the two the file leaves open, so it
+  waits for its own verification pass.
 
   Because WordArt fits its glyphs to the shape, the band is not a box the
   words sit somewhere inside — it *is* the words. So the text is centred
@@ -775,14 +793,19 @@ These are real and deliberate, not bugs to be surprised by later.
   flattened to its first stop again, with the gold end absent from the
   package altogether.
 
-  A run needs its ramp's *geometry* stated as well as the ramp. A shape
-  takes that from its own bounds, but a run has no bounds of its own and
-  the default is a length of nothing, which paints everything before the
-  start point in the first colour and everything after it in the last: the
-  masthead came out brown for its left half and gold for its right, with a
-  hard edge down the middle. The band the headline was stretched into is
-  the distance the ramp was meant to run over, and that is what is
-  written, projected onto the ramp's own angle.
+  **A ramp needs its *geometry* stated, on a shape as much as on a run.**
+  An angle says which way the ramp runs, not how far, and the default is a
+  length of nothing — which paints everything before the start point in
+  the first colour and everything after it in the last. The masthead came
+  out brown for its left half and gold for its right, with a hard edge
+  down the middle, and so did every shape: a banner reading white → brown
+  was white for the half of it right of centre and brown for the half left
+  of it, and the cream panel behind an article was cream to its middle and
+  bare paper after it. Nothing about that says "gradient", which is why it
+  read as a fill that had gone wrong rather than as a ramp with no room.
+  The box is the distance the ramp was meant to run over — the shape's own
+  bounds, or for a headline the band it was stretched into — and that is
+  what is written, projected onto the ramp's own angle.
 
   **A ramp is given both its ends.** Publisher's often occupy only part of
   their range, 32 → 49 or 3 → 69, and what happens outside that is the
@@ -891,12 +914,18 @@ These are real and deliberate, not bugs to be surprised by later.
   layout, so the frame is left as reported and the file is flagged
   `review` with the character count and frame size, ready to be resized
   by hand.
-- **Text wrap is inferred, not read.** libmspub exposes no wrap data at
-  all, and images arrive after the text in z-order, so without help they
-  paint over the copy. Images therefore get a bounding-box wrap by
-  default, which is what Publisher layouts almost always intend.
-  Page-sized images are treated as backgrounds and left unwrapped. Use
-  `--no-image-wrap` for exact source stacking instead.
+- **Text wrap is inferred for images, and read from the file for
+  headlines.** libmspub exposes no wrap data at all, and images arrive
+  after the text in z-order, so without help they paint over the copy.
+  Images therefore get a bounding-box wrap by default, which is what
+  Publisher layouts almost always intend. Page-sized images are treated as
+  backgrounds and left unwrapped. A recovered WordArt headline is not
+  guessed at the same way: giving every headline a wrap moves text that
+  Publisher never moved — a band clipping the corner of a date box would
+  push the date out of it — so the wrap is taken per shape from the .pub,
+  which states how far the text kept clear of a shape only where the wrap
+  was on. That is what puts a dropped initial beside its paragraph instead
+  of through it. Use `--no-image-wrap` for exact source stacking instead.
 
 ## Verification status
 

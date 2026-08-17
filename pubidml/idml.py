@@ -229,6 +229,25 @@ def _content_matrix(rotation_deg: float, width: float, height: float) -> str:
     return f"{fmt(cos)} {fmt(sin)} {fmt(-sin)} {fmt(cos)} {fmt(tx)} {fmt(ty)}"
 
 
+def _ramp_angle(angle_deg: float) -> float:
+    """One ramp's angle, turned from Publisher's convention into IDML's.
+
+    The two sit a quarter turn apart. Publisher's unturned ramp runs up the
+    shape -- Office calls that a *horizontal* shade, because the bands of
+    colour lie horizontally -- and libmspub reports it as an angle of
+    nothing; IDML's nothing runs left to right. Copying the number across
+    turned every ramp in the corpus a quarter turn, which is subtle enough
+    to read as a colour mistake rather than a rotation: the panel Publisher
+    shades cream at the top down to white came out cream at the left.
+
+    Only the quarter turn is verified. Every angle the corpus states is a
+    half turn or none, so which way a ramp between those turns is not
+    something these files can settle, and the sign is left as libmspub
+    reports it rather than guessed at.
+    """
+    return model._fold_angle(angle_deg + 90.0)
+
+
 def _ramp_geometry(angle_deg: float, width: float, height: float):
     """Where a gradient starts and how far it runs across a box.
 
@@ -998,8 +1017,18 @@ class IdmlWriter:
         }
         gradient = item.style.gradient
         if gradient is not None and gradient in self.gradient_ids:
-            # Publisher's angle is degrees, the same convention IDML uses.
-            attributes["GradientFillAngle"] = fmt(gradient.angle)
+            angle = _ramp_angle(gradient.angle)
+            attributes["GradientFillAngle"] = fmt(angle)
+            # An angle says which way the ramp runs, not how far, and a
+            # ramp with no distance to run is not a ramp: everything before
+            # its start point takes the first stop and everything after it
+            # the last. Left unstated the distance is nothing, so a shape
+            # came out as two flat halves meeting in a hard edge down its
+            # middle -- the fade over the whole shape is what the distance
+            # is for.
+            start, length = _ramp_geometry(angle, item.width, item.height)
+            attributes["GradientFillStart"] = start
+            attributes["GradientFillLength"] = fmt(length)
         if item.style.stroke is not None:
             attributes["AppliedStrokeStyle"] = "StrokeStyle/$ID/Solid"
         return attributes
@@ -1162,6 +1191,11 @@ class IdmlWriter:
             # it does not overlap InsetSpacing above.
             preference["TextColumnGutter"] = fmt(frame.column_gap)
         ET.SubElement(element, "TextFramePreference", preference)
+        # The same switch a placed image's wrap answers to: it is the one
+        # question, whether placement or legibility wins where Publisher's
+        # objects overlap.
+        if frame.wrap_text and self.wrap_images:
+            self._emit_text_wrap(element)
         self._emit_transparency(element, frame.style)
 
         # A chain's text belongs to the story, not to each frame that shows
@@ -1324,6 +1358,31 @@ class IdmlWriter:
                 )
         return _serialise(root)
 
+    @staticmethod
+    def _emit_text_wrap(element: ET.Element) -> None:
+        """Ask the text under an object to flow around it instead.
+
+        libmspub reports no wrap for anything, so every object Publisher
+        floated over its copy arrives with nothing to say it was floated.
+        A bounding-box wrap is what those documents almost always intend,
+        and the alternative is the object drawn straight over the words.
+        """
+        wrap = ET.SubElement(
+            element,
+            "TextWrapPreference",
+            {
+                "Inverse": "false",
+                "ApplyToMasterPageOnly": "false",
+                "TextWrapSide": "BothSides",
+                "TextWrapMode": "BoundingBoxTextWrap",
+            },
+        )
+        ET.SubElement(
+            ET.SubElement(wrap, "Properties"),
+            "TextWrapOffset",
+            {"Top": "0", "Left": "0", "Bottom": "0", "Right": "0"},
+        )
+
     def _emit_image(
         self,
         spread: ET.Element,
@@ -1359,22 +1418,7 @@ class IdmlWriter:
         # documents almost always intend. Page-sized images are excluded:
         # those are backgrounds, and wrapping would push all text off.
         if self.wrap_images and item.width * item.height < 0.6 * page.width * page.height:
-            wrap = ET.SubElement(
-                rectangle,
-                "TextWrapPreference",
-                {
-                    "Inverse": "false",
-                    "ApplyToMasterPageOnly": "false",
-                    "TextWrapSide": "BothSides",
-                    "TextWrapMode": "BoundingBoxTextWrap",
-                },
-            )
-            wrap_properties = ET.SubElement(wrap, "Properties")
-            ET.SubElement(
-                wrap_properties,
-                "TextWrapOffset",
-                {"Top": "0", "Left": "0", "Bottom": "0", "Right": "0"},
-            )
+            self._emit_text_wrap(rectangle)
 
         # On the frame rather than the Image inside it: Publisher shadows
         # the picture as placed, and a shadow on the content would sit
@@ -1534,8 +1578,9 @@ class IdmlWriter:
             self.gradient_ids.get(span.gradient) if span.gradient is not None else None
         )
         if reference:
+            angle = _ramp_angle(span.gradient.angle)
             attributes["FillColor"] = reference
-            attributes["GradientFillAngle"] = fmt(span.gradient.angle)
+            attributes["GradientFillAngle"] = fmt(angle)
             # A shape gets its ramp geometry from its own bounds; a run has
             # none of its own, and the default is a length of nothing --
             # which paints every stop before the start point in the first
@@ -1544,7 +1589,7 @@ class IdmlWriter:
             # middle. The band the headline sits in is the distance the
             # ramp was meant to run over, so it is stated here.
             if box:
-                start, length = _ramp_geometry(span.gradient.angle, *box)
+                start, length = _ramp_geometry(angle, *box)
                 attributes["GradientFillStart"] = start
                 attributes["GradientFillLength"] = fmt(length)
         else:

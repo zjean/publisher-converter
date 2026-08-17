@@ -118,8 +118,9 @@ def run(argv=None) -> int:
     parser.add_argument(
         "--no-image-wrap", action="store_true",
         help=(
-            "do not make text flow around images; images will overlap and "
-            "hide text, but placement matches the source exactly"
+            "do not make text flow around images, or around the headlines "
+            "the file says it flowed around; both will overlap and hide "
+            "text, but placement matches the source exactly"
         ),
     )
     parser.add_argument(

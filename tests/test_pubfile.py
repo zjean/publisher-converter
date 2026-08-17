@@ -1150,7 +1150,7 @@ def wordart_bools(**flags) -> int:
 def wordart_shape(
     text="Kerkdiensten", font="Monotype Corsiva", size=20.0, rotation=None,
     box=(-100, -50, 100, -20), anchor=True, spacing=None, bools=None,
-    shape_type=None, shape_seq=None,
+    shape_type=None, shape_seq=None, wrap_distance=None,
 ) -> bytes:
     """One Escher shape container carrying WordArt, as Publisher writes it."""
     entries = []
@@ -1166,6 +1166,10 @@ def wordart_shape(
         entries.append((0x00FF, bools))
     if rotation is not None:
         entries.append((0x0004, int(rotation * 65536)))
+    if wrap_distance is not None:
+        # dxWrapDistLeft: how far the text kept clear of this shape's left
+        # edge, in EMU. Publisher writes one only where the wrap is on.
+        entries.append((0x0384, int(wrap_distance * 12700)))
     children = [_escher_properties(entries)]
     if shape_type is not None:
         children.insert(0, _escher(0xF00A, b"", instance=shape_type))
@@ -1208,9 +1212,38 @@ class WordArtReadingTest(unittest.TestCase):
         self.assertAlmostEqual(art.centre_y, -35.0)
 
     def test_a_shape_stating_no_size_is_fitted_to_its_band(self):
-        art = self.one(size=None, box=(0, 0, 200, 40))
+        # WordArt states that it stretches its glyphs to the shape, and
+        # measuring Publisher's own page confirms it: a dropped initial
+        # inked 39.7 pt of a 40.1 pt band. So the size to invent for a
+        # shape that states none is the one that fills the band -- as much
+        # as its height allows, and no more than its width does.
+        art = self.one(text="D", size=None, box=(0, 0, 45, 40))
         self.assertTrue(art.fitted)
-        self.assertAlmostEqual(art.size, 40.0 / 1.33, places=4)
+        self.assertAlmostEqual(art.size, 40.0 / 0.70, places=4)
+
+    def test_a_fitted_size_is_held_back_by_a_narrow_band(self):
+        # One long word in a shallow band cannot be set at the size its
+        # height would allow: Publisher condenses the glyphs to fit the
+        # width and straight text cannot, so the width is what binds.
+        # Overflowing the band would wrap the headline onto two lines.
+        art = self.one(text="Kerkdiensten", size=None, box=(0, 0, 120, 40))
+        self.assertAlmostEqual(art.size, 120.0 / (12 * 0.55), places=4)
+
+    def test_a_stated_size_is_still_the_file_s_own(self):
+        # Only the invented number changes here. What the file states is
+        # left alone.
+        art = self.one(size=20.0, box=(0, 0, 200, 40))
+        self.assertFalse(art.fitted)
+        self.assertAlmostEqual(art.size, 20.0)
+
+    def test_a_stated_wrap_distance_means_the_copy_flows_around_it(self):
+        # The room a wrap leaves is the only thing in the file that says
+        # there is one: a shape the text runs under has no distance to
+        # keep, so it states none.
+        self.assertTrue(self.one(wrap_distance=2.88).wraps_text)
+
+    def test_a_shape_stating_no_distance_is_one_the_text_runs_under(self):
+        self.assertFalse(self.one().wraps_text)
 
     def test_rotation_is_read_as_signed_fixed_point(self):
         art = self.one(rotation=-12.192230224609375)
@@ -1257,22 +1290,27 @@ class WordArtReadingTest(unittest.TestCase):
 
     def test_a_headline_on_three_lines_is_sized_by_the_line_not_the_band(self):
         # The band holds all three, so taking the whole of it for one line
-        # would treble the size.
-        art = self.one(text="one\r\ntwo\r\nthree", size=None, box=(0, 0, 200, 120))
+        # would treble the size. The longest line is what the width has to
+        # hold, for the same reason.
+        art = self.one(text="a\r\nb\r\nc", size=None, box=(0, 0, 200, 120))
         self.assertTrue(art.fitted)
-        self.assertAlmostEqual(art.size, 120.0 / 3 / 1.33, places=4)
+        self.assertAlmostEqual(art.size, 120.0 / 3 / 0.70, places=4)
 
     def test_a_headline_on_one_line_is_sized_by_the_whole_band(self):
-        art = self.one(text="one", size=None, box=(0, 0, 200, 40))
-        self.assertAlmostEqual(art.size, 40.0 / 1.33, places=4)
+        art = self.one(text="o", size=None, box=(0, 0, 200, 40))
+        self.assertAlmostEqual(art.size, 40.0 / 0.70, places=4)
 
     def test_a_line_break_is_read_however_it_is_written(self):
         for break_ in ("\r\n", "\r", "\n"):
             with self.subTest(break_=break_):
                 art = self.one(
-                    text=f"one{break_}two", size=None, box=(0, 0, 200, 80)
+                    text=f"o{break_}t", size=None, box=(0, 0, 200, 80)
                 )
-                self.assertAlmostEqual(art.size, 80.0 / 2 / 1.33, places=4)
+                self.assertAlmostEqual(art.size, 80.0 / 2 / 0.70, places=4)
+
+    def test_the_widest_line_is_the_one_the_band_has_to_hold(self):
+        art = self.one(text="ab\r\nabcdefgh", size=None, box=(0, 0, 40, 200))
+        self.assertAlmostEqual(art.size, 40.0 / (8 * 0.55), places=4)
 
 
 class WordArtBooleanTest(unittest.TestCase):
@@ -1546,6 +1584,43 @@ class WordArtRecoveryTest(unittest.TestCase):
         self.assertAlmostEqual(frame.width, 200.0)
         self.assertAlmostEqual(frame.height, 30.0)
 
+    def test_a_headline_the_copy_flows_around_pushes_it_aside(self):
+        # A dropped initial is a shape floating over the column it begins,
+        # and its paragraph is not indented to make room: without a wrap
+        # the letter is drawn straight through its own first lines.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(
+            document, self.structure_with(self.art(wraps_text=True))
+        )
+        self.assertTrue(document.pages[0].items[0].wrap_text)
+
+    def test_a_headline_that_states_no_wrap_leaves_the_text_where_it_is(self):
+        # Asking for a wrap on every headline is worse than asking for
+        # none: a band that merely clips the corner of a date box would
+        # push the date out of it.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertFalse(document.pages[0].items[0].wrap_text)
+
+    def test_the_line_is_as_tall_as_the_band_and_no_taller(self):
+        # The type is sized to fill the band, so its own line box is taller
+        # than the band -- and a line that does not fit its frame is overset
+        # text, which a reader hides rather than draws. The frame has to
+        # stay the band, because that is what the copy flows around, so it
+        # is the line that is stated: the band's own share of the height.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        paragraph = document.pages[0].items[0].story.paragraphs[0]
+        self.assertAlmostEqual(paragraph.line_spacing_pt, 30.0)
+
+    def test_each_line_of_a_stacked_headline_takes_its_share(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(
+            document, self.structure_with(self.art(text="one\r\ntwo\r\nthree"))
+        )
+        for paragraph in document.pages[0].items[0].story.paragraphs:
+            self.assertAlmostEqual(paragraph.line_spacing_pt, 10.0)
+
     def test_the_words_are_centred_in_the_band(self):
         # WordArt fits its glyphs to the shape, so the band is the words
         # rather than a box they sit in one corner of.
@@ -1638,7 +1713,7 @@ class WordArtRecoveryTest(unittest.TestCase):
         convert._recover_wordart(
             document, self.structure_with(self.art(fitted=True))
         )
-        self.assertTrue(any("sized from that band" in w for w in document.warnings))
+        self.assertTrue(any("sized to fill that band" in w for w in document.warnings))
 
     def span(self, document):
         return document.pages[0].items[0].story.paragraphs[0].spans[0]
@@ -2491,6 +2566,35 @@ class GradientRestorationTest(unittest.TestCase):
         convert._restore_gradient_ramps(document, self.structure())
         self.assertEqual(shape.style.fill, (102, 51, 0))
 
+    def test_a_turned_shape_turns_its_ramp_with_it(self):
+        # Publisher turns a shape and its shade together, and libmspub
+        # reports the two apart: the rotation goes on the shape, and for a
+        # polygon it goes into the order of the points, where a ramp cannot
+        # see it. Every section-heading band in the corpus is stated this
+        # way -- the panel's ramp, upside down -- and left flat side up it
+        # runs brown at the top into white at the foot instead of the other
+        # way about.
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        structure = self.structure()
+        structure.gradients[0].rotation = 180.0
+        convert._restore_gradient_ramps(document, structure)
+        self.assertAlmostEqual(shape.style.gradient.angle, 180.0)
+
+    def test_a_turn_the_item_already_carries_is_not_counted_twice(self):
+        # Where libmspub *does* report the rotation, the reader turns the
+        # object and its ramp with it, so adding the file's rotation on top
+        # would turn the ramp twice.
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        shape.rotation = 180.0
+        structure = self.structure()
+        structure.gradients[0].rotation = 180.0
+        convert._restore_gradient_ramps(document, structure)
+        self.assertAlmostEqual(shape.style.gradient.angle, 0.0)
+
     def test_a_ramp_that_arrived_whole_still_gains_its_ends(self):
         # libmspub drops the two end colours from every ramp with a
         # waypoint list, not only from the ones that collapse to a stop,
@@ -2607,6 +2711,32 @@ class GradientAngleTest(unittest.TestCase):
 
     def test_a_shape_stating_no_angle_has_none(self):
         self.assertEqual(pubfile._gradient_angle({}), 0.0)
+
+
+@needs_samples
+class RealGradientRotationTest(unittest.TestCase):
+    """The heading bands are the panel's ramp, turned upside down."""
+
+    def test_the_bands_of_a_real_file_state_their_half_turn(self):
+        structure = pubfile.read_structure(SAMPLES / "cgk" / "1336 kerkbode.pub")
+        if structure is None:
+            self.skipTest("newsletter sample absent")
+        # The band behind the *Meditatie* headline on page 3: white at the
+        # top of it down to brown at the foot, which is the ramp below
+        # turned over. Publisher states the turn on the shape, and multiple
+        # turns are stated as they were made -- one band states -540.
+        band = next(
+            found for found in structure.gradients
+            if abs(found.width - 346.3) < 1 and abs(found.height - 32.0) < 1
+        )
+        self.assertAlmostEqual(band.rotation % 360.0, 180.0, places=3)
+        # The panel underneath is the same ramp the other way up, and
+        # states no turn at all.
+        panel = next(
+            found for found in structure.gradients
+            if abs(found.width - 346.3) < 1 and abs(found.height - 382.4) < 1
+        )
+        self.assertEqual(panel.rotation, 0.0)
 
 
 if __name__ == "__main__":

@@ -324,6 +324,10 @@ class TextFrame(Item):
     # sharing the id shows one story between them, in the order recorded in
     # Document.text_chains. Only the first link carries the text.
     chain_id: Optional[str] = None
+    # Set when the text in other frames has to flow around this one rather
+    # than run under it -- a recovered WordArt headline, which is a shape
+    # floating over the page and not a box the layout made room for.
+    wrap_text: bool = False
 
 
 @dataclass

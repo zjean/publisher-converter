@@ -887,11 +887,78 @@ class GradientFillTest(unittest.TestCase):
         fill = next(spread.iter("Rectangle")).get("FillColor")
         self.assertTrue(fill.startswith("Gradient/"), fill)
 
-    def test_the_angle_is_carried(self):
+    def test_an_unturned_ramp_runs_up_the_shape_not_across_it(self):
+        # The two conventions are a quarter turn apart. Publisher's own
+        # default -- the one Office calls a horizontal shade, because the
+        # bands of colour lie horizontally -- runs bottom to top, and
+        # libmspub reports it as an angle of nothing; IDML's nothing is
+        # left to right. Copying the number across turned every ramp in
+        # the corpus a quarter turn: the panel Publisher shades cream at
+        # the top down to white came out cream at the left.
+        _, spread = self._parts(self._document(self._ramp((0, 0, 0), (255, 255, 255))))
+        rectangle = next(spread.iter("Rectangle"))
+        self.assertEqual(rectangle.get("GradientFillAngle"), "90")
+        # A quarter turn puts the first stop at the foot of the shape: IDML
+        # measures the start in the box's own coordinates, y downwards.
+        self.assertEqual(rectangle.get("GradientFillStart"), "0 25")
+        self.assertEqual(rectangle.get("GradientFillLength"), "50")
+
+    def test_the_angle_is_carried_through_the_quarter_turn(self):
         _, spread = self._parts(
             self._document(self._ramp((0, 0, 0), (255, 255, 255), angle=90.0))
         )
-        self.assertEqual(next(spread.iter("Rectangle")).get("GradientFillAngle"), "90")
+        self.assertEqual(next(spread.iter("Rectangle")).get("GradientFillAngle"), "180")
+
+    def test_a_half_turned_ramp_runs_down_the_shape(self):
+        # Publisher turns a shape and its shade with it, which is how every
+        # section-heading band in the corpus is stated: the same ramp as
+        # the panel, upside down, so it runs white at the top down to
+        # brown at the foot.
+        _, spread = self._parts(
+            self._document(self._ramp((0, 0, 0), (255, 255, 255), angle=180.0))
+        )
+        rectangle = next(spread.iter("Rectangle"))
+        # Folded into the half turn either way the rest of the package
+        # states, which is the same direction written the short way round.
+        self.assertEqual(rectangle.get("GradientFillAngle"), "-90")
+        self.assertEqual(rectangle.get("GradientFillStart"), "0 -25")
+
+    def test_the_ramp_is_given_the_distance_to_run_over(self):
+        # An angle on its own leaves the ramp no distance, and a ramp with
+        # no distance is not a ramp: everything before the start point
+        # takes the first stop and everything after it the last. That is
+        # how the banner behind a headline came out white for the half of
+        # it right of centre and brown for the half left of it, with a
+        # hard edge down the middle where the fade should have been.
+        _, spread = self._parts(self._document(self._ramp((0, 0, 0), (255, 255, 255))))
+        rectangle = next(spread.iter("Rectangle"))
+        # The shape is 100 x 50 and an unturned ramp runs up it, so the
+        # distance is its height and not a length of nothing.
+        self.assertEqual(rectangle.get("GradientFillLength"), "50")
+        self.assertEqual(rectangle.get("GradientFillStart"), "0 25")
+
+    def test_the_distance_follows_the_angle(self):
+        _, spread = self._parts(
+            self._document(self._ramp((0, 0, 0), (255, 255, 255), angle=90.0))
+        )
+        rectangle = next(spread.iter("Rectangle"))
+        # Turned a quarter, the ramp runs across the shape instead, so the
+        # distance is its width.
+        self.assertEqual(rectangle.get("GradientFillLength"), "100")
+        self.assertEqual(rectangle.get("GradientFillStart"), "50 0")
+
+    def test_a_flat_fill_states_no_ramp_geometry(self):
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        document.pages[0].items.append(
+            model.Rectangle(
+                x=10.0, y=10.0, width=100.0, height=50.0,
+                style=model.GraphicStyle(fill=(1, 2, 3)),
+            )
+        )
+        _, spread = self._parts(document)
+        rectangle = next(spread.iter("Rectangle"))
+        self.assertIsNone(rectangle.get("GradientFillLength"))
+        self.assertIsNone(rectangle.get("GradientFillStart"))
 
     def test_a_radial_ramp_is_typed_radial(self):
         graphic, _ = self._parts(
@@ -998,6 +1065,51 @@ class GradientFillTest(unittest.TestCase):
         self.assertAlmostEqual(style.gradient.angle, 135.0)
 
 
+class HeadlineWrapTest(unittest.TestCase):
+    """A headline is a shape floating over the page, not a box beside it.
+
+    Where its band overlaps a column -- a dropped initial does, by
+    definition -- Publisher flows the paragraph around it, and libmspub
+    reports no wrap for any shape, so the frame has to ask for one or the
+    letter is drawn straight through the lines it begins.
+    """
+
+    def _frame(self, wrap_text: bool) -> model.TextFrame:
+        frame = model.TextFrame(
+            x=10.0, y=10.0, width=45.0, height=40.0, wrap_text=wrap_text
+        )
+        paragraph = model.Paragraph(align="center")
+        paragraph.spans.append(model.Span(text="D", size_pt=30.0))
+        frame.story.paragraphs.append(paragraph)
+        return frame
+
+    def _spread(self, wrap_text: bool, **writer_options):
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        document.pages[0].items.append(self._frame(wrap_text))
+        root = Path(tempfile.mkdtemp())
+        destination = root / "doc.idml"
+        idml.IdmlWriter(
+            document, image_dir_name="doc_images", **writer_options
+        ).write(destination)
+        with zipfile.ZipFile(destination) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            return ET.fromstring(archive.read(name))
+
+    def test_a_headline_asks_the_text_under_it_to_flow_around_it(self):
+        wrap = next(self._spread(True).iter("TextWrapPreference"))
+        self.assertEqual(wrap.get("TextWrapMode"), "BoundingBoxTextWrap")
+        self.assertEqual(wrap.get("TextWrapSide"), "BothSides")
+
+    def test_an_ordinary_frame_asks_for_nothing(self):
+        self.assertEqual(list(self._spread(False).iter("TextWrapPreference")), [])
+
+    def test_the_wrap_can_be_turned_off_with_the_image_wrap(self):
+        # One switch for the one question it answers: whether placement or
+        # legibility wins where Publisher's objects overlap.
+        spread = self._spread(True, wrap_images=False)
+        self.assertEqual(list(spread.iter("TextWrapPreference")), [])
+
+
 class TextGradientTest(unittest.TestCase):
     """A recovered WordArt headline is painted the way a shape is.
 
@@ -1038,7 +1150,10 @@ class TextGradientTest(unittest.TestCase):
         )
         run = next(story.iter("CharacterStyleRange"))
         self.assertEqual(run.get("FillColor"), "Gradient/G_1")
-        self.assertEqual(run.get("GradientFillAngle"), "45")
+        # A run's ramp turns through the same quarter as a shape's: the two
+        # conventions differ by where nothing points, not by what carries
+        # the ramp.
+        self.assertEqual(run.get("GradientFillAngle"), "135")
 
     def test_every_stop_colour_reaches_the_swatches(self):
         graphic, _ = self._parts(
@@ -1059,20 +1174,20 @@ class TextGradientTest(unittest.TestCase):
             model.Span(text="Kerkbode", color=(145, 56, 1), gradient=flat)
         )
         run = next(story.iter("CharacterStyleRange"))
-        # The frame is 200 x 40, and the ramp is horizontal, so it starts
-        # at the left edge and runs the full width.
-        self.assertEqual(run.get("GradientFillLength"), "200")
-        self.assertEqual(run.get("GradientFillStart"), "-100 0")
-
-    def test_the_distance_follows_the_angle(self):
-        upright = model.Gradient(stops=self.RAMP.stops, angle=90.0)
-        _, story = self._parts(
-            model.Span(text="Kerkbode", color=(145, 56, 1), gradient=upright)
-        )
-        run = next(story.iter("CharacterStyleRange"))
-        # Turned a quarter, the ramp runs the frame's height instead.
+        # The frame is 200 x 40, and an unturned ramp runs up it, so the
+        # distance is the band's height.
         self.assertEqual(run.get("GradientFillLength"), "40")
         self.assertEqual(run.get("GradientFillStart"), "0 20")
+
+    def test_the_distance_follows_the_angle(self):
+        across = model.Gradient(stops=self.RAMP.stops, angle=90.0)
+        _, story = self._parts(
+            model.Span(text="Kerkbode", color=(145, 56, 1), gradient=across)
+        )
+        run = next(story.iter("CharacterStyleRange"))
+        # Turned a quarter, the ramp runs the band's width instead.
+        self.assertEqual(run.get("GradientFillLength"), "200")
+        self.assertEqual(run.get("GradientFillStart"), "100 0")
 
     def test_a_run_with_no_ramp_states_no_geometry(self):
         _, story = self._parts(model.Span(text="body", color=(0, 0, 0)))
