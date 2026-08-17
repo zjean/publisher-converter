@@ -913,9 +913,17 @@ def _recover_wordart(
     centre of that band, which both sides put in the same place to a
     fraction of a point.
 
-    What cannot come across is WordArt itself -- IDML has no warped or
-    stretched type -- so a headline that was arched or shadowed into a
-    shape arrives as straight text in a box and may need restyling.
+    WordArt keeps its character formatting on the shape rather than on the
+    text, so bold, italic, underline, strikethrough and its character
+    spacing would be lost with the shape; they are read from the file and
+    put back on the run.
+
+    What cannot come across is the bending -- IDML has no warped type --
+    but that is rarer than it sounds. The file names the shape it asked
+    for, and 47 of the corpus's 48 WordArt shapes ask for plain unbent
+    type: for those, straight text in the band is not an approximation of
+    the headline, it *is* the headline. Only the bent ones need redrawing,
+    and the report names which.
     """
     if structure is None or not structure.wordart:
         return
@@ -982,22 +990,46 @@ def _recover_wordart(
     fitted = sum(1 for art_id in groups if by_id[art_id].fitted)
     repainted = len(superseded)
     placed = set(groups)
+    # A headline the file bends is the one real loss here, and it is rare:
+    # 47 of the corpus's 48 WordArt shapes are not bent at all, so straight
+    # text is what they already were. Naming the shape the file asked for
+    # is the difference between "this is fine" and "this one is not".
+    warped = sorted(
+        {by_id[art_id].warp for art_id in groups if by_id[art_id].warp}
+    )
+
+    spaced = sum(1 for art_id in groups if by_id[art_id].spacing)
 
     if recovered:
-        detail = (
-            f", {fitted} of them sized from that band because the file states none"
-            if fitted else ""
-        )
+        detail = [
+            f"{sum(1 for a in groups if by_id[a].warp)} of them bent into a "
+            f"shape IDML cannot state ({', '.join(warped)}), which is the one "
+            f"part of a headline straight text does not stand in for"
+            if warped else
+            "none of them is bent into a shape, so straight text in that band "
+            "is what Publisher drew"
+        ]
+        if fitted:
+            detail.append(
+                f"{fitted} of them sized from that band because the file states none"
+            )
+        if spaced:
+            detail.append(
+                f"{spaced} of them set in WordArt's own character spacing, which "
+                f"it states as a multiple and IDML counts in ems, so the "
+                f"tracking on those is close rather than exact"
+            )
         if repainted:
-            detail += (
-                f", and {repainted} repeated paint(s) of the same guides dropped "
+            detail.append(
+                f"{repainted} repeated paint(s) of the same guides dropped "
                 f"rather than left drawing rules across the words"
             )
         document.warnings.append(
             f"{recovered} WordArt headline(s) recovered as ordinary text: "
             f"Publisher stores the words in the Escher stream and libmspub "
-            f"reports only the band they were stretched into, so they arrive "
-            f"as straight text in that band and may need restyling{detail}"
+            f"reports only the band they were stretched into, so they come "
+            f"back with the font, size and styling the file states, set "
+            f"straight in that band — " + _sentence(detail)
         )
 
     # A WordArt shape libmspub reported nothing at all for. Its words are in
@@ -1007,8 +1039,11 @@ def _recover_wordart(
     # silent loss.
     missing = [art for art in structure.wordart if id(art) not in placed]
     if missing:
+        # Named with the shape it was bent into, since whoever retypes it
+        # has to know whether they are typing a headline or drawing one.
         words = ", ".join(
-            repr(" ".join(art.text.split())[:40]) for art in missing[:3]
+            repr(" ".join(art.text.split())[:40]) + (f" ({art.warp})" if art.warp else "")
+            for art in missing[:3]
         )
         if len(missing) > 3:
             words += f" and {len(missing) - 3} more"
@@ -1016,6 +1051,39 @@ def _recover_wordart(
             f"{len(missing)} WordArt shape(s) not placed: libmspub reports no "
             f"shape where the file puts them, so {words} need retyping"
         )
+
+
+# WordArt states character spacing as a multiple of normal -- 1.2 is what
+# its gallery calls Loose, and 36 of the corpus's 48 shapes state it --
+# where IDML states the space *added*, in thousandths of an em. The two
+# are not the same measure: the multiple scales each glyph's advance, and
+# an advance is not an em. A headline face averages about half an em per
+# glyph, which is the number below, so Loose comes out at 100/1000 rather
+# than the 200 that reading the multiple as em-relative would give.
+# Approximate either way, and the band the glyphs are stretched into is
+# already an approximation, so it is set where a headline looks right
+# rather than left out for not being exact.
+_EM_PER_ADVANCE = 0.5
+
+
+def _sentence(clauses: List[str]) -> str:
+    """Clauses as one readable list, so a report reads as prose."""
+    if len(clauses) == 1:
+        return clauses[0]
+    return ", ".join(clauses[:-1]) + f", and {clauses[-1]}"
+
+
+def _wordart_tracking(spacing: Optional[float]) -> Optional[float]:
+    """WordArt's spacing multiple as the tracking IDML would write.
+
+    Rounded to whole thousandths, because the multiple arrives as 16.16
+    fixed point and Publisher's Loose reads 1.2001 rather than 1.2 --
+    writing 100.05188 would state a precision the half-em above does not
+    have.
+    """
+    if spacing is None or abs(spacing - 1.0) < 0.001:
+        return None
+    return float(round((spacing - 1.0) * _EM_PER_ADVANCE * 1000.0))
 
 
 def _wordart_frame(
@@ -1101,6 +1169,7 @@ def _wordart_frame(
                 italic=art.italic,
                 underline=art.underline,
                 strikethrough=art.strikethrough,
+                tracking=_wordart_tracking(art.spacing),
             )
         )
         frame.story.paragraphs.append(paragraph)

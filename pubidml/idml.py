@@ -1540,6 +1540,11 @@ class IdmlWriter:
         # Unscaled text says nothing rather than saying 100.
         if span.horizontal_scale and abs(span.horizontal_scale - 100.0) > 0.01:
             attributes["HorizontalScale"] = fmt(span.horizontal_scale)
+        if span.tracking:
+            attributes["Tracking"] = fmt(span.tracking)
+        # Likewise text set at normal spacing, where 0 is the whole of it.
+        if span.tracking and abs(span.tracking) > 0.01:
+            attributes["Tracking"] = fmt(span.tracking)
 
         element = ET.SubElement(parent, "CharacterStyleRange", attributes)
 

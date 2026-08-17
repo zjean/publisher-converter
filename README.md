@@ -419,8 +419,9 @@ These are real and deliberate, not bugs to be surprised by later.
   no stroke; and it reports the two guide edges the glyphs are stretched
   between as a path that outlines no area. The words themselves are in the
   Escher stream, in properties libmspub has no constants for, and that is
-  where `pubfile` now reads them: the text, the font, the point size and
-  the rotation.
+  where `pubfile` now reads them: the text, the font, the point size, the
+  rotation, the character formatting and the shape the glyphs were bent
+  into.
 
   The guide path is then replaced by a text frame carrying the words. The
   band and the rotation come from the shape's own anchor, the paint from
@@ -441,12 +442,32 @@ These are real and deliberate, not bugs to be surprised by later.
   the corpus. Where a shape has no fill at all, which is what WordArt
   filled with a texture reports, the outline is what colours the words.
 
-  What cannot come across is WordArt itself, since IDML has no warped or
-  stretched type, so the headline arrives as straight text in its band and
-  is flagged `review`. Two shapes in the corpus state no point size —
-  WordArt fits the glyphs to the shape — and those are sized from the band
-  by the ratio the sized shapes measure (1.33, spread 1.02 to 1.59), which
-  the warning says out loud.
+  **WordArt keeps its character formatting on the shape, not on the text**,
+  so bold, italic, underline, strikethrough and character spacing were
+  being lost with the shape even though the file states them plainly —
+  sixteen booleans packed into one property, whose top half says which of
+  them the file states at all. They are read and put back on the run: 40
+  of the corpus's 48 headlines are italic and one is bold, which used to
+  come out uniformly regular. Spacing is stated as a multiple of normal —
+  1.2 is what Publisher's gallery calls Loose, and 36 shapes state it —
+  where IDML states the space *added*, in thousandths of an em, so it is
+  converted against an average advance of half an em and the report says
+  the tracking is close rather than exact.
+
+  **What cannot come across is the bending — but that is rarer than it
+  sounds.** The file names the shape it asked for, in the shape record, and
+  47 of the corpus's 48 WordArt shapes ask for plain unbent type. For
+  those, straight text in the band is not an approximation of the
+  headline, it *is* the headline, and the report now says so instead of
+  telling every reader that fifteen headlines "may need restyling". The
+  one bent shape in the corpus — a *button curve* — is named by the shape
+  Publisher asked for, so whoever redraws it knows what to draw. Two
+  shapes state no point size, because WordArt fits the glyphs to the shape
+  rather than setting a size, and those are sized from the band by the
+  ratio the sized shapes measure (1.33, spread 1.02 to 1.59) — measured
+  per line, since a band holds as many lines as the words are set on, and
+  sizing a three-line headline from the whole band trebles it. The warning
+  says that out loud too.
 
   Because WordArt fits its glyphs to the shape, the band is not a box the
   words sit somewhere inside — it *is* the words. So the text is centred

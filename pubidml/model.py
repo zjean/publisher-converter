@@ -213,11 +213,19 @@ class Span:
     gradient: Optional[Gradient] = None
     stroke: Optional[Color] = None
     stroke_width: float = 0.0
+    #: Extra space between characters, in thousandths of an em, which is
+    #: how IDML counts tracking. Also WordArt: it states spacing as a
+    #: multiple of normal, and `convert` converts the one to the other.
+    tracking: Optional[float] = None
     #: The locale this run is written in, as language-COUNTRY ('nl-NL').
     #: It decides hyphenation, so it moves line breaks rather than looks.
     language: Optional[str] = None
     #: Horizontal glyph scaling as a percentage, where 100 is unscaled.
     horizontal_scale: Optional[float] = None
+    #: Extra space between characters, in thousandths of an em, which is
+    #: how IDML measures it. Publisher body text never states any; this
+    #: carries a WordArt headline set looser or tighter than normal.
+    tracking: Optional[float] = None
 
     def format_key(self) -> tuple:
         return (
@@ -233,8 +241,10 @@ class Span:
             self.gradient,
             self.stroke,
             self.stroke_width,
+            self.tracking,
             self.language,
             self.horizontal_scale,
+            self.tracking,
         )
 
 

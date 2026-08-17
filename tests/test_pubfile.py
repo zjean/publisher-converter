@@ -92,6 +92,33 @@ class RealFileTest(unittest.TestCase):
         self.assertEqual(art.font, "Arial Black")
         self.assertAlmostEqual(art.size, 28.0)
         self.assertFalse(art.fitted)
+        # Unbent, like 47 of the corpus's 48 shapes -- so straight text is
+        # not an approximation of this headline, it is the headline.
+        self.assertIsNone(art.warp)
+        # The corpus's one bent shape, and the one the file gives no
+        # libmspub shape for, which is why it is named rather than placed.
+        bent = next(a for a in structure.wordart if a.warp)
+        self.assertEqual(bent.warp, "button curve")
+        self.assertIn("Avvento", bent.text)
+
+    def test_wordart_styling_is_read_out_of_a_real_file(self):
+        # The shape properties carry the character formatting, so this is
+        # the check that the boolean set is unpacked the way Publisher
+        # packs it: a headline stating italic and one stating bold, out of
+        # the same file, telling apart.
+        source = SAMPLES / "cgk" / "1336 kerkbode.pub"
+        if not source.exists():
+            self.skipTest("newsletter sample absent")
+        by_text = {art.text: art for art in pubfile.read_structure(source).wordart}
+        loose = by_text["Meditatie"]
+        self.assertTrue(loose.italic)
+        self.assertFalse(loose.bold)
+        # Publisher's Loose, as 16.16 fixed point.
+        self.assertAlmostEqual(loose.spacing, 1.2, places=3)
+        heavy = by_text["Pastoraal Contact"]
+        self.assertTrue(heavy.bold)
+        self.assertFalse(heavy.italic)
+        self.assertIsNone(heavy.spacing)
 
     def test_a_stream_name_two_storages_share_resolves_by_path(self):
         # `1336 kerkbode.pub` holds two streams called CONTENTS: Publisher's
@@ -900,9 +927,25 @@ def _escher_properties(entries) -> bytes:
     return _escher(0xF00B, table + payloads, instance=len(entries))
 
 
+def wordart_bools(**flags) -> int:
+    """WordArt's packed booleans: the low half values, the high half which
+    of them the file states at all. Bit n is property 0xFF - n."""
+    bits = {
+        "strikethrough": 0x00, "small_caps": 0x01, "shadow": 0x02,
+        "underline": 0x03, "italic": 0x04, "bold": 0x05,
+    }
+    value = stated = 0
+    for name, on in flags.items():
+        stated |= 1 << bits[name]
+        if on:
+            value |= 1 << bits[name]
+    return stated << 16 | value
+
+
 def wordart_shape(
     text="Kerkdiensten", font="Monotype Corsiva", size=20.0, rotation=None,
-    box=(-100, -50, 100, -20), anchor=True,
+    box=(-100, -50, 100, -20), anchor=True, spacing=None, bools=None,
+    shape_type=None,
 ) -> bytes:
     """One Escher shape container carrying WordArt, as Publisher writes it."""
     entries = []
@@ -912,9 +955,15 @@ def wordart_shape(
         entries.append((0x00C5, font.encode("utf-16-le") + b"\x00\x00"))
     if size is not None:
         entries.append((0x00C3, int(size * 65536)))
+    if spacing is not None:
+        entries.append((0x00C4, int(spacing * 65536)))
+    if bools is not None:
+        entries.append((0x00FF, bools))
     if rotation is not None:
         entries.append((0x0004, int(rotation * 65536)))
     children = [_escher_properties(entries)]
+    if shape_type is not None:
+        children.insert(0, _escher(0xF00A, b"", instance=shape_type))
     if anchor:
         children.append(_escher_values(0xF010, [
             (0x2001, box[0] * 12700), (0x2002, box[1] * 12700),
@@ -995,6 +1044,155 @@ class WordArtReadingTest(unittest.TestCase):
 
     def test_a_stream_of_rubbish_does_not_raise(self):
         pubfile._wordart_shapes(bytes(range(256)) * 4)
+
+    def test_a_headline_on_three_lines_is_sized_by_the_line_not_the_band(self):
+        # The band holds all three, so taking the whole of it for one line
+        # would treble the size.
+        art = self.one(text="one\r\ntwo\r\nthree", size=None, box=(0, 0, 200, 120))
+        self.assertTrue(art.fitted)
+        self.assertAlmostEqual(art.size, 120.0 / 3 / 1.33, places=4)
+
+    def test_a_headline_on_one_line_is_sized_by_the_whole_band(self):
+        art = self.one(text="one", size=None, box=(0, 0, 200, 40))
+        self.assertAlmostEqual(art.size, 40.0 / 1.33, places=4)
+
+    def test_a_line_break_is_read_however_it_is_written(self):
+        for break_ in ("\r\n", "\r", "\n"):
+            with self.subTest(break_=break_):
+                art = self.one(
+                    text=f"one{break_}two", size=None, box=(0, 0, 200, 80)
+                )
+                self.assertAlmostEqual(art.size, 80.0 / 2 / 1.33, places=4)
+
+
+class WordArtBooleanTest(unittest.TestCase):
+    """The sixteen booleans WordArt packs into one property.
+
+    The low half holds the values and the high half says which of them the
+    file states at all, so a bit left out of the high half is unstated
+    rather than false. MS-ODRAW numbers a boolean set from the highest
+    property id down, which is why bit n is property 0xFF - n.
+    """
+
+    def one(self, **kwargs):
+        found = pubfile._wordart_shapes(wordart_shape(**kwargs))
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def test_a_shape_stating_nothing_is_not_styled(self):
+        art = self.one()
+        self.assertEqual(
+            (art.bold, art.italic, art.underline, art.strikethrough),
+            (False, False, False, False),
+        )
+
+    def test_each_boolean_is_read_from_its_own_bit(self):
+        for name in ("bold", "italic", "underline", "strikethrough"):
+            with self.subTest(name=name):
+                art = self.one(bools=wordart_bools(**{name: True}))
+                self.assertTrue(getattr(art, name))
+                others = {"bold", "italic", "underline", "strikethrough"} - {name}
+                for other in others:
+                    self.assertFalse(getattr(art, other))
+
+    def test_a_value_bit_without_its_stated_bit_is_not_believed(self):
+        # The low half alone is a value the file never claimed to state.
+        art = self.one(bools=1 << 0x05)
+        self.assertFalse(art.bold)
+
+    def test_a_stated_bit_set_to_false_stays_false(self):
+        art = self.one(bools=wordart_bools(bold=False, italic=True))
+        self.assertFalse(art.bold)
+        self.assertTrue(art.italic)
+
+    def test_the_corpus_pairing_of_italic_and_bold_reads_apart(self):
+        # 40 of the corpus's 48 shapes are italic and 1 is bold; reading
+        # one as the other would restyle every headline in the file.
+        art = self.one(bools=wordart_bools(italic=True, bold=False))
+        self.assertTrue(art.italic)
+        self.assertFalse(art.bold)
+
+
+class WordArtShapeTypeTest(unittest.TestCase):
+    """Whether the words are bent, and into what."""
+
+    def one(self, **kwargs):
+        found = pubfile._wordart_shapes(wordart_shape(**kwargs))
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def test_a_shape_with_no_shape_record_is_not_bent(self):
+        self.assertIsNone(self.one().warp)
+
+    def test_plain_wordart_is_not_bent(self):
+        self.assertIsNone(self.one(shape_type=136).warp)
+
+    def test_a_preset_is_named_the_way_publishers_gallery_names_it(self):
+        self.assertEqual(self.one(shape_type=147).warp, "button curve")
+        self.assertEqual(self.one(shape_type=156).warp, "wave 1")
+        self.assertEqual(self.one(shape_type=175).warp, "can down")
+
+    def test_a_shape_type_that_is_not_wordart_at_all_names_no_warp(self):
+        self.assertIsNone(self.one(shape_type=1).warp)
+
+
+class WordArtSpacingTest(unittest.TestCase):
+    """Character spacing, stated as a multiple of normal."""
+
+    def one(self, **kwargs):
+        found = pubfile._wordart_shapes(wordart_shape(**kwargs))
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def test_a_shape_stating_no_spacing_states_none(self):
+        self.assertIsNone(self.one().spacing)
+
+    def test_normal_spacing_is_not_carried_as_a_difference(self):
+        self.assertIsNone(self.one(spacing=1.0).spacing)
+
+    def test_loose_spacing_is_read_as_its_multiple(self):
+        # 1.2 is what Publisher's gallery calls Loose, and what 36 of the
+        # corpus's 48 shapes state.
+        self.assertAlmostEqual(self.one(spacing=1.2).spacing, 1.2, places=4)
+
+    def test_tight_spacing_is_read_as_its_multiple(self):
+        self.assertAlmostEqual(self.one(spacing=0.8).spacing, 0.8, places=4)
+
+
+class WordArtTrackingTest(unittest.TestCase):
+    """WordArt's spacing multiple as the tracking IDML states."""
+
+    def test_normal_spacing_is_no_tracking_at_all(self):
+        for spacing in (None, 1.0, 1.0005):
+            with self.subTest(spacing=spacing):
+                self.assertIsNone(convert._wordart_tracking(spacing))
+
+    def test_the_multiple_is_taken_against_half_an_em_of_advance(self):
+        # The multiple scales each glyph's advance and IDML counts ems, so
+        # the two are only the same measure through an average advance.
+        self.assertEqual(convert._wordart_tracking(1.2), 100.0)
+        self.assertEqual(convert._wordart_tracking(0.8), -100.0)
+
+    def test_fixed_point_noise_does_not_reach_the_file(self):
+        # The multiple arrives as 16.16, so Publisher's Loose reads
+        # 1.2001; writing 100.05 would claim a precision half an em of
+        # average advance does not have.
+        self.assertEqual(convert._wordart_tracking(1.200103759765625), 100.0)
+
+
+class SentenceTest(unittest.TestCase):
+    """Clauses joined so a report reads as prose rather than a list."""
+
+    def test_one_clause_stands_alone(self):
+        self.assertEqual(convert._sentence(["only this"]), "only this")
+
+    def test_two_clauses_are_joined_with_and(self):
+        self.assertEqual(convert._sentence(["one", "two"]), "one, and two")
+
+    def test_more_clauses_keep_the_and_for_the_last(self):
+        self.assertEqual(
+            convert._sentence(["one", "two", "three"]), "one, two, and three"
+        )
 
 
 class WordArtRecoveryTest(unittest.TestCase):
@@ -1159,6 +1357,85 @@ class WordArtRecoveryTest(unittest.TestCase):
         )
         self.assertTrue(any("sized from that band" in w for w in document.warnings))
 
+    def span(self, document):
+        return document.pages[0].items[0].story.paragraphs[0].spans[0]
+
+    def test_the_styling_the_shape_carries_ends_up_on_the_words(self):
+        # WordArt states these on the shape rather than on the text, so
+        # they are lost with the shape unless they are put back here.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(
+            document,
+            self.structure_with(
+                self.art(bold=True, italic=True, underline=True, strikethrough=True)
+            ),
+        )
+        span = self.span(document)
+        self.assertEqual(
+            (span.bold, span.italic, span.underline, span.strikethrough),
+            (True, True, True, True),
+        )
+
+    def test_an_unstyled_headline_stays_unstyled(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        span = self.span(document)
+        self.assertEqual(
+            (span.bold, span.italic, span.underline, span.strikethrough),
+            (False, False, False, False),
+        )
+
+    def test_loose_spacing_becomes_tracking(self):
+        # 1.2 is Publisher's Loose. IDML states the space added, in
+        # thousandths of an em, against a multiple of the glyph advance.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art(spacing=1.2)))
+        self.assertAlmostEqual(self.span(document).tracking, 100.0)
+
+    def test_tight_spacing_becomes_negative_tracking(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art(spacing=0.8)))
+        self.assertAlmostEqual(self.span(document).tracking, -100.0)
+
+    def test_a_headline_at_normal_spacing_states_no_tracking(self):
+        document = self.document_with(self.guides())
+        for spacing in (None, 1.0):
+            with self.subTest(spacing=spacing):
+                document = self.document_with(self.guides())
+                convert._recover_wordart(
+                    document, self.structure_with(self.art(spacing=spacing))
+                )
+                self.assertIsNone(self.span(document).tracking)
+
+    def test_a_bent_headline_says_so_because_that_part_is_lost(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(
+            document, self.structure_with(self.art(warp="button curve"))
+        )
+        warning = next(w for w in document.warnings if "WordArt headline" in w)
+        self.assertIn("1 of them bent", warning)
+        self.assertIn("button curve", warning)
+
+    def test_an_unbent_headline_says_so_rather_than_staying_silent(self):
+        # Nearly every headline in a real document is unbent, so "none of
+        # them is bent" is the answer to whether the loss applies here.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        warning = next(w for w in document.warnings if "WordArt headline" in w)
+        self.assertIn("none of them is bent", warning)
+
+    def test_spacing_that_had_to_be_approximated_is_reported(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art(spacing=1.2)))
+        warning = next(w for w in document.warnings if "WordArt headline" in w)
+        self.assertIn("character spacing", warning)
+
+    def test_a_headline_at_normal_spacing_is_not_reported_as_approximated(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        warning = next(w for w in document.warnings if "WordArt headline" in w)
+        self.assertNotIn("character spacing", warning)
+
     def test_a_shape_with_nowhere_to_go_is_named_rather_than_dropped(self):
         document = self.document_with()
         convert._recover_wordart(
@@ -1167,6 +1444,29 @@ class WordArtRecoveryTest(unittest.TestCase):
         warning = " ".join(document.warnings)
         self.assertIn("not placed", warning)
         self.assertIn("I venerdì di Avvento", warning)
+
+    def test_an_unplaced_shape_is_named_with_the_shape_it_was_bent_into(self):
+        # The one warped headline in the corpus is also the one libmspub
+        # reports no shape for, so this is the branch that has to say it:
+        # retyping a bent headline is a different job from retyping a
+        # straight one.
+        document = self.document_with()
+        convert._recover_wordart(
+            document,
+            self.structure_with(
+                self.art(text="I venerdì di Avvento", warp="button curve")
+            ),
+        )
+        self.assertIn("(button curve)", " ".join(document.warnings))
+
+    def test_an_unplaced_straight_headline_is_named_without_a_shape(self):
+        document = self.document_with()
+        convert._recover_wordart(
+            document, self.structure_with(self.art(text="Kerkdiensten"))
+        )
+        warning = next(w for w in document.warnings if "not placed" in w)
+        self.assertIn("'Kerkdiensten'", warning)
+        self.assertNotIn("(", warning.split("so ", 1)[1])
 
     def test_recovered_guides_no_longer_count_as_unrenderable(self):
         document = self.document_with(self.guides())

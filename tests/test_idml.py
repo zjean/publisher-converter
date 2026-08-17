@@ -1009,6 +1009,21 @@ class TextGradientTest(unittest.TestCase):
         self.assertEqual(run.get("StrokeColor"), "Color/C_361B00")
         self.assertEqual(run.get("StrokeWeight"), "0.75")
 
+    def test_wider_spacing_is_written_as_tracking(self):
+        # WordArt states spacing as a multiple of normal and IDML states
+        # the space added, in thousandths of an em; `convert` does that
+        # conversion, and this is the writing of it.
+        _, story = self._parts(
+            model.Span(text="Kerkdiensten", color=(0, 0, 0), tracking=100.0)
+        )
+        self.assertEqual(
+            next(story.iter("CharacterStyleRange")).get("Tracking"), "100"
+        )
+
+    def test_text_at_normal_spacing_states_no_tracking(self):
+        _, story = self._parts(model.Span(text="body", color=(0, 0, 0)))
+        self.assertIsNone(next(story.iter("CharacterStyleRange")).get("Tracking"))
+
     def test_ordinary_text_is_written_exactly_as_before(self):
         graphic, story = self._parts(model.Span(text="body", color=(0, 0, 0)))
         self.assertEqual(len(list(graphic.iter("Gradient"))), 0)
@@ -1016,6 +1031,7 @@ class TextGradientTest(unittest.TestCase):
         self.assertEqual(run.get("FillColor"), "Color/C_000000")
         self.assertIsNone(run.get("GradientFillAngle"))
         self.assertIsNone(run.get("StrokeColor"))
+        self.assertIsNone(run.get("Tracking"))
 
     def test_a_shape_and_a_run_sharing_a_ramp_share_one_resource(self):
         document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
