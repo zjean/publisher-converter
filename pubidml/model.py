@@ -375,6 +375,13 @@ class TableCell:
     #: a cell with no insets of its own leaves Affinity's default in
     #: place, and Publisher's are consistently tighter than that.
     insets: Optional[CellInsets] = None
+    #: True where this cell's own record in the .pub was read. Those
+    #: records carry insets and no ruling anywhere in the corpus, so a
+    #: cell we have read is a cell Publisher recorded no lines for, and
+    #: the four edges are written off rather than left to the reader --
+    #: which draws its own line around every cell. False means the record
+    #: was never read, the distinction `insets` draws with None.
+    unruled: bool = False
 
 
 @dataclass
@@ -484,16 +491,32 @@ class Document:
         for master in self.masters:
             yield from _walk(master.items)
 
-    @property
-    def fonts(self) -> List[str]:
-        found = set()
+    def stories(self):
+        """Every story in the document, table cells included.
+
+        A cell's runs name fonts and colours exactly as a frame's do, and
+        both used to be collected from frames alone: a font used only
+        inside a table arrived substituted, and a colour used only there
+        resolved to nothing and fell back to black. Neither says anything
+        on the way past, which is why the walk is shared rather than
+        written out at each place that needs it.
+        """
         for item in self.all_items():
             if isinstance(item, TextFrame):
-                for paragraph in item.story.paragraphs:
-                    for span in paragraph.spans:
-                        if span.font:
-                            found.add(span.font)
-        return sorted(found)
+                yield item.story
+            elif isinstance(item, Table):
+                for cell in item.cells:
+                    yield cell.story
+
+    def spans(self):
+        """Every run of text in the document, wherever it is set."""
+        for story in self.stories():
+            for paragraph in story.paragraphs:
+                yield from paragraph.spans
+
+    @property
+    def fonts(self) -> List[str]:
+        return sorted({span.font for span in self.spans() if span.font})
 
     @property
     def colors(self) -> List[Color]:
@@ -508,16 +531,14 @@ class Document:
                     found.add(stop.color)
             if item.style.shadow:
                 found.add(item.style.shadow.color)
-            if isinstance(item, TextFrame):
-                for paragraph in item.story.paragraphs:
-                    for span in paragraph.spans:
-                        if span.color:
-                            found.add(span.color)
-                        if span.stroke:
-                            found.add(span.stroke)
-                        if span.gradient:
-                            for stop in span.gradient.stops:
-                                found.add(stop.color)
+        for span in self.spans():
+            if span.color:
+                found.add(span.color)
+            if span.stroke:
+                found.add(span.stroke)
+            if span.gradient:
+                for stop in span.gradient.stops:
+                    found.add(stop.color)
         return sorted(found)
 
 

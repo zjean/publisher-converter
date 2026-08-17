@@ -297,25 +297,63 @@ imply the text is hyphenating correctly.
 
 ---
 
-## 9. Whose rules is a table drawing?
+## 9. Whose rules is a table drawing? — **ours now**
 
-A converted table names `TableStyle/$ID/[Basic Table]` and the package
-never defines it, so the reader supplies its own. Affinity's draws a line
+A converted table named `TableStyle/$ID/[Basic Table]` and the package
+never defined it, so the reader supplied its own. Affinity's draws a line
 around every cell — visible in `research/probe_cell_insets.py`, where no
-stroke was asked for anywhere.
+stroke was asked for anywhere — and the corpus's tables are layout grids,
+so that printed a grid across every article.
 
-That is wrong in at least one direction and possibly both: the corpus's
-tables are layout grids, and a line around every cell of one would show a
-grid across an article. But "no ruling recorded" cannot yet be read as "no
-lines", because Publisher's own default may supply them, which is exactly
-what `actions.md` §9's plain control file settles — look at whether it
-prints lines.
+**Every cell whose record we read now states all four edges off**, as both
+a zero weight and a `Swatch/None` colour: `model.TableCell.unruled`,
+`convert._apply_cell_insets`, `idml._table_story_part`. 18 tables, 974
+cells, all four edges on each, and a cell whose record was never read is
+still left to the reader — the distinction `insets` draws with None. The
+reason it can be read that way at all is the format's own rule, that a
+field the file leaves out is absent rather than defaulted: a cell record
+states padding and nothing else in all 1,260 of them.
 
-Two things to do here, in this order: extend the inset probe with a row
-whose four edge strokes are explicitly zero, which says whether an
-override beats Affinity's default at all; and, once §9's sample says what
-a plain Publisher table looks like, either write those zeros for every
-table matched in the .pub or write the real weights and colours.
+`research/probe_cell_rules.py` states cell edge strokes six ways over the
+same 3 x 3 table, one page each. It is its own probe rather than a row on
+the inset one because that one is answered and this needs a loud control:
+a 4pt magenta page no default could produce, without which "unchanged"
+cannot be told from "zero read as unset". Nothing in the model was widened
+for it — the attributes are patched onto the package the real writer
+produced, which keeps the speculation in the probe.
+
+**Two things it settles, on Affinity Publisher for macOS:**
+
+- **A per-cell override wins.** Page E asks for 4pt magenta on all four
+  edges of all nine cells and gets it. So Affinity's default is not
+  something we are stuck with; what we write about a cell edge is what
+  gets drawn.
+- **Granularity is per edge, and a stated edge stands alone.** Page F
+  states a top edge on the middle row and nothing anywhere else, and
+  exactly that one line — the edge the first and second rows share —
+  comes out magenta. The cell above it says nothing and does not override
+  it. So `actions.md` §9's per-edge sample, one cell bordered on four
+  sides and its neighbour on its top alone, maps straight across.
+
+- **A rule can be removed, three ways.** Pages B, C and D ask for no line
+  as a weight of zero, as a stroke colour of `Swatch/None`, and as both,
+  and none of the three draws anything. A zero is not read as unset, the
+  same answer the insets gave. Page A, stating nothing, draws the line
+  around every cell — so the difference is ours to make.
+
+Defining `[Basic Table]` ourselves is therefore not needed, and neither
+was any new IDML machinery.
+
+**One question is left, and this probe cannot answer it**: whether a plain
+Publisher table prints lines at all. That is `actions.md` §9's control
+file, and it is now a check on what ships rather than a prerequisite for
+it. If it prints none, the zeros are right and nothing changes. If it
+prints lines, they are Publisher's own default, the zeros are deleting
+them, and what should be written instead is that default's real weight and
+colour — from §9's styled sample, through the same attributes. Until it is
+opened, every document carrying tables names the count in its report and
+says to re-add by hand any lines that Publisher drew from outside the cell
+records.
 
 ---
 

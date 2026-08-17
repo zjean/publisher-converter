@@ -1551,6 +1551,140 @@ class CellInsetOutputTest(unittest.TestCase):
         self.assertEqual(cells["0:0"].get("LeftInset"), "0")
 
 
+class CellTextResourceOutputTest(unittest.TestCase):
+    """What a cell's own runs name has to reach the package too.
+
+    Resources were collected from text frames alone, so a colour used only
+    inside a table cell resolved to nothing and `_color_ref` fell back to
+    black -- a wrong colour rather than a broken package, which is the
+    quieter of the two failures and the harder to notice.
+    """
+
+    def _parts(self, **span):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        table = model.Table(
+            x=0.0, y=0.0, width=100.0, height=20.0,
+            column_widths=[100.0], row_heights=[20.0],
+        )
+        cell = model.TableCell(row=0, column=0)
+        paragraph = model.Paragraph()
+        paragraph.spans.append(model.Span(text="in a cell", size_pt=9.0, **span))
+        cell.story.paragraphs.append(paragraph)
+        table.cells.append(cell)
+        document.pages[0].items.append(table)
+
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            graphic = ET.fromstring(archive.read("Resources/Graphic.xml"))
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        return graphic, story
+
+    @staticmethod
+    def _cell_run(story: ET.Element) -> ET.Element:
+        # The story's first CharacterStyleRange is the wrapper holding the
+        # Table; the run being tested is the one inside the cell.
+        return next(next(story.iter("Cell")).iter("CharacterStyleRange"))
+
+    def test_the_run_keeps_its_own_colour(self):
+        graphic, story = self._parts(color=(1, 2, 3))
+        run = self._cell_run(story)
+        self.assertEqual(run.get("FillColor"), "Color/C_010203")
+        self.assertIn("Color/C_010203", {c.get("Self") for c in graphic.iter("Color")})
+
+    def test_the_font_it_names_is_declared(self):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        table = model.Table(
+            x=0.0, y=0.0, width=100.0, height=20.0,
+            column_widths=[100.0], row_heights=[20.0],
+        )
+        cell = model.TableCell(row=0, column=0)
+        paragraph = model.Paragraph()
+        paragraph.spans.append(model.Span(text="in a cell", size_pt=9.0, font="Rockwell"))
+        cell.story.paragraphs.append(paragraph)
+        table.cells.append(cell)
+        document.pages[0].items.append(table)
+
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            fonts = ET.fromstring(archive.read("Resources/Fonts.xml"))
+        self.assertIn(
+            "Rockwell", {f.get("Name") for f in fonts.iter("FontFamily")}
+        )
+
+    def test_a_ramp_on_a_cells_run_becomes_a_gradient_resource(self):
+        ramp = model.Gradient(
+            stops=(
+                model.GradientStop(location=0.0, color=(255, 0, 0)),
+                model.GradientStop(location=100.0, color=(0, 0, 255)),
+            )
+        )
+        graphic, story = self._parts(color=(145, 56, 1), gradient=ramp)
+        self.assertEqual(len(list(graphic.iter("Gradient"))), 1)
+        self.assertEqual(self._cell_run(story).get("FillColor"), "Gradient/G_1")
+
+
+class CellRuleOutputTest(unittest.TestCase):
+    """A cell the file recorded no rule for says so, on all four edges.
+
+    Left unsaid, the reader draws its own line around every cell -- a
+    colour and a weight the .pub never states, printed across the layout
+    grids the newsletters are built on. Both spellings of "no line" are
+    written because Affinity honours either
+    (`research/probe_cell_rules.py`), and a reader that honours only one
+    still reads the same answer.
+    """
+
+    EDGES = ("Top", "Left", "Bottom", "Right")
+
+    def _cells(self, unruled: bool):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        table = model.Table(
+            x=0.0, y=0.0, width=200.0, height=50.0,
+            column_widths=[100.0, 100.0],
+            row_heights=[50.0],
+        )
+        table.cells = [
+            model.TableCell(row=0, column=0, unruled=unruled),
+            model.TableCell(row=0, column=1),
+        ]
+        document.pages[0].items.append(table)
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        return {c.get("Name"): c for c in story.iter("Cell")}
+
+    def test_every_edge_is_silenced_both_ways(self):
+        cell = self._cells(True)["0:0"]
+        for edge in self.EDGES:
+            self.assertEqual(cell.get(f"{edge}EdgeStrokeWeight"), "0", edge)
+            self.assertEqual(cell.get(f"{edge}EdgeStrokeColor"), "Swatch/None", edge)
+
+    def test_a_cell_we_know_nothing_about_keeps_the_readers_default(self):
+        # The reader's grid is wrong, but writing zeros for a cell whose
+        # record was never read would be a claim the file never made.
+        cell = self._cells(False)["1:0"]
+        for edge in self.EDGES:
+            self.assertIsNone(cell.get(f"{edge}EdgeStrokeWeight"), edge)
+            self.assertIsNone(cell.get(f"{edge}EdgeStrokeColor"), edge)
+
+    def test_the_none_swatch_it_names_is_defined(self):
+        # A dangling reference reads on the page as the override being
+        # ignored, which is the one outcome that cannot be diagnosed.
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        table = model.Table(
+            x=0.0, y=0.0, width=100.0, height=50.0,
+            column_widths=[100.0], row_heights=[50.0],
+        )
+        table.cells = [model.TableCell(row=0, column=0, unruled=True)]
+        document.pages[0].items.append(table)
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            graphic = archive.read("Resources/Graphic.xml").decode("utf-8")
+        self.assertIn('Self="Swatch/None"', graphic)
+
+
 class HangingIndentTabTest(unittest.TestCase):
     """A hanging indent needs the tab stop that makes it hang.
 

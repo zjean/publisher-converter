@@ -576,6 +576,16 @@ nine sample files records either**, so there is no case to decode against.
 One deliberately formatted table would settle it, and the reader it plugs
 into is already written.
 
+Since `backlog.md` §9, a converted cell also **states all four of its
+edges off** wherever its record was read, because a cell edge left unstated
+is one the reader rules itself and Affinity's line around every cell is a
+grid across an article. That makes the plain control file below a check on
+what already ships: if a plain Publisher table prints no lines, the zeros
+are right; if it prints lines, they are Publisher's own default and the
+zeros are deleting them, and its weight and colour want reading off the
+styled file and writing through the same attributes. **So read the control
+file first, and if it is ruled, say so before anything else.**
+
 ### What is already known
 
 - libmspub reads four fields of a cell record — the first and last row and
@@ -666,14 +676,19 @@ exactly the comparison needed.
 `pubfile._table_cells` already walks every field of every record and
 returns a per-cell structure keyed to the table; carrying fill and ruling
 means adding fields to `TableStructure`, widening `model.TableCell`
-alongside `insets`, and writing the matching attributes in
-`idml._table_story_part`, next to the inset attributes. The matching, the
-plumbing and the tests are all in place — the sample is the only missing
-piece.
+alongside `insets` and `unruled`, and writing the matching attributes in
+`idml._table_story_part`, next to the ones that already state every edge
+off. The matching, the plumbing and the tests are all in place — the sample
+is the only missing piece.
 
-While in Publisher, also answer `research/probe_cell_insets.py` on the
-Affinity side: it builds a table whose rows differ only in their insets,
-and no one has yet confirmed that Affinity honours them on import.
+The reader end needs nothing proved: `research/probe_cell_rules.py` has
+been opened on Affinity Publisher for macOS and shows a per-cell edge
+stroke beating the reader's default, landing per edge, and standing alone
+against a neighbour that states nothing. So whatever the styled file turns
+out to say, there is a place to write it that Affinity honours.
+
+`research/probe_cell_insets.py` is answered too, on the same machine: all
+four insets are honoured and a zero survives as zero.
 
 ---
 

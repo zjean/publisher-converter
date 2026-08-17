@@ -600,6 +600,43 @@ class TableTest(unittest.TestCase):
         )
 
 
+class CellTextResourceTest(unittest.TestCase):
+    """A cell's text names fonts and colours as much as a frame's does.
+
+    Both were collected by walking text frames alone, so a font or a
+    colour used *only* inside a table cell never reached the package: the
+    font came out substituted and the colour fell back to black, in both
+    cases silently.
+    """
+
+    def _document(self, **span) -> model.Document:
+        table = model.Table(
+            x=0.0, y=0.0, width=100.0, height=20.0,
+            column_widths=[100.0], row_heights=[20.0],
+        )
+        cell = model.TableCell(row=0, column=0)
+        paragraph = model.Paragraph()
+        paragraph.spans.append(model.Span(text="in a cell", **span))
+        cell.story.paragraphs.append(paragraph)
+        table.cells.append(cell)
+        return model.Document(pages=[model.Page(items=[table])])
+
+    def test_a_font_used_only_in_a_cell_is_declared(self):
+        self.assertEqual(self._document(font="Rockwell").fonts, ["Rockwell"])
+
+    def test_a_colour_used_only_in_a_cell_reaches_the_colour_table(self):
+        self.assertIn((1, 2, 3), self._document(color=(1, 2, 3)).colors)
+
+    def test_a_run_stroke_inside_a_cell_reaches_it_too(self):
+        self.assertIn((4, 5, 6), self._document(stroke=(4, 5, 6)).colors)
+
+    def test_a_cell_inside_a_group_is_reached(self):
+        document = self._document(color=(1, 2, 3))
+        table = document.pages[0].items[0]
+        document.pages[0].items = [model.Group(children=[table])]
+        self.assertIn((1, 2, 3), document.colors)
+
+
 class EmptyTableTest(unittest.TestCase):
     """An empty grid contributes nothing, exactly as an empty frame does."""
 

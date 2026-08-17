@@ -873,22 +873,52 @@ These are real and deliberate, not bugs to be surprised by later.
   edge rather than picking up a default, a 24pt inset moves the text by
   24pt, and the 9pt gutter column still sets text.
 
-  What that probe also showed, unasked, is that **the cell rules are
-  Affinity's, not Publisher's.** We reference `TableStyle/$ID/[Basic
-  Table]` without defining it, so the reader supplies its own, and the
-  one Affinity supplies draws a line around every cell. Whether a
-  Publisher table with no ruling recorded should print no lines or
-  Publisher's own default lines is unsettled — but letting the reader
-  decide is the one answer that is certainly not the file's. `actions.md`
-  §9 settles it with the same sample.
+  What that probe also showed, unasked, is that **the cell rules used to
+  be Affinity's, not Publisher's.** We reference `TableStyle/$ID/[Basic
+  Table]` without defining it, so the reader supplied its own, and the one
+  Affinity supplies draws a line around every cell — a black grid over the
+  layout tables these newsletters are built from, in a colour and a weight
+  no .pub states.
 
-  Cell *fill and ruling* are still not carried, and this is a property of
-  the corpus rather than a gap in the reader: no table in any sample file
-  records either. Every cell record holds only its row and column bounds,
-  its insets, and two cached extents. A ruled or shaded table therefore
-  still needs a sample before it can be read; `actions.md` says how to
-  make one. A table's *own* fill and border do arrive, as the rectangle
-  libmspub draws behind it.
+  **Every cell we have read now says its four edges carry no rule**, both
+  ways IDML can say it: a stroke weight of zero and a stroke colour of
+  `Swatch/None`. Across the newsletters that is the same 18 tables and 974
+  cells, all four edges on each. Which is safe to write was measured, not
+  argued: `research/probe_cell_rules.py`, opened on Affinity Publisher for
+  macOS, states cell edges six ways over one 3 x 3 table. A per-cell
+  override beats the default outright — 4pt magenta where asked — it lands
+  per edge, a stated edge stands alone against a neighbour that says
+  nothing, and each of the zero, the `Swatch/None` and the two together
+  removes the line. No table style has to be defined for any of it.
+
+  The reasoning for writing them at all is the format's own rule, that **a
+  field the file leaves out is absent rather than defaulted**: a cell
+  record states its padding and nothing else, in all 1,260 of them, so a
+  cell we have read is a cell Publisher recorded no lines for. A cell whose
+  record we never read is left alone, the same way its insets are. What
+  cannot yet be told apart is a table Publisher ruled from something
+  outside those records — a table format, say — which would now arrive
+  unruled, so every document carrying tables names the count in its report
+  and says to re-add those lines by hand. `actions.md` §9's plain control
+  file settles that directly, by saying whether an unstyled Publisher table
+  prints lines at all.
+
+  **A cell's own runs count as text.** Fonts and colours were collected by
+  walking text frames alone, so anything named only inside a table never
+  reached the package: in two of the three newsletters that was Arial, left
+  out of the font list while 104 runs named it, and a colour used only
+  there would have resolved to nothing and been written as black. One
+  shared walk — `model.Document.stories`, cells included — now feeds the
+  fonts, the swatches, the gradient resources and the language list alike.
+
+  Cell *fill*, and real rule weights and colours, are still not carried,
+  and this is a property of the corpus rather than a gap in the reader: no
+  table in any sample file records either. Every cell record holds only its
+  row and column bounds, its insets, and two cached extents. A ruled or
+  shaded table therefore still needs a sample before it can be read;
+  `actions.md` says how to make one, and the writer it plugs into is the
+  one already writing the zeros. A table's *own* fill and border do arrive,
+  as the rectangle libmspub draws behind it.
 
   **A field the file leaves out is absent rather than defaulted**, which
   is what lets a missing inset be read as zero, and it is measured rather

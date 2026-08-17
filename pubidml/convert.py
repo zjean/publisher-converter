@@ -593,6 +593,16 @@ def _apply_cell_insets(
 
     The file itself carries four insets per cell, and the table's own
     grid is what ties a chunk back to the table in the event stream.
+
+    Reading a cell's record settles its *rules* as well, which is why they
+    are set here rather than in a pass of their own: the records state
+    padding and nothing else -- no rule, no shade, in all 1,260 of them
+    across the corpus -- and a field this format leaves out is absent
+    rather than defaulted. So a cell whose record we have read is a cell
+    Publisher recorded no lines for, and saying nothing about its edges is
+    the one answer that is certainly wrong: the reader then draws its own
+    line around every cell, in a colour and a weight the .pub never
+    states, across the layout grids these documents are built on.
     """
     if structure is None or not structure.tables:
         return
@@ -610,10 +620,18 @@ def _apply_cell_insets(
             if found is None:
                 continue
             cell.insets = model.CellInsets(*found)
+            cell.unruled = True
             cells += 1
 
     if tables:
         log.info("cell insets read for %d table(s), %d cell(s)", tables, cells)
+        document.warnings.append(
+            f"{tables} table(s) written with every cell rule off: their "
+            f"{cells} cell record(s) state padding and nothing else, and a "
+            f"cell edge left unstated is one the reader rules itself. A table "
+            f"Publisher ruled from something outside those records would "
+            f"arrive unruled — re-add those lines by hand"
+        )
 
 
 def _restore_gradient_ramps(

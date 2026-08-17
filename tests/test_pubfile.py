@@ -763,6 +763,38 @@ class CellInsetApplicationTest(unittest.TestCase):
         convert._apply_cell_insets(document, None)
         self.assertIsNone(table.cells[0].insets)
 
+    def test_a_matched_cell_is_marked_unruled(self):
+        # Its record was read, and no record in the corpus states a rule:
+        # so this is a cell Publisher recorded no lines for, which is not
+        # the same as a cell nobody looked at.
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 2.0, 3.0, 4.0)})
+        )
+        self.assertTrue(table.cells[0].unruled)
+
+    def test_a_cell_the_file_does_not_mention_is_not_marked(self):
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 1.0, 1.0, 1.0)})
+        )
+        self.assertFalse(table.cells[1].unruled)
+
+    def test_no_structure_at_all_marks_nothing(self):
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(document, None)
+        self.assertFalse(table.cells[0].unruled)
+
+    def test_the_tables_it_silenced_are_named_in_the_report(self):
+        document, _table = self.document_with_table()
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 2.0, 3.0, 4.0)})
+        )
+        self.assertTrue(
+            any("cell rule" in warning for warning in document.warnings),
+            document.warnings,
+        )
+
 
 def quill_stream(*chunks: tuple) -> bytes:
     """A Quill stream holding the given (name, payload) chunks.

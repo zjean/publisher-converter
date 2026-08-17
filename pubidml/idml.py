@@ -83,6 +83,10 @@ _URI_PATH_SAFE = "/!$&'()*+,;=:@"
 NO_PARAGRAPH_STYLE = "ParagraphStyle/$ID/[No paragraph style]"
 NO_CHARACTER_STYLE = "CharacterStyle/$ID/[No character style]"
 
+# The four sides of a table cell, as IDML prefixes them: TopEdgeStroke...,
+# LeftEdgeStroke..., and so on.
+_CELL_EDGES = ("Top", "Left", "Bottom", "Right")
+
 # What IDML calls the languages Publisher states, with the quote marks and
 # the id each one carries. Copied from the languages a real InDesign
 # designmap declares rather than invented: the name is not a locale tag
@@ -517,13 +521,12 @@ class IdmlWriter:
 
         for item in self.doc.all_items():
             claim(item.style.gradient)
-            # A recovered WordArt headline carries its ramp on the text
-            # rather than on a shape, so the runs have to be reached too or
-            # the reference resolves to nothing.
-            if isinstance(item, model.TextFrame):
-                for paragraph in item.story.paragraphs:
-                    for span in paragraph.spans:
-                        claim(span.gradient)
+        # A recovered WordArt headline carries its ramp on the text rather
+        # than on a shape, so the runs have to be reached too or the
+        # reference resolves to nothing -- every run, cells included, for
+        # the same reason their colours are collected.
+        for span in self.doc.spans():
+            claim(span.gradient)
 
     def _languages_used(self) -> List[str]:
         """IDML's name for every language the text is written in.
@@ -534,22 +537,11 @@ class IdmlWriter:
         declares Czech and nothing else.
         """
         found: List[str] = []
-        for story in self._stories():
-            for paragraph in story.paragraphs:
-                for span in paragraph.spans:
-                    name = _language_name(span.language)
-                    if name and name not in found:
-                        found.append(name)
+        for span in self.doc.spans():
+            name = _language_name(span.language)
+            if name and name not in found:
+                found.append(name)
         return found
-
-    def _stories(self):
-        """Every story in the document, table cells included."""
-        for item in self.doc.all_items():
-            if isinstance(item, model.TextFrame):
-                yield item.story
-            elif isinstance(item, model.Table):
-                for cell in item.cells:
-                    yield cell.story
 
     def _fill_ref(self, style: model.GraphicStyle) -> str:
         """A shape's fill: its gradient where it has one, else its colour."""
@@ -1350,6 +1342,18 @@ class IdmlWriter:
                         "BottomInset": fmt(cell.insets.bottom),
                     }
                 )
+            # Both spellings of "no line", on every edge. We name
+            # [Basic Table] without defining it, so an edge we say nothing
+            # about is ruled by the reader -- Affinity draws a line around
+            # every cell -- and that grid belongs to no .pub. Measured, not
+            # argued: research/probe_cell_rules.py shows Affinity honouring
+            # a zero weight and a None swatch separately and an override
+            # per edge, so stating both says the same thing twice to a
+            # reader that reads either.
+            if cell.unruled:
+                for edge in _CELL_EDGES:
+                    attributes[f"{edge}EdgeStrokeWeight"] = fmt(0.0)
+                    attributes[f"{edge}EdgeStrokeColor"] = "Swatch/None"
             node = ET.SubElement(element, "Cell", attributes)
             paragraphs = cell.story.paragraphs or [model.Paragraph()]
             for position, block in enumerate(paragraphs):
