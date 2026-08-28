@@ -269,3 +269,117 @@ def faces(buf: bytes) -> List[Face]:
         return [Face(buf, 0)]
     except struct.error as error:
         raise FontError(f"truncated font: {error}") from error
+
+
+# Where each platform keeps its fonts. Publisher's own headline faces --
+# Monotype Corsiva and Pristina, between them 46 of the corpus's 48
+# headlines -- ship with Office on Windows, which is where the converter
+# runs as an .exe; on a Mac they are only present if someone installed
+# them.
+_FONT_DIRECTORIES = {
+    "darwin": (
+        "/System/Library/Fonts",
+        "/System/Library/Fonts/Supplemental",
+        "/Library/Fonts",
+        "~/Library/Fonts",
+    ),
+    "win32": (
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts"),
+    ),
+}
+_FONT_DIRECTORIES_DEFAULT = (
+    "/usr/share/fonts", "/usr/local/share/fonts", "~/.fonts",
+    "~/.local/share/fonts",
+)
+_FONT_SUFFIXES = frozenset({".ttf", ".ttc", ".otf", ".otc"})
+
+
+def font_directories() -> List[Path]:
+    """Where to look for installed fonts on this platform."""
+    import sys
+    paths = _FONT_DIRECTORIES.get(sys.platform, _FONT_DIRECTORIES_DEFAULT)
+    return [Path(p).expanduser() for p in paths if p]
+
+
+# family (casefolded) -> subfamily (casefolded) -> path and index in file.
+_index: Optional[Dict[str, Dict[str, Tuple[Path, int]]]] = None
+
+
+def reset_index() -> None:
+    """Forget the installed fonts, so the next lookup walks the disk again."""
+    global _index
+    _index = None
+
+
+def _build_index() -> Dict[str, Dict[str, Tuple[Path, int]]]:
+    """Every installed face, by family and subfamily.
+
+    Only the table directory and the name table are read here: an index
+    over a few hundred files has to be cheap, and the glyph tables are
+    read later, for the one font a headline actually names.
+    """
+    found: Dict[str, Dict[str, Tuple[Path, int]]] = {}
+    for directory in font_directories():
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in _FONT_SUFFIXES:
+                continue
+            try:
+                data = path.read_bytes()
+                members = faces(data)
+            except (OSError, FontError, struct.error, ValueError):
+                continue
+            for position, face in enumerate(members):
+                if not face.family:
+                    continue
+                by_style = found.setdefault(face.family.casefold(), {})
+                by_style.setdefault(face.subfamily.casefold(), (path, position))
+    return found
+
+
+def _style_names(bold: bool, italic: bool) -> List[str]:
+    """Subfamily names to try, best first.
+
+    A file that asks for bold and finds only the regular face is measured
+    against regular: the metrics come out slightly narrow, which errs
+    toward a headline that fits rather than one that overflows its band.
+    """
+    if bold and italic:
+        wanted = ["bold italic", "bolditalic", "bold oblique", "bold", "italic"]
+    elif bold:
+        wanted = ["bold"]
+    elif italic:
+        wanted = ["italic", "oblique"]
+    else:
+        wanted = []
+    return wanted + ["regular", "book", "roman", "normal"]
+
+
+def find_face(family: str, bold: bool, italic: bool) -> Optional[Face]:
+    """The installed face a headline names, or None if it is not there.
+
+    The family has to match exactly. 'Corsiva Hebrew' ships with macOS and
+    'Monotype Corsiva' does not, and they share a word but not a single
+    Latin glyph, so a loose match would set 40 of the corpus's headlines
+    from a font that cannot draw them.
+    """
+    global _index
+    if not family:
+        return None
+    if _index is None:
+        _index = _build_index()
+    by_style = _index.get(family.casefold())
+    if not by_style:
+        return None
+    for name in _style_names(bold, italic):
+        if name in by_style:
+            path, position = by_style[name]
+            break
+    else:
+        path, position = next(iter(by_style.values()))
+    try:
+        return faces(path.read_bytes())[position]
+    except (OSError, FontError, struct.error, IndexError):
+        return None

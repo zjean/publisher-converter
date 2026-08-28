@@ -5,7 +5,10 @@ the way `test_pubfile.py` builds real Escher records: a reader tested
 against a mock only proves the mock agrees with itself.
 """
 import struct
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from pubidml import fontmetrics
 
@@ -242,3 +245,76 @@ class MeasurementTest(unittest.TestCase):
         self.assertAlmostEqual(ink, 0.700)
         self.assertAlmostEqual(width, 0.600)
         self.assertAlmostEqual(advance, 0.600)
+
+
+class FontIndexTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        patch = mock.patch.object(
+            fontmetrics, "font_directories", lambda: [self.root]
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        fontmetrics.reset_index()
+        self.addCleanup(fontmetrics.reset_index)
+
+    def write(self, name, **kwargs):
+        (self.root / name).write_bytes(build_font(**kwargs))
+
+    def test_a_family_is_found_by_name(self):
+        self.write("kerk.ttf", family="Kerk Display")
+        face = fontmetrics.find_face("Kerk Display", bold=False, italic=False)
+        self.assertIsNotNone(face)
+        self.assertEqual(face.family, "Kerk Display")
+
+    def test_a_family_that_is_not_installed_is_not_found(self):
+        self.write("kerk.ttf", family="Kerk Display")
+        self.assertIsNone(fontmetrics.find_face("Pristina", bold=False, italic=False))
+
+    def test_a_near_miss_family_is_not_substituted(self):
+        # 'Corsiva Hebrew' ships with macOS and 'Monotype Corsiva' does not.
+        # Matching on a shared word would set 40 of the corpus's headlines
+        # from a font with no Latin letters in it.
+        self.write("corsiva.ttf", family="Corsiva Hebrew")
+        self.assertIsNone(
+            fontmetrics.find_face("Monotype Corsiva", bold=False, italic=False)
+        )
+
+    def test_the_bold_face_is_preferred_when_bold_is_asked_for(self):
+        self.write("plain.ttf", family="Kerk Display", subfamily="Regular")
+        self.write("bold.ttf", family="Kerk Display", subfamily="Bold")
+        face = fontmetrics.find_face("Kerk Display", bold=True, italic=False)
+        self.assertEqual(face.subfamily, "Bold")
+
+    def test_regular_stands_in_when_the_bold_face_is_missing(self):
+        # Slightly narrow metrics, which errs toward a headline that fits.
+        self.write("plain.ttf", family="Kerk Display", subfamily="Regular")
+        face = fontmetrics.find_face("Kerk Display", bold=True, italic=False)
+        self.assertEqual(face.subfamily, "Regular")
+
+    def test_a_collection_contributes_every_face_it_holds(self):
+        (self.root / "both.ttc").write_bytes(build_collection(
+            build_font(family="Kerk Display", subfamily="Regular"),
+            build_font(family="Kerk Display", subfamily="Italic"),
+        ))
+        face = fontmetrics.find_face("Kerk Display", bold=False, italic=True)
+        self.assertEqual(face.subfamily, "Italic")
+
+    def test_a_file_that_is_not_a_font_is_skipped(self):
+        (self.root / "notes.txt").write_bytes(b"this is not a font")
+        (self.root / "broken.ttf").write_bytes(b"\x00\x01\x00\x00truncated")
+        self.write("kerk.ttf", family="Kerk Display")
+        self.assertIsNotNone(
+            fontmetrics.find_face("Kerk Display", bold=False, italic=False)
+        )
+
+    def test_a_font_directory_that_does_not_exist_is_not_an_error(self):
+        with mock.patch.object(
+            fontmetrics, "font_directories", lambda: [self.root / "nope"]
+        ):
+            fontmetrics.reset_index()
+            self.assertIsNone(
+                fontmetrics.find_face("Kerk Display", bold=False, italic=False)
+            )
