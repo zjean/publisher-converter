@@ -405,7 +405,23 @@ _AVERAGE_EM_PER_ADVANCE = 0.50
 # Faces measured once on a machine that has them, so a document converts
 # the same way everywhere. `research/font_metrics.py` prints these.
 # Entries are (ink per em, mean advance per em, em per glyph).
-BAKED: Dict[str, Tuple[float, float, float]] = {}
+#
+# These four are the corpus's headline faces -- Monotype Corsiva sets 40
+# of its 48 WordArt shapes and Pristina 6 -- and both ship with Office
+# rather than with either operating system, so the machine converting a
+# document is quite likely not to have them. Measured over the corpus's
+# own headline words, which is why the ink runs high: 'Verjaardagen'
+# descends and a single sample word would not have shown that.
+BAKED: Dict[str, Tuple[float, float, float]] = {
+    # Monotype Corsiva Regular, measured over 7 headline(s)
+    "monotype corsiva": (0.894, 0.382, 0.382),
+    # Pristina Regular, measured over 7 headline(s)
+    "pristina": (1.100, 0.347, 0.347),
+    # Comic Sans MS Regular, measured over 7 headline(s)
+    "comic sans ms": (0.965, 0.510, 0.510),
+    # Arial Black Regular, measured over 7 headline(s)
+    "arial black": (0.843, 0.598, 0.598),
+}
 
 
 @dataclass(frozen=True)

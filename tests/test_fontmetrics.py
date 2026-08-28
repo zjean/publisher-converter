@@ -387,3 +387,30 @@ class TierTest(unittest.TestCase):
         self.assertEqual(found.source, "font")
         self.assertAlmostEqual(found.width_per_em, 1.100)
         self.assertAlmostEqual(found.ink_per_em, 0.70)
+
+
+class BakedTableTest(unittest.TestCase):
+    """The faces a machine without Office still has to size correctly.
+
+    Monotype Corsiva sets 40 of the corpus's 48 headlines and Pristina 6,
+    and both ship with Office rather than with an operating system -- so
+    the machine converting a document is quite likely not to have them.
+    Emptying this table would silently put those headlines back on the
+    global averages.
+    """
+
+    def test_the_corpus_headline_faces_are_baked(self):
+        for family in ("monotype corsiva", "pristina", "comic sans ms",
+                       "arial black"):
+            with self.subTest(family=family):
+                self.assertIn(family, fontmetrics.BAKED)
+
+    def test_every_baked_entry_is_three_plausible_ratios(self):
+        for family, entry in fontmetrics.BAKED.items():
+            with self.subTest(family=family):
+                ink, advance, per_glyph = entry
+                # An em of ink is normal for type with both ascenders and
+                # descenders; twice an em is a misread table.
+                self.assertTrue(0.3 < ink < 2.0, ink)
+                self.assertTrue(0.1 < advance < 1.5, advance)
+                self.assertTrue(0.1 < per_glyph < 1.5, per_glyph)
