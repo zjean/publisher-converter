@@ -499,29 +499,53 @@ These are real and deliberate, not bugs to be surprised by later.
   one bent shape in the corpus — a *button curve* — is named by the shape
   Publisher asked for, so whoever redraws it knows what to draw.
 
-  **A shape that states no point size is sized to fill its band**, because
-  that is what WordArt does with the size a shape *does* state: every
-  WordArt shape in the corpus states the stretch flag, which is the file
-  saying the glyphs are stretched to the shape. Measuring Publisher's own
-  page settles it — a dropped initial there inks 39.7 pt of a 40.1 pt band,
-  and its headline 27.6 pt of a 28.7 pt one. So the size is worked back
-  from the band, a line's share of its height at a time, since a band holds
-  as many lines as the words are set on and sizing a three-line headline
-  from the whole band trebles it. The width binds too: Publisher condenses
-  glyphs to fit a band and straight text cannot, so a headline sized by
-  height alone overflows and wraps, which is worse than one slightly small.
-  The earlier rule averaged the *stated* sizes against their bands (1.33,
-  spread 1.02 to 1.59) — a measure of how big a box someone dragged, not of
-  how big the letters came out, and it left a dropped initial at half the
-  height Publisher drew it. The warning says which headlines this sized.
+  **A headline is stretched to its band, measured against the font it is
+  actually set in.** Every WordArt shape in the corpus states the stretch
+  flag — the file saying the glyphs are fitted to the shape rather than set
+  at a size and left there — so the band is not a box the words sit inside.
+  It *is* the words, and two things follow from that.
 
-  What is *not* done is override a size the file does state. Publisher
-  stretches those to their bands as well — the *Meditatie* headline above
-  is stated at 20 pt and drawn at about 38 — so a stated size is a floor
-  rather than the truth, and matching it would mean reproducing WordArt's
-  horizontal condensation as well as its scale. That is a change to every
-  headline in a document rather than to the two the file leaves open, so it
-  waits for its own verification pass.
+  The **height decides the size**. Each line takes its share of the band,
+  since a band holds as many lines as the words are set on and sizing a
+  three-line headline from the whole band trebles it; the line inking most
+  of its em is the one that has to fit. The **width decides the
+  condensation**, not the size, because IDML states that directly as
+  `HorizontalScale` — which is exactly what WordArt's stretch does, and the
+  reason a stated point size is a floor rather than the truth.
+
+  How much of an em a face inks is read from the font file itself
+  (`pubidml/fontmetrics.py`, standard library only: `head` for the em,
+  `cmap` for the glyphs, `hmtx` for their advances, `glyf` for the box each
+  one inks). Until now it was three hand-fitted averages applied to every
+  font — 0.70 of an em inked, 0.55 per glyph, half an em per advance —
+  measured off two rendered headlines. Real faces are nowhere near that
+  uniform: Monotype Corsiva averages 0.38 of an em per glyph and Arial
+  Black 0.60, and Pristina inks 1.10 ems across a word with a descender in
+  it. What that changes, on `1336 kerkbode.pub`:
+
+  | headline | states | set at | condensed to |
+  |---|---|---|---|
+  | Meditatie | 20 pt | 39.8 pt | 73% |
+  | Kerkdiensten | 20 pt | 34.1 pt | 86% |
+  | Kerkbode *(masthead)* | — | 98.3 pt | 104% |
+  | D *(dropped initial)* | — | 57.9 pt | 121% |
+  | Schoonmaakrooster | 20 pt | 25.6 pt | 98% |
+
+  *Meditatie* is the check: Publisher draws it at about 38 pt against the
+  20 it states, and this puts it at 39.8. The dropped initial inks 39.7 pt
+  of its 40.1 pt band on Publisher's own page, which a cap set at 57.9 pt
+  in Pristina does.
+
+  **A font this machine cannot read falls back**, in two steps rather than
+  one. Monotype Corsiva and Pristina set 46 of the corpus's 48 headlines
+  and both ship with Office rather than with an operating system, so a
+  small table of faces measured once carries their proportions to a machine
+  that lacks them; a family in neither the system nor the table takes the
+  old global averages. Neither of those earns a horizontal scale —
+  condensing by a ratio worked out from a guessed width would state a
+  precision that is not there — so those headlines keep the older rule: the
+  smaller of what the height and the width allow, and no condensation. The
+  report names the font, because installing it is the fix.
 
   Because WordArt fits its glyphs to the shape, the band is not a box the
   words sit somewhere inside — it *is* the words. So the text is centred
@@ -1007,7 +1031,15 @@ pubidml/
   units.py            length parsing, points conversion
   model.py            event stream → document model
   idml.py             document model → IDML package
+  pubfile.py          the .pub read directly, for what libmspub drops
+  fontmetrics.py      sfnt reading: what a string measures in a font
+  metafile.py         WMF/EMF inspection and bitmap unwrapping
+  wmf.py              WMF drawing records → IDML paths
+  imagemeta.py        image dimensions and density
+  textrepair.py       libmspub's code page bug
+  logsetup.py         diagnostic log
   convert.py          single-file conversion
   cli.py              batch driver and CSV report
 files/                sample .pub documents
+research/             probes that answer one question each
 ```

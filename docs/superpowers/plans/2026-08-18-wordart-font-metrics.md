@@ -1,5 +1,13 @@
 # WordArt Font Metrics Implementation Plan
 
+> **Status:** executed 2026-08-28. Every task complete except Task 9
+> Step 4, the visual pass in Affinity, which needs a person. Two
+> corrections were needed on the way and are recorded in the commits:
+> the synthetic cmap builder wrote `idDelta` as a signed short (it is
+> applied modulo 65536, and the terminating segment needs -65535), and
+> Task 2 Step 5's expected Comic Sans ink of 0.837 is a single word's
+> measurement -- the probe averages over seven and reads 0.965.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Size and space WordArt headlines from the real metrics of the font they are set in, instead of from three hand-fitted averages, and then rewrite the conversion report against what is actually left approximate.
@@ -42,7 +50,7 @@
 **Interfaces:**
 - Produces: `FontError(Exception)`; `class Face` with attributes `family: Optional[str]`, `subfamily: str`, `upem: int`, `long_loca: bool`, `tables: Dict[str, Tuple[int, int]]`, constructed as `Face(buf: bytes, base: int = 0)`; `faces(buf: bytes) -> List[Face]`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/test_fontmetrics.py`. This file also holds the synthetic font builder that every later task reuses, so it is written in full here. The builder has been verified against the reader; do not simplify it.
 
@@ -233,12 +241,12 @@ class FaceReadingTest(unittest.TestCase):
                     fontmetrics.faces(font[:cut])
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m unittest tests.test_fontmetrics -v`
 Expected: FAIL with `ModuleNotFoundError` or `AttributeError: module 'pubidml.fontmetrics' has no attribute 'faces'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `pubidml/fontmetrics.py` with the module docstring and this much of the reader:
 
@@ -363,12 +371,12 @@ def faces(buf: bytes) -> List[Face]:
         raise FontError(f"truncated font: {error}") from error
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `python3 -m unittest tests.test_fontmetrics -v`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pubidml/fontmetrics.py tests/test_fontmetrics.py
@@ -387,7 +395,7 @@ git commit -m "Read a font file far enough to name the face it holds"
 - Consumes: `Face`, `FontError`, `faces()` from Task 1; the builders `build_font`, `build_collection` from `tests/test_fontmetrics.py`.
 - Produces: `Face.cmap -> Dict[int, int]`; `Face.advance(gid: int) -> int`; `Face.bbox(gid: int) -> Optional[Tuple[int, int, int, int]]`; `Face.measure(text: str) -> Optional[Tuple[Optional[float], float, float]]` returning `(ink_per_em, width_per_em, mean_advance_per_em)`, or `None` when the face covers none of the string's characters.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/test_fontmetrics.py`:
 
@@ -448,12 +456,12 @@ class MeasurementTest(unittest.TestCase):
         self.assertAlmostEqual(advance, 0.600)
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m unittest tests.test_fontmetrics.MeasurementTest -v`
 Expected: FAIL with `AttributeError: 'Face' object has no attribute 'measure'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `pubidml/fontmetrics.py`, above `class Face`:
 
@@ -615,12 +623,12 @@ Then add these methods to `Face`:
         )
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `python3 -m unittest tests.test_fontmetrics -v`
 Expected: PASS, 12 tests.
 
-- [ ] **Step 5: Sanity-check against a real font**
+- [x] **Step 5: Sanity-check against a real font**
 
 Run:
 
@@ -635,7 +643,7 @@ print(face.family, face.measure('Kerkdiensten'))
 
 Expected: `Comic Sans MS (0.837..., 6.147..., 0.512...)`. If the ink is not near 0.84, the `glyf`/`loca` reading is wrong — do not proceed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add pubidml/fontmetrics.py tests/test_fontmetrics.py
@@ -654,7 +662,7 @@ git commit -m "Measure what a string inks and how wide it sets"
 - Consumes: `Face`, `faces()`, `FontError`.
 - Produces: `font_directories() -> List[Path]`; `find_face(family: str, bold: bool, italic: bool) -> Optional[Face]`; `reset_index() -> None` (drops the cached index, for tests).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/test_fontmetrics.py`:
 
@@ -737,12 +745,12 @@ class FontIndexTest(unittest.TestCase):
             )
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m unittest tests.test_fontmetrics.FontIndexTest -v`
 Expected: FAIL with `AttributeError: module 'pubidml.fontmetrics' has no attribute 'reset_index'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `pubidml/fontmetrics.py`:
 
@@ -861,12 +869,12 @@ def find_face(family: str, bold: bool, italic: bool) -> Optional[Face]:
         return None
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `python3 -m unittest tests.test_fontmetrics -v`
 Expected: PASS, 20 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pubidml/fontmetrics.py tests/test_fontmetrics.py
@@ -885,7 +893,7 @@ git commit -m "Find the face a headline names among the installed fonts"
 - Consumes: `find_face()`, `Face.measure()`.
 - Produces: `@dataclass(frozen=True) Metrics` with fields `ink_per_em: float`, `width_per_em: float`, `mean_advance_per_em: float`, `source: str` and property `exact: bool` (`source == "font"`); `measure(family: Optional[str], bold: bool, italic: bool, text: str) -> Metrics`; `BAKED: Dict[str, Tuple[float, float, float]]` mapping a casefolded family to `(ink_per_em, mean_advance_per_em, em_per_glyph)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/test_fontmetrics.py`:
 
@@ -959,12 +967,12 @@ class TierTest(unittest.TestCase):
         self.assertAlmostEqual(found.ink_per_em, 0.70)
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m unittest tests.test_fontmetrics.TierTest -v`
 Expected: FAIL with `AttributeError: module 'pubidml.fontmetrics' has no attribute 'measure'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `pubidml/fontmetrics.py` (and add `from dataclasses import dataclass` to the imports):
 
@@ -1061,12 +1069,12 @@ def measure(family: Optional[str], bold: bool, italic: bool, text: str) -> Metri
     return _averages(text)
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `python3 -m unittest tests.test_fontmetrics -v`
 Expected: PASS, 26 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pubidml/fontmetrics.py tests/test_fontmetrics.py
@@ -1085,7 +1093,7 @@ git commit -m "Answer for a string with the font, a baked average, or neither"
 - Produces: `pubfile.WordArt.stretch: bool`; `WordArt.size` stays `Optional[float]` and is now `None` whenever the file states no size; `WordArt.fitted` keeps its meaning (`size is None` in the file) and is what `convert` reports on.
 - Removed: `pubfile._band_size`, `pubfile._BAND_INK_PER_EM`, `pubfile._BAND_EM_PER_GLYPH`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_pubfile.py`, and extend the existing `wordart_bools` helper's `bits` dict with `"stretch": 0x0A`:
 
@@ -1126,12 +1134,12 @@ class WordArtStatedSizeTest(unittest.TestCase):
         self.assertTrue(art.fitted)
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m unittest tests.test_pubfile.WordArtStretchTest tests.test_pubfile.WordArtStatedSizeTest -v`
 Expected: FAIL — `AttributeError: 'WordArt' object has no attribute 'stretch'`, and the size test fails because `_band_size` currently fills it in.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `pubidml/pubfile.py`, extend the boolean constants near line 235:
 
@@ -1175,7 +1183,7 @@ Change the size line to state only what the file states:
 
 Delete `_band_size` (lines 1085-1106) and the `_BAND_INK_PER_EM` / `_BAND_EM_PER_GLYPH` block with its comment (lines 287-306). Delete the now-unused `import re` only if nothing else in the file uses it — check with `grep -n "re\." pubidml/pubfile.py` first.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `python3 -m unittest tests.test_pubfile -v`
 Expected: The two new classes PASS. Existing tests that assert a band-derived size will FAIL — those assertions move to `test_convert.py` in Task 6. Update them now to assert `size is None` and `fitted is True`, and note in the commit that the sizing assertions have moved.
@@ -1183,7 +1191,7 @@ Expected: The two new classes PASS. Existing tests that assert a band-derived si
 Run: `make test`
 Expected: `test_convert.py` failures about WordArt sizes, which Task 6 fixes. Do not proceed past Task 6 leaving these red.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pubidml/pubfile.py tests/test_pubfile.py
@@ -1203,7 +1211,7 @@ git commit -m "Say what the file states about a headline, and leave sizing to th
 - Consumes: `fontmetrics.measure`, `fontmetrics.Metrics`, `pubfile.WordArt.stretch`.
 - Produces: `convert._wordart_metrics(art, line, measure) -> fontmetrics.Metrics`; `convert._wordart_fit(art, lines, measure) -> Tuple[float, Optional[float], str]` returning `(size_pt, horizontal_scale_or_None, source)`; `convert._wordart_tracking(spacing, mean_advance_per_em) -> Optional[float]`; `_wordart_frame(paths, art, page_width, page_height, measure=fontmetrics.measure)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_convert.py`:
 
@@ -1353,12 +1361,12 @@ class WordArtTrackingTest(unittest.TestCase):
 
 Add `from pubidml import fontmetrics` to the imports of `tests/test_convert.py` if it is not already there.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m unittest tests.test_convert.WordArtFitTest -v`
 Expected: FAIL with `AttributeError: module 'pubidml.convert' has no attribute '_wordart_fit'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `pubidml/convert.py`, add `from pubidml import fontmetrics` to the imports. Replace the `_EM_PER_ADVANCE` block (lines 1298-1308) with:
 
@@ -1475,7 +1483,7 @@ Add the field `applied_source: str = "average"` to `pubfile.WordArt` so the repo
 
 In `pubidml/model.py`, delete the second `tracking` declaration (lines 225-228) and the second `self.tracking` entry in `format_key` (line 247). The field is declared twice, so the second silently shadows the first and the key counts it twice.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `python3 -m unittest tests.test_convert -v`
 Expected: PASS, including the new classes. Existing WordArt frame tests may need their expected sizes updated — with the fake measurer absent they run on tier 3, which reproduces today's numbers, so any that still fail are genuine and must be understood, not just renumbered.
@@ -1483,7 +1491,7 @@ Expected: PASS, including the new classes. Existing WordArt frame tests may need
 Run: `make test`
 Expected: PASS, whole suite green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pubidml/convert.py pubidml/model.py tests/test_convert.py pubidml/pubfile.py
@@ -1501,7 +1509,7 @@ git commit -m "Stretch a headline to its band the way WordArt does"
 - Consumes: `fontmetrics.find_face`, `Face.measure`.
 - Produces: a script, not an import target. No test — `research/` holds probes, none of which are tested.
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 ```python
 """What a face measures, as a line for fontmetrics.BAKED.
@@ -1568,7 +1576,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 2: Run it against a font that is installed here**
+- [x] **Step 2: Run it against a font that is installed here**
 
 Run: `python3 -m research.font_metrics "Comic Sans MS"`
 Expected: a line like `    "comic sans ms": (0.837, 0.512, 0.512),`
@@ -1576,7 +1584,7 @@ Expected: a line like `    "comic sans ms": (0.837, 0.512, 0.512),`
 Run: `python3 -m research.font_metrics "Not A Font"`
 Expected: `'Not A Font' is not installed on this machine`, exit status 1.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add research/font_metrics.py
@@ -1595,7 +1603,7 @@ git commit -m "Print what a face measures, for a machine that lacks it"
 - Consumes: `WordArt.applied_source`, `WordArt.warp`, `_wordart_names`.
 - Produces: `convert.Result.wordart: int`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_convert.py`:
 
@@ -1650,12 +1658,12 @@ Add to `tests/test_cli.py`:
         self.assertNotIn("wordart", self.printed(result))
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tests.test_convert.WordArtReportTest tests.test_cli -v`
 Expected: FAIL — `Result` has no `wordart`, and the current report emits a warning for a clean recovery.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Replace `convert.py:1218-1271` with:
 
@@ -1711,14 +1719,14 @@ In `pubidml/cli.py`, extend the detail line:
 
 Add `"wordart"` to `REPORT_COLUMNS` at `cli.py:31` and `result.wordart` to the CSV row at `cli.py:326`, in the same position.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `make test`
 Expected: PASS.
 
 Note: `Result.needs_review` is `bool(self.warnings) or ...`, so files whose only warning was the old WordArt paragraph now report `ok` rather than `review`. That is the intent — a correct conversion should not ask for review — and it will change the status column for `1336 kerkbode.pub` in the CSV.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pubidml/convert.py pubidml/cli.py pubidml/model.py tests/
@@ -1732,7 +1740,7 @@ git commit -m "Say only what a person has to act on about a headline"
 **Files:**
 - Modify: `README.md:490-527` (the WordArt sizing paragraphs)
 
-- [ ] **Step 1: Convert the corpus**
+- [x] **Step 1: Convert the corpus**
 
 Run:
 
@@ -1742,7 +1750,7 @@ python3 pub2idml.py files -o converted 2>&1 | tail -40
 
 Expected: every file `ok` or `review`; no tracebacks. `1336 kerkbode.pub` should show `15 wordart` in its detail line.
 
-- [ ] **Step 2: Record what the change did**
+- [x] **Step 2: Record what the change did**
 
 Run:
 
@@ -1767,17 +1775,17 @@ PY
 
 Paste this table into the commit message. It is the record of what changed and by how much, and the *Meditatie* row is the one to check against README's "stated at 20 pt and drawn at about 38".
 
-- [ ] **Step 3: Update README**
+- [x] **Step 3: Update README**
 
 Replace the paragraph beginning "**A shape that states no point size is sized to fill its band**" and the one beginning "What is *not* done is override a size the file does state" (`README.md:502-524`) with an account of what the code now does: the font is read where the machine has it; the size comes from the band's per-line height against the font's real ink; the width becomes `HorizontalScale` rather than a smaller size; a stated size is overridden where the shape states the stretch flag, which all 48 corpus shapes do; and a font that cannot be read falls back to the averages, which the report names. Keep README's habit of giving the evidence — the measured figures from Step 2 are that evidence.
 
 Also update the sentence in the "not done" list that says a filled path of disconnected edges is reported, if the report's wording changed for it.
 
-- [ ] **Step 4: Open the output**
+- [ ] **Step 4: Open the output** — NOT DONE: needs Affinity and a human eye
 
 Open `converted/1336 kerkbode.idml` in Affinity Publisher alongside Publisher's own rendering of `files/cgk/1336 kerkbode.pub`, and check the headlines land in their bands at the size Publisher drew them. This is the verification pass README asks for and the only ground truth that exists. Record what you find in the commit message; if a headline is wrong, that is a bug in the rule, not a reason to adjust a constant until it looks right.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md converted
