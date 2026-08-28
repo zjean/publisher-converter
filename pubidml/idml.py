@@ -86,6 +86,11 @@ NO_CHARACTER_STYLE = "CharacterStyle/$ID/[No character style]"
 # The four sides of a table cell, as IDML prefixes them: TopEdgeStroke...,
 # LeftEdgeStroke..., and so on.
 _CELL_EDGES = ("Top", "Left", "Bottom", "Right")
+# Publisher's three vertical alignments in IDML's spelling. It has a
+# fourth, JustifyAlign, that Publisher's cell record cannot state.
+_VERTICAL_JUSTIFICATION = {
+    "top": "TopAlign", "center": "CenterAlign", "bottom": "BottomAlign",
+}
 
 # What IDML calls the languages Publisher states, with the quote marks and
 # the id each one carries. Copied from the languages a real InDesign
@@ -138,6 +143,42 @@ def _pkg(tag: str) -> str:
 
 class MalformedPartError(Exception):
     """Raised when a generated part is not well-formed XML."""
+
+
+def _emit_margins(
+    page: ET.Element, margins: "model.PageMargins", page_width: float
+) -> None:
+    """Publisher's guides as a MarginPreference on one Page element.
+
+    IDML measures a column by where it starts and ends inside the text
+    area, so Publisher's guides -- which are single lines, not gutters --
+    come out as columns that meet: gutter zero, and each column ending
+    where the next begins. That is what the .pub actually draws.
+    """
+    text_width = page_width - margins.left - margins.right
+    edges = [0.0, *margins.columns, text_width]
+    # A guide that does not fall inside the text area would describe a
+    # column of negative width, which no reader can draw. Then the margins
+    # are still worth having and the columns are not.
+    if sorted(edges) != edges:
+        edges = [0.0, text_width]
+    positions: List[str] = []
+    for start, end in zip(edges, edges[1:]):
+        positions += [fmt(start), fmt(end)]
+    ET.SubElement(
+        page,
+        "MarginPreference",
+        {
+            "ColumnCount": str(len(edges) - 1),
+            "ColumnGutter": "0",
+            "ColumnDirection": "Horizontal",
+            "ColumnsPositions": " ".join(positions),
+            "Top": fmt(margins.top),
+            "Bottom": fmt(margins.bottom),
+            "Left": fmt(margins.left),
+            "Right": fmt(margins.right),
+        },
+    )
 
 
 def _serialise(element: ET.Element, processing_instruction: bool = False) -> bytes:
@@ -600,7 +641,7 @@ class IdmlWriter:
             },
         )
         half_w, half_h = master.width / 2.0, master.height / 2.0
-        ET.SubElement(
+        page_element = ET.SubElement(
             spread,
             "Page",
             {
@@ -615,6 +656,8 @@ class IdmlWriter:
                 "UseMasterGrid": "true",
             },
         )
+        if master.margins is not None:
+            _emit_margins(page_element, master.margins, master.width)
         page = model.Page(width=master.width, height=master.height)
         for item in _flatten(master.items):
             self._emit_item(spread, item, page, story_parts)
@@ -931,7 +974,7 @@ class IdmlWriter:
             page = self.doc.pages[position]
             number = position + 1
             offset_x = self._page_offset_x(number, page.width)
-            ET.SubElement(
+            page_element = ET.SubElement(
                 spread,
                 "Page",
                 {
@@ -948,6 +991,8 @@ class IdmlWriter:
                     "UseMasterGrid": "true",
                 },
             )
+            if page.margins is not None:
+                _emit_margins(page_element, page.margins, page.width)
 
         # Page items are children of the spread, not of the page, so each
         # one carries its page's offset itself.
@@ -1342,6 +1387,14 @@ class IdmlWriter:
                         "BottomInset": fmt(cell.insets.bottom),
                     }
                 )
+            # Publisher leaves this field out for a top-aligned cell, so
+            # a cell whose record we read always states one, top included
+            # -- and saying it is what keeps the reader's own default from
+            # standing where Publisher stated something.
+            if cell.vertical_align is not None:
+                attributes["VerticalJustification"] = _VERTICAL_JUSTIFICATION[
+                    cell.vertical_align
+                ]
             # Both spellings of "no line", on every edge. We name
             # [Basic Table] without defining it, so an edge we say nothing
             # about is ruled by the reader -- Affinity draws a line around

@@ -3,6 +3,33 @@
 **One sitting at a Windows machine with Microsoft Publisher on it.
 About 75 minutes. After 1 October 2026 none of it is possible.**
 
+---
+
+## What came back — 28 August 2026
+
+The sitting happened. Files are in `files/experiments/`. What it settled,
+and what it did not:
+
+| | outcome |
+|---|---|
+| **A** default tab interval | ✅ **settled.** 8.07874 on `1336 kerkbode`, 28.28976 on `Lisa Hoogendijk` — both match the `SGP ` chunk to four decimals. `actions.md` §10, wired in, warning removed. |
+| **B** text wrap | ◐ **located, not named.** The field is a 4-byte record on the picture shape, and block `0x34` is refuted. But `wrap-square` has a differently sized picture, `wrap-throug` has an extra shape, and `wrap-transparent` was saved where "Behind Text" was asked for — so which value means which setting is not pinned. `actions.md` §1. |
+| **C** page margins | ✅ **settled.** `margins-a` reads 1 / 1.5 / 2 / 2.5 cm and `margins-b` 0.25 / 0.75 / 1.25 / 1.75, exactly as set. Checked against all nine corpus files. `actions.md` §2, wired in. |
+| **D** field table | ◐ **half.** `field-pagenum` and `field-pagenum-plus-date` arrived; the control (`field-literal-hash`) and the one that pins token to position (`field-pagenum-offset`) did not. Byte 16 of a TOKN is the field-type code — 2 for a page number, 10 for a date. `actions.md` §3. |
+| **E** table rules and alignment | ✅ **settled, both halves.** `0x07` is vertical alignment (absent/1/2 = top/centre/bottom), wired in. And the rules turned out to live in `EscherStm`, not in the cell records — a shape per shaded cell and per ruled edge. That became `actions.md` §11, and needs no Publisher. |
+| **F** PDF exports | ◐ **3 of 15.** `1336`, `1338` and `Lisa Hoogendijk` only. **`rotated_text.pdf` is missing**, so the rotation-sign question against Publisher is still open. |
+| **G** fonts | ❌ **not copied.** `~/Library/Fonts` still has only Monotype Corsiva and Pristina from an earlier trip. |
+| **H** the executable | ❓ unrecorded. |
+
+### If there is another sitting
+
+Much shorter than the first: **`rotated_text.pdf` and the six remaining
+corpus PDFs** (irreplaceable), **the five fonts** (a drag-and-drop),
+**two field files**, and **six clean wrap saves** — one variable at a
+time, nothing else touched, including the picture's size.
+
+---
+
 Publisher retires on 1 October 2026 (13 October for perpetual Office
 2021), and after that `.pub` files cannot be opened in Publisher at all.
 Five things in `actions.md` are waiting on a reading that only Publisher

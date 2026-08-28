@@ -1943,3 +1943,115 @@ class LanguageOutputTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MarginPreferenceTest(unittest.TestCase):
+    """Publisher's guides, which librevenge has no property for at all."""
+
+    def _margins(self, page_margins, master_margins=None):
+        document = support.document(*support.text_frame("hello"))
+        document.pages[0].margins = page_margins
+        if master_margins is not None:
+            document.masters.append(
+                model.Master(name="A", width=612.0, height=792.0,
+                             margins=master_margins)
+            )
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            spread = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            root = ET.fromstring(archive.read(spread))
+            masters = [
+                ET.fromstring(archive.read(n))
+                for n in archive.namelist() if n.startswith("MasterSpreads/")
+            ]
+        return root, masters
+
+    def test_a_page_carries_the_margins_the_pub_stated(self):
+        root, _ = self._margins(
+            model.PageMargins(left=36.0, top=72.0, right=45.0, bottom=54.0)
+        )
+        found = next(root.iter("MarginPreference"))
+        self.assertEqual(found.get("Left"), "36")
+        self.assertEqual(found.get("Top"), "72")
+        self.assertEqual(found.get("Right"), "45")
+        self.assertEqual(found.get("Bottom"), "54")
+
+    def test_the_preference_is_a_child_of_the_page_it_describes(self):
+        root, _ = self._margins(model.PageMargins(left=36.0, top=36.0,
+                                                  right=36.0, bottom=36.0))
+        page = next(root.iter("Page"))
+        self.assertEqual(
+            [child.tag for child in page if child.tag == "MarginPreference"],
+            ["MarginPreference"],
+        )
+
+    def test_a_page_the_pub_said_nothing_about_gets_no_preference(self):
+        root, _ = self._margins(None)
+        self.assertEqual(list(root.iter("MarginPreference")), [])
+
+    def test_one_column_spans_the_whole_text_area(self):
+        # 8.5in wide, half an inch each side: 540pt of text.
+        root, _ = self._margins(
+            model.PageMargins(left=36.0, top=36.0, right=36.0, bottom=36.0)
+        )
+        found = next(root.iter("MarginPreference"))
+        self.assertEqual(found.get("ColumnCount"), "1")
+        self.assertEqual(found.get("ColumnsPositions"), "0 540")
+
+    def test_a_column_guide_becomes_two_columns_that_meet(self):
+        # Publisher draws a guide, not a gutter, so the columns touch.
+        root, _ = self._margins(
+            model.PageMargins(left=36.0, top=36.0, right=36.0, bottom=36.0,
+                              columns=(270.0,))
+        )
+        found = next(root.iter("MarginPreference"))
+        self.assertEqual(found.get("ColumnCount"), "2")
+        self.assertEqual(found.get("ColumnGutter"), "0")
+        self.assertEqual(found.get("ColumnsPositions"), "0 270 270 540")
+
+    def test_a_guide_outside_the_text_area_costs_the_columns_not_the_margins(self):
+        root, _ = self._margins(
+            model.PageMargins(left=36.0, top=36.0, right=36.0, bottom=36.0,
+                              columns=(600.0,))
+        )
+        found = next(root.iter("MarginPreference"))
+        self.assertEqual(found.get("ColumnCount"), "1")
+        self.assertEqual(found.get("Left"), "36")
+
+    def test_a_master_spread_carries_them_too(self):
+        _, masters = self._margins(
+            None, master_margins=model.PageMargins(left=18.0, top=18.0,
+                                                   right=18.0, bottom=18.0)
+        )
+        self.assertTrue(masters)
+        found = next(masters[0].iter("MarginPreference"))
+        self.assertEqual(found.get("Left"), "18")
+
+
+class CellVerticalAlignmentTest(unittest.TestCase):
+    """Field 0x07 of a cell record, in IDML's own spelling."""
+
+    def _cells(self, *alignments):
+        table = model.Table(x=0.0, y=0.0, width=216.0, height=18.0,
+                            column_widths=[72.0] * len(alignments),
+                            row_heights=[18.0])
+        table.cells = [
+            model.TableCell(row=0, column=index, vertical_align=alignment)
+            for index, alignment in enumerate(alignments)
+        ]
+        document = support.document()
+        document.pages[0].items.append(table)
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            story = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            root = ET.fromstring(archive.read(story))
+        return [cell.get("VerticalJustification") for cell in root.iter("Cell")]
+
+    def test_the_three_alignments_publisher_states_are_written(self):
+        self.assertEqual(
+            self._cells("top", "center", "bottom"),
+            ["TopAlign", "CenterAlign", "BottomAlign"],
+        )
+
+    def test_a_cell_whose_record_was_not_read_states_nothing(self):
+        self.assertEqual(self._cells(None), [None])

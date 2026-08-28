@@ -62,13 +62,32 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
         0x6D  array of one container per column and then per row, each
               giving 0x01 the running offset and 0x02 the size, in EMU
 
+    Guides chunk (chunk type 0x4C)
+      bare U32 length, then blocks, of which 0x02 holds the layout guides:
+        0x02  array of one container per guide, each giving
+                0x01  its position in EMU, from the top-left of the page
+                0x02  present when a band ends here
+                0x03  present when a band begins here
+                0x04  present when it is a *margin* guide rather than an
+                        interior column or row guide
+              The array runs every vertical guide in ascending order and
+              then every horizontal one, so the four carrying 0x04 are the
+              left, right, top and bottom margins in that order, and a
+              guide between the first pair is a column. Read in Publisher
+              against a controlled pair of documents and checked against
+              all nine corpus files, whose right and bottom guides come
+              back symmetric with their left and top ones on six of the
+              nine (actions.md §2).
+
     Cells chunk (chunk type 0x63)
       bare U32 length, then blocks:
         0x01  cell count
         0x02  array of one container per cell, each giving
                 0x01/0x02  first and last row      0x03/0x04  ditto columns
                 0x0A-0x0D  left, top, right and bottom inset, in EMU
-                0x07       1 or 2, uniform across a table -- unidentified
+                0x07       vertical alignment: 1 centre, 2 bottom, and
+                             left out for top. Read in Publisher against a
+                             table set one way per column (actions.md §9)
                 0x09       cached height of the cell's laid-out text: it
                              grows with the wrapping and is what makes the
                              row arithmetic below come out
@@ -180,6 +199,15 @@ _THIS_MASTER_NAME, _APPLIED_MASTER_NAME, _PAGE_SHAPES = 0x0E, 0x0D, 0x02
 _SHAPE_SEQNUM = 0x70
 _PAGE_CHUNK = 0x43
 
+_GUIDES_CHUNK = 0x4C
+_GUIDE_ARRAY, _GUIDE_ARRAY_TYPE = 0x02, 0xA0
+_GUIDE_POSITION, _GUIDE_IS_MARGIN = 0x01, 0x04
+# Page size reaches us through libmspub's four-decimal inches while a guide
+# is read straight out of the file in EMU, so a guide sitting on the page
+# edge can land a fraction of a point outside it. The same half-point the
+# Escher matching uses, and for the same reason.
+_GUIDE_TOLERANCE = 0.5
+
 _TABLE_CHUNK, _CELLS_CHUNK = 0x10, 0x63
 _SHAPE_CHUNK = 0x01
 _SHAPE_STORY_ID, _SHAPE_CHAIN_INDEX = 0x27, 0x28
@@ -196,6 +224,12 @@ _CELL_FIRST_ROW, _CELL_FIRST_COLUMN = 0x01, 0x03
 # one table in the corpus sets two sides differently, so the corpus cannot
 # tell this apart from left/right/top/bottom on its own.
 _CELL_INSETS = (0x0A, 0x0B, 0x0C, 0x0D)
+# Vertical alignment, left out where it is top -- the way every field in
+# this format is left out when it has nothing to say. Read in Publisher
+# from a table set top down column 1, centre down column 2 and bottom down
+# column 3, on rows tall enough for the difference to show.
+_CELL_VERTICAL_ALIGN = 0x07
+_CELL_VERTICAL_ALIGNMENTS = {0: "top", 1: "center", 2: "bottom"}
 _EMU_PER_POINT = 12700.0
 
 _CONTENTS_STREAM = ("Contents",)
@@ -313,17 +347,58 @@ _TAB_ALIGNMENTS = {1: "right", 2: "center"}
 # points in the range 1 to 1584. The Quill stream's SGP chunk is a bare
 # U32 length and then at most one block, id 0x00 and type 0x22, holding
 # the interval in EMU; a chunk stating no block leaves the document on
-# Publisher's default of half an inch. See research/default_tab.py for
-# the evidence, which is circumstantial: the block is absent from both
-# corpus files carrying no tab, present in all seven that carry one, and
-# reads three different values where the block once suspected of holding
-# the interval reads the same number in every file that has it.
+# Publisher's default of half an inch.
+#
+# Confirmed against Publisher itself. `? ActiveDocument.DefaultTabStop`
+# read back 8.07874 on `1336 kerkbode.pub` and 28.28976 on
+# `Lisa Hoogendijk.pub`, against 8.0787 and 28.2898 from this block --
+# and Lisa is the reading that settles it, because 28.2898 is a value no
+# other candidate predicts. Block 0x15, the alternative, states a flat
+# 359410 EMU in every file that carries it, the kerkbode issues included,
+# so it is the template default rather than the value in force. See
+# research/default_tab.py, which prints both side by side.
 _SECTION_CHUNK = "SGP "
 _DEFAULT_TAB_STOP, _DEFAULT_TAB_STOP_TYPE = 0x00, 0x22
 # What Publisher uses when the file states nothing, and what InDesign
 # falls back to as well -- so a document reading this needs no ruler
 # written for it.
 PUBLISHER_DEFAULT_TAB_STOP = 36.0
+
+
+@dataclass
+class PageGuides:
+    """Publisher's layout guides, in points from the top-left of the page.
+
+    The four margins are stored as the *positions* the file states rather
+    than as insets, because turning a right or bottom guide into a margin
+    needs the page size and that arrives from libmspub, not from here.
+    Ask `margins` for the insets once the page is known.
+    """
+
+    left: float
+    right: float
+    top: float
+    bottom: float
+    #: Interior vertical guides, between the left and right margins: the
+    #: column guides, of which a two-column newsletter states one.
+    columns: Tuple[float, ...] = ()
+    #: Interior horizontal guides, between the top and bottom margins.
+    rows: Tuple[float, ...] = ()
+
+    def margins(
+        self, width: float, height: float
+    ) -> Optional[Tuple[float, float, float, float]]:
+        """Left, top, right and bottom insets for a page of this size.
+
+        None where the guides do not fit inside the page, which says the
+        page and the guides did not come from the same document -- and a
+        margin that cannot be true is worse than no margin at all, since
+        the reader would draw it.
+        """
+        insets = (self.left, self.top, width - self.right, height - self.bottom)
+        if min(insets) < -_GUIDE_TOLERANCE:
+            return None
+        return tuple(max(0.0, inset) for inset in insets)
 
 
 @dataclass
@@ -339,13 +414,17 @@ class PageStructure:
 
 @dataclass
 class TableStructure:
-    """One table's cell insets, in points, keyed by first row and column.
+    """One table's cells, in points, keyed by first row and column.
 
     First row and column is what libmspub reports as a cell's position, so
     a spanning cell is keyed by the corner it starts in either way.
     """
 
     insets: Dict[tuple, tuple] = field(default_factory=dict)
+    #: Vertical alignment per cell -- "top", "center" or "bottom". Every
+    #: cell whose record was read has one, since the field being left out
+    #: is itself the statement that the cell is top-aligned.
+    alignments: Dict[tuple, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -488,6 +567,9 @@ class FileStructure:
     #: of half an inch -- the same grid InDesign falls back to, so there is
     #: then nothing to carry.
     default_tab_stop: Optional[float] = None
+    #: The document's layout guides, where the file states a readable set.
+    #: Publisher keeps one set per publication, not one per page.
+    guides: Optional[PageGuides] = None
     #: Every run of linked text frames, as shape seqnums in the order the
     #: story flows through them. libmspub says nothing about a link, so
     #: without this the order is whatever order the frames turned up in.
@@ -568,6 +650,13 @@ class FileStructure:
         """Insets by (row, column) for the table with this grid, if known."""
         found = self.tables.get(table_signature(column_widths, row_heights))
         return found.insets if found is not None else None
+
+    def cell_alignments(
+        self, column_widths: List[float], row_heights: List[float]
+    ) -> Optional[Dict[tuple, str]]:
+        """Vertical alignment by (row, column) for this grid, if known."""
+        found = self.tables.get(table_signature(column_widths, row_heights))
+        return found.alignments if found is not None else None
 
 
 def table_signature(column_widths: List[float], row_heights: List[float]) -> tuple:
@@ -881,6 +970,13 @@ def _table_cells(contents: bytes, offset: int) -> TableStructure:
             table.insets[position] = tuple(
                 cell.get(side, 0) / _EMU_PER_POINT for side in _CELL_INSETS
             )
+            alignment = _CELL_VERTICAL_ALIGNMENTS.get(
+                cell.get(_CELL_VERTICAL_ALIGN, 0)
+            )
+            # A value we do not recognise is left unstated rather than
+            # guessed at: the cell then keeps the reader's own default.
+            if alignment is not None:
+                table.alignments[position] = alignment
     return table
 
 
@@ -919,6 +1015,65 @@ def _read_story_chains(contents: bytes, refs) -> List[List[int]]:
     # sorting by it is a total order -- worth having, since the caller
     # reports what it threaded.
     return sorted(chains)
+
+
+def _read_guides(contents: bytes, refs) -> Optional[PageGuides]:
+    """The document's layout guides, or None where the file states none.
+
+    Publisher writes every vertical guide in ascending order and then
+    every horizontal one, and flags each one that is a margin. So the four
+    flagged entries are left, right, top and bottom in that order, and the
+    unflagged entries between the first pair are the column guides.
+
+    Anything that does not hold that shape reads as no guides at all. The
+    corpus is nine files and the reading was taken on two, so a document
+    laid out some way none of them is has to arrive without margins rather
+    than with margins that are wrong -- the reader draws what it is told.
+    """
+    for _seq, kind, offset in refs:
+        if kind != _GUIDES_CHUNK:
+            continue
+        for block in _chunk_blocks(contents, offset):
+            if block.id == _GUIDE_ARRAY and block.type == _GUIDE_ARRAY_TYPE:
+                return _guides_from_array(contents, block)
+    return None
+
+
+def _guides_from_array(contents: bytes, block: "_Block") -> Optional[PageGuides]:
+    """One guide array, read as margins and the guides inside them."""
+    positions: List[float] = []
+    is_margin: List[bool] = []
+    for entry in _children(contents, block):
+        if entry.id != _ARRAY_ENTRY:
+            continue
+        parts = list(_children(contents, entry))
+        position = next(
+            (part.data for part in parts if part.id == _GUIDE_POSITION), None
+        )
+        if position is None:
+            return None
+        positions.append(position / _EMU_PER_POINT)
+        is_margin.append(any(part.id == _GUIDE_IS_MARGIN for part in parts))
+
+    flagged = [index for index, margin in enumerate(is_margin) if margin]
+    if len(flagged) != 4:
+        return None
+    first_x, last_x, first_y, last_y = flagged
+    # The margins bound the list at both ends and the two axes do not
+    # interleave. A file breaking either is one this reading does not
+    # describe, whatever the four numbers happen to be.
+    if first_x != 0 or last_y != len(positions) - 1 or first_y != last_x + 1:
+        return None
+    left, right, top, bottom = (positions[index] for index in flagged)
+    if not (left < right and top < bottom):
+        return None
+    columns = tuple(positions[first_x + 1:last_x])
+    rows = tuple(positions[first_y + 1:last_y])
+    if sorted(columns) != list(columns) or sorted(rows) != list(rows):
+        return None
+    return PageGuides(
+        left=left, right=right, top=top, bottom=bottom, columns=columns, rows=rows
+    )
 
 
 def _read_tables(contents: bytes, refs) -> Dict[tuple, Optional[TableStructure]]:
@@ -1513,6 +1668,7 @@ def read_structure(source: Path) -> Optional[FileStructure]:
             default_tab_stop=_default_tab_stop(quill),
             anchors=_read_shape_anchors(data),
             story_chains=_read_story_chains(contents, refs),
+            guides=_read_guides(contents, refs),
         )
         for seq, kind, offset in refs:
             if kind != _PAGE_CHUNK:

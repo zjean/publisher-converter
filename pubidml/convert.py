@@ -597,15 +597,25 @@ def _apply_cell_insets(
     The file itself carries four insets per cell, and the table's own
     grid is what ties a chunk back to the table in the event stream.
 
+    The same record states the cell's **vertical alignment**, which
+    libmspub also stops short of, so that is read here too: field 0x07,
+    1 for centre and 2 for bottom, left out where the cell is top-aligned.
+
     Reading a cell's record settles its *rules* as well, which is why they
     are set here rather than in a pass of their own: the records state
-    padding and nothing else -- no rule, no shade, in all 1,260 of them
-    across the corpus -- and a field this format leaves out is absent
-    rather than defaulted. So a cell whose record we have read is a cell
-    Publisher recorded no lines for, and saying nothing about its edges is
-    the one answer that is certainly wrong: the reader then draws its own
-    line around every cell, in a colour and a weight the .pub never
-    states, across the layout grids these documents are built on.
+    padding, alignment and nothing else -- no rule, no shade, in all 1,260
+    of them across the corpus -- and a field this format leaves out is
+    absent rather than defaulted. So a cell whose record we have read is a
+    cell Publisher recorded no lines for *in that record*, and saying
+    nothing about its edges is the one answer that is certainly wrong: the
+    reader then draws its own line around every cell, in a colour and a
+    weight the .pub never states, across the layout grids these documents
+    are built on.
+
+    Publisher does rule tables, and the lines turn out to live in the
+    Escher stream as a shape per shaded cell and a shape per ruled edge
+    (`actions.md` §11). Until those are read, an unruled table is still the
+    closer of the two answers, and the warning below says so.
     """
     if structure is None or not structure.tables:
         return
@@ -617,6 +627,9 @@ def _apply_cell_insets(
         insets = structure.cell_insets(item.column_widths, item.row_heights)
         if insets is None:
             continue
+        alignments = (
+            structure.cell_alignments(item.column_widths, item.row_heights) or {}
+        )
         tables += 1
         for cell in item.cells:
             found = insets.get((cell.row, cell.column))
@@ -624,16 +637,66 @@ def _apply_cell_insets(
                 continue
             cell.insets = model.CellInsets(*found)
             cell.unruled = True
+            cell.vertical_align = alignments.get((cell.row, cell.column))
             cells += 1
 
     if tables:
         log.info("cell insets read for %d table(s), %d cell(s)", tables, cells)
         document.warnings.append(
             f"{tables} table(s) written with every cell rule off: their "
-            f"{cells} cell record(s) state padding and nothing else, and a "
-            f"cell edge left unstated is one the reader rules itself. A table "
-            f"Publisher ruled from something outside those records would "
-            f"arrive unruled — re-add those lines by hand"
+            f"{cells} cell record(s) state padding and alignment and nothing "
+            f"else, and a cell edge left unstated is one the reader rules "
+            f"itself. Publisher keeps cell rules and shading outside those "
+            f"records, in the Escher stream (actions.md §11), and they are "
+            f"not read yet — re-add any lines and fills by hand"
+        )
+
+
+def _apply_page_margins(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> None:
+    """Put Publisher's margin guides back on every page.
+
+    librevenge's drawing interface has two properties for a page,
+    `svg:width` and `svg:height`, so a converted document arrives with
+    whatever margins the reader defaults to and anyone continuing the
+    layout has to measure the original by eye. The .pub states the guides
+    itself, as positions on the page rather than insets from its edges,
+    which is why the page size is needed to resolve them -- and why a page
+    the guides do not fit inside keeps its default rather than being given
+    a margin that cannot be true.
+
+    Publisher keeps one set per publication, so every page gets the same
+    guides resolved against its own size.
+    """
+    if structure is None or structure.guides is None:
+        return
+
+    guides = structure.guides
+    applied = 0
+    for page in list(document.pages) + list(document.masters):
+        found = guides.margins(page.width, page.height)
+        if found is None:
+            continue
+        left, top, right, bottom = found
+        page.margins = model.PageMargins(
+            left=left,
+            top=top,
+            right=right,
+            bottom=bottom,
+            columns=tuple(column - guides.left for column in guides.columns),
+        )
+        applied += 1
+
+    if applied:
+        log.info(
+            "page margins read for %d page(s): %.1f %.1f %.1f %.1f pt",
+            applied, guides.left, guides.top, guides.right, guides.bottom,
+        )
+    else:
+        document.warnings.append(
+            "page margin guides were read but fit none of the pages, so "
+            "every page keeps the reader's default margins"
         )
 
 
@@ -825,10 +888,9 @@ def _apply_tab_stops(
         )
         document.warnings.append(
             f"{ruled} paragraph(s) state no tab stop of their own and were "
-            f"put on the document's default grid of {interval:.2f}pt, read "
-            f"from a field that matches Publisher's per-document setting but "
-            f"has not been confirmed against Publisher itself (actions.md "
-            f"§10): anything tabbed into columns is worth a look"
+            f"put on the document's default grid of {interval:.2f}pt, the "
+            f"interval the file states and Publisher reads back: anything "
+            f"tabbed into columns is worth a look"
         )
 
 
@@ -1852,6 +1914,7 @@ def _convert(
     _note_unreadable_structure(document, structure)
     _apply_master_pages(document, structure)
     _apply_cell_insets(document, structure)
+    _apply_page_margins(document, structure)
     # Before the WordArt pass, which takes a shape's paint as it finds it.
     _restore_gradient_ramps(document, structure)
     _recover_wordart(document, structure)

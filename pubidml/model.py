@@ -379,6 +379,10 @@ class TableCell:
     #: which draws its own line around every cell. False means the record
     #: was never read, the distinction `insets` draws with None.
     unruled: bool = False
+    #: "top", "center" or "bottom", where the cell's record was read.
+    #: Publisher leaves the field out for top, so a cell we have read
+    #: always has one -- None means the record was not read at all.
+    vertical_align: Optional[str] = None
 
 
 @dataclass
@@ -443,6 +447,25 @@ class Group(Item):
 
 
 @dataclass
+class PageMargins:
+    """Insets from the four page edges, in points.
+
+    Publisher keeps one set per publication and this is that set resolved
+    against a page of a particular size, which is why it sits on the page
+    rather than on the document: a document whose pages differ in size has
+    the same guides falling in different places on each.
+    """
+
+    left: float = 0.0
+    top: float = 0.0
+    right: float = 0.0
+    bottom: float = 0.0
+    #: Interior vertical guides, as insets from the *left* edge, in the
+    #: order the file states them. Two columns state one.
+    columns: Tuple[float, ...] = ()
+
+
+@dataclass
 class Page:
     width: float = 612.0
     height: float = 792.0
@@ -451,6 +474,10 @@ class Page:
     #: has been read. libmspub replays master content onto every page, so
     #: this stays None unless that content could be lifted back out.
     master: Optional[str] = None
+    #: The margin guides Publisher drew on this page, where the .pub was
+    #: read. None means unknown, and the reader keeps its own default --
+    #: which is a guide in the wrong place, but an honest one.
+    margins: Optional[PageMargins] = None
 
 
 @dataclass
@@ -461,6 +488,7 @@ class Master:
     width: float = 612.0
     height: float = 792.0
     items: List[Item] = field(default_factory=list)
+    margins: Optional[PageMargins] = None
 
 
 @dataclass

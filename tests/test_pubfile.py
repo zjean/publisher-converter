@@ -2831,3 +2831,268 @@ class WordArtStatedSizeTest(unittest.TestCase):
         art = pubfile._wordart_shapes(wordart_shape(size=None))[0]
         self.assertIsNone(art.size)
         self.assertTrue(art.fitted)
+
+
+def guide(position_emu: int, *, margin: bool = True) -> bytes:
+    """One guide entry: its position, and whether it is a margin guide."""
+    fields = [_u32(0x01, position_emu)]
+    if margin:
+        # A zero-length block: presence is the whole of what it says.
+        fields.append(_block(0x04, 0x08))
+    return _container(0x00, 0x88, fields)
+
+
+def guides_chunk(*guides: bytes) -> bytes:
+    return _chunk([_container(0x02, 0xA0, list(guides))])
+
+
+CM = 360000  # EMU per centimetre, which is how the samples were set
+
+
+class GuideReadingTest(unittest.TestCase):
+    """The layout guides, which libmspub has no concept of at all."""
+
+    def read(self, *chunks):
+        contents, refs = b"\x00" * 8, []
+        for seq, (kind, payload) in enumerate(chunks):
+            refs.append((seq, kind, len(contents)))
+            contents += payload
+        return pubfile._read_guides(contents, refs)
+
+    def margins_a(self, *extra: bytes):
+        """The controlled sample: 1, 1.5, 2 and 2.5cm on A4."""
+        return self.read((0x4C, guides_chunk(
+            guide(1 * CM), *extra, guide(19 * CM),
+            guide(int(1.5 * CM)), guide(int(27.2 * CM)),
+        )))
+
+    def test_the_four_margin_guides_are_read_in_order(self):
+        found = self.margins_a()
+        self.assertIsNotNone(found)
+        # Left and right first, then top and bottom: the file writes every
+        # vertical guide before any horizontal one.
+        self.assertAlmostEqual(found.left / 28.3465, 1.0, places=3)
+        self.assertAlmostEqual(found.right / 28.3465, 19.0, places=3)
+        self.assertAlmostEqual(found.top / 28.3465, 1.5, places=3)
+        self.assertAlmostEqual(found.bottom / 28.3465, 27.2, places=3)
+
+    def test_an_unflagged_guide_between_the_first_pair_is_a_column(self):
+        found = self.margins_a(guide(10 * CM, margin=False))
+        self.assertIsNotNone(found)
+        self.assertEqual(len(found.columns), 1)
+        self.assertAlmostEqual(found.columns[0] / 28.3465, 10.0, places=3)
+        self.assertEqual(found.rows, ())
+
+    def test_a_file_with_no_guide_chunk_reads_nothing(self):
+        self.assertIsNone(self.read((0x44, _chunk([_u32(0x01, 1)]))))
+
+    def test_fewer_than_four_margin_guides_is_not_this_shape(self):
+        self.assertIsNone(self.read((0x4C, guides_chunk(
+            guide(1 * CM), guide(19 * CM), guide(int(1.5 * CM)),
+        ))))
+
+    def test_a_guide_outside_the_margins_is_not_this_shape(self):
+        # The margins bound the list at both ends. A file that puts a
+        # ruler guide before the left margin is one this reading does not
+        # describe, and reading it anyway would misplace all four.
+        self.assertIsNone(self.read((0x4C, guides_chunk(
+            guide(int(0.5 * CM), margin=False),
+            guide(1 * CM), guide(19 * CM),
+            guide(int(1.5 * CM)), guide(int(27.2 * CM)),
+        ))))
+
+    def test_margins_that_cross_are_refused(self):
+        self.assertIsNone(self.read((0x4C, guides_chunk(
+            guide(19 * CM), guide(1 * CM),
+            guide(int(1.5 * CM)), guide(int(27.2 * CM)),
+        ))))
+
+    def test_a_truncated_chunk_does_not_raise(self):
+        self.assertIsNone(self.read((0x4C, b"\x40\x00\x00\x00\x02\xa0")))
+
+
+class GuideMarginTest(unittest.TestCase):
+    """Turning guide positions into the insets a reader wants."""
+
+    def guides(self, **kwargs):
+        base = dict(left=36.0, right=576.0, top=72.0, bottom=720.0)
+        base.update(kwargs)
+        return pubfile.PageGuides(**base)
+
+    def test_the_right_and_bottom_are_measured_back_from_the_page(self):
+        self.assertEqual(self.guides().margins(612.0, 792.0), (36.0, 72.0, 36.0, 72.0))
+
+    def test_a_guide_off_the_page_states_no_margin_at_all(self):
+        # Page and guides from different documents. A margin that cannot
+        # be true is worse than none, because the reader would draw it.
+        self.assertIsNone(self.guides().margins(300.0, 792.0))
+
+    def test_a_guide_on_the_page_edge_survives_the_rounding(self):
+        # Page size arrives through libmspub's four-decimal inches while a
+        # guide is read in EMU, so the two disagree by a fraction of a point.
+        found = self.guides(right=612.02).margins(612.0, 792.0)
+        self.assertIsNotNone(found)
+        self.assertEqual(found[2], 0.0)
+
+
+@needs_samples
+class RealGuideTest(unittest.TestCase):
+    """The five tracked samples, whose guides were never read before."""
+
+    def test_every_sample_states_symmetric_margins(self):
+        expected = {
+            "Blank Note Card (100_1502 Snail) (2 up).pub": 18.0,
+            "Bus Meeting Zones & Luggage JLW.pub": 36.0,
+            "Cantico_dei_Cantici.pub": 29.48,
+            "MISSAL MARIANA E PEDRO.pub": 36.0,
+            "rotated_text.pub": 70.87,
+        }
+        for name, left in expected.items():
+            with self.subTest(name=name):
+                structure = pubfile.read_structure(SAMPLES / name)
+                self.assertIsNotNone(structure)
+                self.assertIsNotNone(structure.guides)
+                self.assertAlmostEqual(structure.guides.left, left, places=1)
+                # No sample states a column guide; the newsletters do.
+                self.assertEqual(structure.guides.columns, ())
+
+
+@needs_newsletter
+class NewsletterGuideTest(unittest.TestCase):
+    """The two-column A5 newsletter, the only corpus file with a column."""
+
+    def test_the_column_guide_is_read_beside_the_margins(self):
+        structure = pubfile.read_structure(NEWSLETTER)
+        self.assertIsNotNone(structure)
+        guides = structure.guides
+        self.assertIsNotNone(guides)
+        left, top, right, bottom = guides.margins(421.02, 594.9576)
+        for measured, centimetres in (
+            (left, 1.4), (top, 1.5), (right, 1.6), (bottom, 1.7)
+        ):
+            self.assertAlmostEqual(measured / 28.3465, centimetres, places=1)
+        self.assertEqual(len(guides.columns), 1)
+
+
+class CellAlignmentReadingTest(unittest.TestCase):
+    """Field 0x07 of a cell record, read back in Publisher as alignment."""
+
+    def one_cell(self, fields):
+        contents, refs = b"\x00" * 8, []
+        for seq, (kind, payload) in enumerate((
+            (0x10, table_chunk((72.0,), (18.0,), cells_seqnum=1)),
+            (0x63, cells_chunk((0, 0, fields))),
+        )):
+            refs.append((seq, kind, len(contents)))
+            contents += payload
+        tables = pubfile._read_tables(contents, refs)
+        return tables[pubfile.table_signature([72.0], [18.0])]
+
+    def test_one_means_centre_and_two_means_bottom(self):
+        self.assertEqual(self.one_cell({0x07: 1}).alignments[(0, 0)], "center")
+        self.assertEqual(self.one_cell({0x07: 2}).alignments[(0, 0)], "bottom")
+
+    def test_a_cell_leaving_the_field_out_is_top_aligned(self):
+        # Publisher writes nothing for top, the way it writes nothing for
+        # an inset of zero -- so absent is a statement, not a gap.
+        self.assertEqual(self.one_cell({0x0A: 12700}).alignments[(0, 0)], "top")
+
+    def test_a_value_we_do_not_recognise_is_left_unstated(self):
+        self.assertEqual(self.one_cell({0x07: 9}).alignments, {})
+
+
+@needs_newsletter
+class RealCellAlignmentTest(unittest.TestCase):
+    def test_every_cell_of_a_real_table_states_an_alignment(self):
+        structure = pubfile.read_structure(NEWSLETTER)
+        self.assertIsNotNone(structure)
+        read = [table for table in structure.tables.values() if table is not None]
+        self.assertTrue(read)
+        for table in read:
+            self.assertEqual(set(table.alignments), set(table.insets))
+            self.assertLessEqual(
+                set(table.alignments.values()), {"top", "center", "bottom"}
+            )
+
+
+class CellAlignmentApplicationTest(unittest.TestCase):
+    """Getting the alignment onto the cells libmspub reported."""
+
+    def apply(self, alignments, insets=None):
+        table = model.Table(
+            x=0.0, y=0.0, width=72.0, height=18.0,
+            column_widths=[72.0], row_heights=[18.0],
+        )
+        table.cells = [model.TableCell(row=0, column=0)]
+        document = model.Document(pages=[page_with(table)])
+        signature = pubfile.table_signature([72.0], [18.0])
+        structure = pubfile.FileStructure(
+            tables={signature: pubfile.TableStructure(
+                insets=insets if insets is not None else {(0, 0): (1.0, 1.0, 1.0, 1.0)},
+                alignments=alignments,
+            )}
+        )
+        convert._apply_cell_insets(document, structure)
+        return table.cells[0]
+
+    def test_a_matched_cell_gets_its_alignment(self):
+        self.assertEqual(self.apply({(0, 0): "bottom"}).vertical_align, "bottom")
+
+    def test_a_cell_the_file_states_no_alignment_for_states_none(self):
+        self.assertIsNone(self.apply({}).vertical_align)
+
+    def test_alignment_does_not_cost_the_insets(self):
+        # The two are read from one record, and a file that only ever
+        # stated padding must still be applied as it always was.
+        cell = self.apply({})
+        self.assertEqual(cell.insets, model.CellInsets(1.0, 1.0, 1.0, 1.0))
+        self.assertTrue(cell.unruled)
+
+
+class PageMarginApplicationTest(unittest.TestCase):
+    """Resolving one set of document-wide guides against every page."""
+
+    def document(self, *sizes):
+        pages = [model.Page(width=w, height=h) for w, h in sizes]
+        return model.Document(pages=pages)
+
+    def structure(self, **kwargs):
+        base = dict(left=36.0, right=576.0, top=72.0, bottom=720.0)
+        base.update(kwargs)
+        return pubfile.FileStructure(guides=pubfile.PageGuides(**base))
+
+    def test_every_page_gets_the_documents_guides(self):
+        document = self.document((612.0, 792.0), (612.0, 792.0))
+        convert._apply_page_margins(document, self.structure())
+        for page in document.pages:
+            self.assertEqual(
+                page.margins, model.PageMargins(36.0, 72.0, 36.0, 72.0)
+            )
+
+    def test_a_master_is_given_them_as_well(self):
+        document = self.document((612.0, 792.0))
+        document.masters.append(model.Master(width=612.0, height=792.0))
+        convert._apply_page_margins(document, self.structure())
+        self.assertIsNotNone(document.masters[0].margins)
+
+    def test_columns_arrive_as_insets_from_the_left_edge(self):
+        document = self.document((612.0, 792.0))
+        convert._apply_page_margins(document, self.structure(columns=(306.0,)))
+        self.assertEqual(document.pages[0].margins.columns, (270.0,))
+
+    def test_a_page_the_guides_do_not_fit_keeps_the_readers_default(self):
+        document = self.document((300.0, 792.0))
+        convert._apply_page_margins(document, self.structure())
+        self.assertIsNone(document.pages[0].margins)
+        self.assertTrue(document.warnings)
+
+    def test_a_file_stating_no_guides_changes_nothing(self):
+        document = self.document((612.0, 792.0))
+        convert._apply_page_margins(document, pubfile.FileStructure())
+        self.assertIsNone(document.pages[0].margins)
+        self.assertEqual(document.warnings, [])
+
+    def test_no_structure_at_all_changes_nothing(self):
+        document = self.document((612.0, 792.0))
+        convert._apply_page_margins(document, None)
+        self.assertIsNone(document.pages[0].margins)

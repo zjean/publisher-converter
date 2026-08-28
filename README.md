@@ -610,9 +610,22 @@ These are real and deliberate, not bugs to be surprised by later.
   where this fires are flagged `review`. A `#` is only ever replaced when
   the document carries a field table *and* the text came from a master,
   so a typed `#` is left alone.
-- **Margin and column guides are lost.** libmspub reports exactly two
-  properties for a page, `svg:width` and `svg:height` — no margins, no
-  guides, no baseline grid — so Affinity applies its own defaults.
+- **Margin and column guides are carried**, read out of the `.pub`
+  rather than from libmspub, which reports exactly two properties for a
+  page: `svg:width` and `svg:height`. The file keeps one set of guides
+  per publication, as *positions* on the page rather than insets from its
+  edges, each flagged for whether it is a margin or an interior column
+  guide. Confirmed against Publisher with a controlled pair of documents
+  and then checked against the whole corpus, where six files of nine come
+  back symmetric and the three newsletters come back with a column guide
+  down the middle of an A5 page, which is what they are.
+
+  Each page gets a `MarginPreference` with the guides resolved against
+  its own size. Publisher draws a guide, not a gutter, so a column guide
+  becomes two columns that meet — gutter zero. A page the guides do not
+  fit inside keeps the reader's default: a margin that cannot be true is
+  worse than none, because the reader would draw it. No baseline grid is
+  carried; the file may state one, but nothing here has looked.
 - **Facing pages have to be asked for.** `--facing-pages` lays the document
   out as reader's spreads — the cover alone as a recto, then `2-3`, `4-5`,
   so odd numbers stay right of the spine — and declares `FacingPages` so
@@ -715,11 +728,13 @@ These are real and deliberate, not bugs to be surprised by later.
 
   A file stating no interval is on Publisher's default of half an inch
   already, which is the grid InDesign falls back to, so nothing is
-  written for it. What the `SGP ` block means is **inferred rather than
-  confirmed** — it behaves exactly as the setting would across the corpus
-  but has never been read back in Publisher itself (`actions.md` §10) —
-  so a document given a ruler says so in the report, with the interval it
-  was given.
+  written for it. What the `SGP ` block means is **confirmed against
+  Publisher itself**: `? ActiveDocument.DefaultTabStop` reads back
+  8.07874 on `1336 kerkbode.pub` and 28.28976 on `Lisa Hoogendijk.pub`,
+  against 8.0787 and 28.2898 from the block — and 28.2898 is a value no
+  other candidate predicts. A document given a ruler still says so in the
+  report, with the interval it was given, because a tabbed column is
+  worth a glance either way.
 
   One position is recoverable without any stop at all, and is written: a
   hanging indent implies a stop at its left indent, because that is where
@@ -897,6 +912,15 @@ These are real and deliberate, not bugs to be surprised by later.
   edge rather than picking up a default, a 24pt inset moves the text by
   24pt, and the 9pt gutter column still sets text.
 
+  **Cell vertical alignment is carried too**, from the same record: field
+  `0x07`, which reads 1 for centre and 2 for bottom and is left out where
+  the cell is top-aligned — the way this format leaves out an inset of
+  zero. libmspub stops before it. Read back in Publisher from a table set
+  top down one column, centre down the next and bottom down the third,
+  and written out as IDML's `VerticalJustification`. It sits on 869 of
+  the 974 cells converted, so it is the difference between text sitting
+  where Publisher put it and text sitting at the top of every cell.
+
   What that probe also showed, unasked, is that **the cell rules used to
   be Affinity's, not Publisher's.** We reference `TableStyle/$ID/[Basic
   Table]` without defining it, so the reader supplied its own, and the one
@@ -917,15 +941,20 @@ These are real and deliberate, not bugs to be surprised by later.
 
   The reasoning for writing them at all is the format's own rule, that **a
   field the file leaves out is absent rather than defaulted**: a cell
-  record states its padding and nothing else, in all 1,260 of them, so a
-  cell we have read is a cell Publisher recorded no lines for. A cell whose
-  record we never read is left alone, the same way its insets are. What
-  cannot yet be told apart is a table Publisher ruled from something
-  outside those records — a table format, say — which would now arrive
-  unruled, so every document carrying tables names the count in its report
-  and says to re-add those lines by hand. `actions.md` §9's plain control
-  file settles that directly, by saying whether an unstyled Publisher table
-  prints lines at all.
+  record states its padding and its alignment and nothing else, in all
+  1,260 of them, so a cell we have read is a cell Publisher recorded no
+  lines for *in that record*. A cell whose record we never read is left
+  alone, the same way its insets are. A plain table made in Publisher was
+  since checked and prints no lines, so the zeros are not deleting a
+  default of Publisher's own.
+
+  **Publisher does rule tables, and the lines are not in those records.**
+  A styled table and a plain one have an identical `Contents` chunk
+  inventory; the shading and the rules are in the Escher stream instead,
+  as a shape per shaded cell and a shape per ruled edge (`actions.md`
+  §11). Until those are read a ruled table still arrives unruled, so
+  every document carrying tables names the count in its report and says
+  to re-add the lines and fills by hand.
 
   **A cell's own runs count as text.** Fonts and colours were collected by
   walking text frames alone, so anything named only inside a table never

@@ -5,11 +5,17 @@ already prepared so each one is short to execute.
 
 Ordered by deadline, then value.
 
-> **Five of these need Publisher, which retires on 1 October 2026.**
-> [`windows-session.md`](windows-session.md) collects them into one
-> sitting at a Windows machine — the clicks in running order, roughly 75
-> minutes, and what to run back here afterwards. This file stays the
-> reference for *why* each one matters and how to wire the answer in.
+> **A Publisher session has happened** (28 August 2026), and it settled
+> §2, §9 and §10 — page margins, cell vertical alignment and the default
+> tab interval are all read from the file now. §1 and §3 came back
+> partially and are still open, and §11 is new: the table ruling that
+> session found, which needs no Publisher at all.
+>
+> [`windows-session.md`](windows-session.md) is the running order for a
+> sitting at a Windows machine, with what came back and what did not.
+> Publisher retires on 1 October 2026, so what is still marked ⏰ has to
+> happen before then. This file stays the reference for *why* each one
+> matters and how to wire the answer in.
 
 ---
 
@@ -187,93 +193,75 @@ Once the block ID and its value mapping are known:
 
 ---
 
-## 2. Recover the page margins  ⏰ needs Publisher, before 1 Oct 2026
+## 2. Recover the page margins — **answered, and wired in**
 
-### Why this matters
+Publisher was asked directly, with a controlled pair of documents, and
+the guides are now read out of every `.pub` and written into the IDML.
 
-Margin and column guides are lost entirely. Every converted document
-arrives in Affinity with default margins, so anyone continuing to lay out
-a page has to measure the original by eye to match it.
+### Where they live
 
-### What is already known
+`Contents` chunk **`0x4C`**, block **`0x02`** (type `0xA0`), an array of
+one container per guide:
 
-Established here, so don't re-derive it:
+| field | meaning |
+|---|---|
+| `0x01` | its position in EMU, from the top-left of the page |
+| `0x02` | present when a band **ends** here |
+| `0x03` | present when a band **begins** here |
+| `0x04` | present when it is a **margin** guide rather than an interior column or row guide |
 
-- **libmspub cannot help.** Its `Margins` struct is *shape* margins — the
-  text-frame insets already exposed as `fo:padding-*`. There is no
-  page-margin block id anywhere in `MSPUBBlockID.h`, and `startPage`
-  carries exactly two properties, `svg:width` and `svg:height`.
-- **The DOCUMENT chunk is accounted for** and contains no margin. Block
-  `0x12` decodes as page size and matches the known dimensions, `0x2a` is
-  a GUID, and the rest are sequence-number references and small enums.
-- **The master page chunk holds the master's name** — `0x0e` a short
-  `"A"`, `0x0f` the full `"Master Page"` — plus two coordinate pairs at
-  roughly 25in and 120in, far too large to be page margins.
-- Publisher measures in **EMU, 914400 per inch**, so 0.5in reads 457200.
+The array runs every vertical guide in ascending order and then every
+horizontal one. So the four entries carrying `0x04` are the **left,
+right, top and bottom margins in that order** — and they are *positions*,
+not insets: a right margin of 2cm on a 21cm page is stored as 19cm.
 
-So the field exists somewhere not yet looked at, and one controlled pair
-will find it.
+An unflagged entry between the first pair is a **column guide**, which is
+the other half of this item and came free with it.
 
-### Step 1 — produce the sample files (on Windows, with Publisher, ~10 min)
+### How it was settled
 
-**Change only the margins between saves.** Use *asymmetric* values, so
-each edge is individually identifiable rather than four copies of one
-number.
+Two documents, A4, differing only in their margins:
 
-1. New blank document, letter size. Add a text box with a few paragraphs
-   so the page is not empty.
-2. **Page Design → Margins → Custom Margins**, set
-   **left 0.5", top 1.0", right 1.5", bottom 2.0"**. Save as
-   `margins-a.pub`.
-3. Change *only* the margins to **left 0.25", top 0.75", right 1.25",
-   bottom 1.75"** and *Save As* `margins-b.pub`.
-4. Copy both to `files/margin-samples/` on the Mac.
+| | `margins-a.pub` | `margins-b.pub` |
+|---|---|---|
+| left | 360000 EMU = 1.00 cm | 90000 = 0.25 cm |
+| right guide | 6840000 = 19.00 cm | 7110000 = 19.75 cm |
+| top | 540000 = 1.50 cm | 270000 = 0.75 cm |
+| bottom guide | 9792000 = 27.20 cm | 10062000 = 27.95 cm |
 
-The eight values are all distinct, which is the point: whichever block
-holds a margin will read one of them.
+Back-computed against A4 that is **1 / 1.5 / 2 / 2.5 cm** for A and
+0.25 / 0.75 / 1.25 / 1.75 for B — exactly what was set in the dialog.
 
-### Step 2 — run the diff (on the Mac, ~1 min)
+Then checked against all nine corpus files, none of which was used to
+derive it. Six come back **symmetric** — 0.63cm on `Blank Note Card`,
+1.04 on `Cantico`, 1.27 on `MISSAL` and `Lisa Hoogendijk`, 2.5 on
+`rotated_text` — which is the shape a margin actually has and not a shape
+an arbitrary pair of numbers falls into. The three `kerkbode` issues read
+1.4 / 1.5 / 1.6 / 1.7 cm **plus one column guide at 7.33cm**, the middle
+of a 14.85cm A5 page: a two-column newsletter, which is what they are.
 
-```sh
-cd ~/prive/tools/affinity-converter
-python3 research/diff_blocks.py \
-  a=files/margin-samples/margins-a.pub \
-  b=files/margin-samples/margins-b.pub
-```
+### What was wired in
 
-Unlike `diff_wrap.py`, this parses the file directly rather than a
-libmspub trace, so it also sees blocks libmspub never reads — which is
-where the margin has to be. Both control behaviours are verified:
-identical inputs report "no block changed", unrelated files report
-differences.
+- `pubfile._read_guides` reads the array into `PageGuides`, which holds
+  the positions and resolves them against a page size on request. A file
+  that does not hold this shape — margins not bounding the list, the two
+  axes interleaved, guides crossing — reads as **no guides at all**
+  rather than as four numbers that might be anything.
+- `convert._apply_page_margins` puts them on every page and master.
+- `idml._emit_margins` writes a `MarginPreference` on each `Page`.
+  Publisher draws a guide, not a gutter, so a column guide comes out as
+  `ColumnGutter="0"` and columns that meet.
 
-The tool already prints any plausible length in inches beside the raw
-value, so a margin should be readable at a glance.
+Pinned by `GuideReadingTest`, `GuideMarginTest`, `RealGuideTest` and
+`NewsletterGuideTest` in `tests/test_pubfile.py`, and
+`MarginPreferenceTest` in `tests/test_idml.py`.
 
-### Step 3 — read the result
+### What is still open
 
-You are looking for four blocks in the same chunk reading
-`457200 / 914400 / 1371600 / 1828800` under `a` and
-`228600 / 685800 / 1143000 / 1600200` under `b`. They may be four
-separate blocks or one 16-byte container holding four `U32`s — the
-DOCUMENT chunk already uses that shape for page size at block `0x12`.
-
-If nothing matches, the margins are held per master page rather than per
-document: re-run against the master chunk by noting its offset from
-`python3 research/master_pages.py files/margin-samples/margins-a.pub`.
-
-### Step 4 — wire it in
-
-Emit `MarginPreference` on each `Page` element in `idml.py`, beside the
-existing `GeometricBounds`. IDML takes it directly:
-
-```xml
-<MarginPreference Top="72" Left="36" Bottom="144" Right="108"
-                  ColumnCount="1" ColumnGutter="12"/>
-```
-
-Column guides very likely sit next to the margins in the same chunk; if
-the diff turns them up too, `ColumnCount` is the same one-line change.
+Affinity's own handling of `MarginPreference` has **not** been observed —
+the attribute is written to the IDML spec and the numbers are verified in
+the XML, not on screen. Worth one look the next time a converted file is
+opened.
 
 ---
 
@@ -605,291 +593,221 @@ drawn, which is a separate question from whether they are guides.
 
 ---
 
-## 9. Make a styled table  ⏰ needs Publisher, before 1 Oct 2026
+## 9. The styled table — **answered; alignment wired in, ruling moved to §11**
 
-### Why this matters
+The three sample files were made in Publisher and they answered both
+halves of this item, in opposite directions.
 
-A Publisher table now converts as a real IDML table, with its grid, its
-spans and its per-cell insets. What still cannot be carried is per-cell
-**fill and ruling** — and, unusually for this list, not because the file
-is unreadable. There is simply nothing to read: **no table in any of the
-nine sample files records either**, so there is no case to decode against.
-One deliberately formatted table would settle it, and the reader it plugs
-into is already written.
+### Cell field `0x07` is vertical alignment
 
-Since `backlog.md` §9, a converted cell also **states all four of its
-edges off** wherever its record was read, because a cell edge left unstated
-is one the reader rules itself and Affinity's line around every cell is a
-grid across an article. That makes the plain control file below a check on
-what already ships: if a plain Publisher table prints no lines, the zeros
-are right; if it prints lines, they are Publisher's own default and the
-zeros are deleting them, and its weight and colour want reading off the
-styled file and writing through the same attributes. **So read the control
-file first, and if it is ruled, say so before anything else.**
+`table-valign.pub` — one 3 x 3 table on tall rows, top down column 1,
+centre down column 2, bottom down column 3 — reads exactly that:
 
-### What is already known
+| column | as set in Publisher | `0x07` |
+|---|---|---|
+| 1 | top | *absent* |
+| 2 | centre | 1 |
+| 3 | bottom | 2 |
 
-- libmspub reads four fields of a cell record — the first and last row and
-  column — and skips the rest, its own source marking them
+So the enumeration is top(0), middle(1), bottom(2), and Publisher leaves
+the field out for top the way it leaves out an inset of zero. That was
+the reading this item most needed: `0x07` sits on 869 of the 974 cells
+converted, so it moves text in nearly all of them.
+
+Wired in: `pubfile._table_cells` reads it into `TableStructure.alignments`,
+`convert._apply_cell_insets` puts it on `model.TableCell.vertical_align`,
+and `idml` writes `VerticalJustification` — `TopAlign`, `CenterAlign`,
+`BottomAlign`. Pinned by `CellAlignmentReadingTest`,
+`CellAlignmentApplicationTest` and `RealCellAlignmentTest` in
+`tests/test_pubfile.py` and `CellVerticalAlignmentTest` in
+`tests/test_idml.py`.
+
+### The control table is unruled, so what already ships is right
+
+`table-plain.pub` prints no lines, which is what this item asked to check
+first: the four zero-weight edges the converter writes for every cell it
+has read are not deleting a Publisher default.
+
+### Ruling and shading are real, and they are not in the cell records
+
+`table-styled.pub` settles the other half, and refutes the reasoning this
+item rested on. The absence of any fill or line field across all 1,260
+cell records does **not** mean those tables are unstyled: a styled table
+and a plain one have an identical `Contents` chunk inventory, and the
+styling is in `EscherStm` instead — a shape per shaded cell and a shape
+per ruled edge.
+
+That is now **§11**, which needs no Publisher and no new samples.
+
+### Still open, and cheap
+
+`0x0E` holds exactly an eighth or a quarter of an inch on every cell in
+the corpus and correlates with nothing in the grid. Unidentified, and
+nothing depends on it.
+
+### What was already established, and still holds
+
+- libmspub reads four fields of a cell record — the first and last row
+  and column — and skips the rest, its own source marking them
   `// TODO: 0x09 - 0x0e: width/height of content + margins?`. Upstream
-  master is identical to the 0.1.5 release here, so nobody has taken it
-  further.
-- The whole vocabulary the corpus uses is now known: a table chunk (type
-  `0x10`) carries the row and column counts, the total size, the seqnum of
-  its cells chunk and the row/column size array; a cells chunk (type
-  `0x63`) carries one record per cell holding `0x01`-`0x04` bounds,
-  `0x0A`-`0x0D` insets, and `0x07`, `0x09` and `0x0E`.
-- **Omitted means absent, not defaulted.** One table writes its insets as
-  36576 EMU — Publisher's own 0.04in default — explicitly on all four
-  sides of all 21 cells, so the writer states the value it means.
-  Therefore the absence of any fill or line field across all 1,260 cell
-  records in the corpus says those tables are genuinely unstyled, rather
-  than styled somewhere this does not look.
-- A table's own fill and border are **not** affected: libmspub draws those
-  as an ordinary shape behind the table, and they already convert.
-- Two fields remain unidentified. `0x07` holds 1 or 2, is uniform across
-  every table that has it, and is absent from the rest — consistent with
-  vertical alignment, whose enumeration in this format is top(0),
-  middle(1), bottom(2), but consistent with other per-table switches too.
-  It sits on 869 of the 974 cells converted, so a wrong guess would move
-  text in nearly all of them; that is why it is not converted. `0x0E`
-  holds exactly an eighth or a quarter of an inch and correlates with
-  nothing in the grid.
-
-### Step 1 — produce the sample files (on Windows, with Publisher, ~10 min)
-
-Three small files, each a single 3 x 3 table on one page, otherwise
-identical.
-
-1. **The control.** Insert a 3 x 3 table, type `1` to `9` in the cells,
-   change nothing else. Save as `table-plain.pub`.
-2. **The styled one.** Same table, then, using whichever fill and border
-   controls that Publisher version offers — the ribbon's table Design tab
-   in 2010 and later, **Format → Borders and Shading** before that:
-   - shade cell R1C1 solid red and R1C2 solid yellow, leaving R1C3
-     unshaded;
-   - give cell R2C1 a 4pt blue border on **all** sides, and R2C2 a 4pt
-     blue border on its **top edge only**;
-   - leave row 3 untouched.
-   Save as `table-styled.pub`.
-   Two shades and two border shapes, because one of each cannot tell a
-   colour apart from a weight, nor a per-cell record from a per-edge one.
-3. **The alignment one.** Same table as the control, but make every row
-   1 inch tall (drag the row edges) and set the cells' *vertical*
-   alignment — the control lives on the ribbon's table Layout tab in 2010
-   and later, and under **Format → Align Text Vertically** before that —
-   to top down column 1, centre down column 2 and bottom down column 3.
-   Save as `table-valign.pub`.
-   This is the file that identifies `0x07`, and it needs the tall rows or
-   the difference is invisible.
-4. Copy all three to `files/table-samples/` on the Mac.
-
-### Step 2 — read the records (on the Mac, ~1 min)
-
-```sh
-cd ~/prive/tools/affinity-converter
-python3 research/table_cells.py files/table-samples/*.pub
-```
-
-It prints every table's grid and every field of every cell record, named
-where the meaning is settled and as a bare id where it is not, which is
-exactly the comparison needed.
-
-### Step 3 — read the result
-
-- Diff `table-plain.pub` against `table-styled.pub`. The fields that
-  appear only in the styled one are fill and ruling. Expect the fill to be
-  an index into the document palette rather than an RGB triple — that is
-  how shape fills are stored, and `model` already resolves palette indices
-  for those.
-- R1C1 against R1C2 separates the *colour* from the fact of being filled.
-  R2C1 against R2C2 says whether ruling is one field per cell or one per
-  edge: if R2C2 carries a single field where R2C1 carries four, it is per
-  edge, which is also what IDML wants — `Cell` takes
-  `TopEdgeStrokeWeight` and `TopEdgeStrokeColor` and a set for each side.
-- In `table-valign.pub`, if `0x07` reads 0-or-absent, 1 and 2 down the
-  three columns, it is vertical alignment and maps straight onto IDML's
-  `VerticalJustification` (`TopAlign`, `CenterAlign`, `BottomAlign`). If
-  it does not move at all, it is something else and stays unconverted.
-
-### Step 4 — wire it in
-
-`pubfile._table_cells` already walks every field of every record and
-returns a per-cell structure keyed to the table; carrying fill and ruling
-means adding fields to `TableStructure`, widening `model.TableCell`
-alongside `insets` and `unruled`, and writing the matching attributes in
-`idml._table_story_part`, next to the ones that already state every edge
-off. The matching, the plumbing and the tests are all in place — the sample
-is the only missing piece.
-
-The reader end needs nothing proved: `research/probe_cell_rules.py` has
-been opened on Affinity Publisher for macOS and shows a per-cell edge
-stroke beating the reader's default, landing per edge, and standing alone
-against a neighbour that states nothing. So whatever the styled file turns
-out to say, there is a place to write it that Affinity honours.
-
-`research/probe_cell_insets.py` is answered too, on the same machine: all
-four insets are honoured and a zero survives as zero.
+  master is identical to the 0.1.5 release here.
+- A table chunk (type `0x10`) carries the row and column counts, the
+  total size, the seqnum of its cells chunk and the row/column size
+  array; a cells chunk (type `0x63`) carries one record per cell holding
+  `0x01`-`0x04` bounds, `0x07` alignment, `0x0A`-`0x0D` insets, `0x09` a
+  cached text height and `0x0E`.
+- **Omitted means absent, not defaulted** — one table writes Publisher's
+  own 0.04in default explicitly on all four sides of all 21 cells. That
+  reasoning is still sound; what was wrong was applying it to fields that
+  were never going to be in this record at all.
+- A table's own fill and border are **not** affected: libmspub draws
+  those as an ordinary shape behind the table, and they already convert.
+- The reader end needs nothing proved. `research/probe_cell_rules.py`
+  has been opened on Affinity Publisher for macOS and shows a per-cell
+  edge stroke beating the reader's default, landing per edge, and
+  standing alone against a neighbour that states nothing;
+  `research/probe_cell_insets.py` is answered on the same machine, all
+  four insets honoured and a zero surviving as zero.
 
 ---
 
-## 10. Confirm the default tab interval  ⏰ needs Publisher, before 1 Oct 2026
+## 10. The default tab interval — **answered, and the warning is gone**
 
-### Why this matters
+Publisher was asked, and the field the converter already used is the
+right one.
+
+### Why it mattered
 
 Tab stops are carried (backlog §12), but hardly any tab has one: across
 the corpus **203 paragraphs contain a tab and 3 state a stop**. The other
 200 were lined up on Publisher's document-wide default grid — "Default
-tab stops" in its Format → Tabs dialog. Left to itself InDesign puts them
-on its own grid at half an inch, so a run of eight tabs, which is how
-these authors push a signature to the right, ends up 61pt further along
-than Publisher put it — and in the three `kerkbode` issues 223pt further,
-which is wider than the page they are set on.
+tab stops" in its Format → Tabs dialog, `Document.DefaultTabStop` in its
+VBA. Left to itself InDesign puts them on its own grid at half an inch,
+so a run of eight tabs, which is how these authors push a signature to
+the right, ends up 61pt further along than Publisher put it — and in the
+three `kerkbode` issues 223pt further, which is wider than the page.
 
-**A field that behaves like that interval has been found, and is now
-applied**: every such paragraph is written out with an explicit ruler of
-left stops at the document's own spacing. What is left is confirmation
-that the field means what it appears to mean. Until that is done, each
-converted document carrying a ruler says so in its report, with the
-interval it was given.
+### How it was settled
+
+`? ActiveDocument.DefaultTabStop`, typed into Publisher's Immediate
+window, against what the Quill stream's `SGP ` chunk states:
+
+| file | Publisher read back | `SGP ` states | block `0x15` states |
+|---|---|---|---|
+| `1336 kerkbode.pub` | **8.07874** | 8.0787 | 28.3 |
+| `Lisa Hoogendijk.pub` | **28.28976** | 28.2898 | 28.3 |
+
+`Lisa` is the reading that settles it. 28.2898 is a value no other
+candidate predicts, and `SGP ` produces it to four decimals; block
+`0x15`, the alternative, states a flat 359410 EMU — exactly 28.3 pt — in
+every file that carries it, the `kerkbode` issues included. So `0x15` is
+a template default and `SGP ` is the value in force.
+
+The `kerkbode` reading is the second half of it: 8.08 was the outcome
+that meant "`SGP ` is the field", and it is what came back.
+
+### Where it lives
+
+Quill stream, **`SGP ` chunk**: a bare U32 length and then at most one
+block — id `0x00`, type `0x22`, a U32 of EMU. Length 4 means the block is
+absent and the document is on Publisher's own half-inch default, which is
+also InDesign's, so nothing needs writing for it. `research/default_tab.py`
+prints it beside `0x15` for every file in a folder.
+
+Nothing needed building: `pubfile.read_structure` already carried the
+interval as `default_tab_stop`, `convert._apply_tab_stops` already ruled
+every tabbed paragraph at that spacing, and `idml` already wrote it out.
+What changed is the warning, which no longer says the field is unconfirmed.
+
+### One oddity, still unexplained
+
+Neither number is one a person could have typed. 8.0787pt is 2.85mm
+exactly and 28.2898pt is 9.98mm — not values anybody enters in the
+Format → Tabs box. Publisher reads them back as the setting, so they
+*are* the setting; how they got there is a separate question, and not one
+that changes what the converter should do.
+
+### Still open, and cheap
+
+**Which alignment byte is which.** The reading — `1` right, `2` centre —
+comes from geometry alone: the 22 stops in the corpus that state one come
+in pairs, at the middle of a frame and at its right edge, which is a
+footer's centre-and-right pair. A single file with one left, one centre,
+one right and one decimal tab in one paragraph, read back with
+`research/tab_stops.py`, confirms it outright and says whether a decimal
+tab has a code at all. ⏰ needs Publisher, before 1 Oct 2026.
+
+---
+
+## 11. Read table rules and shading out of the Escher stream
+
+### Why this matters
+
+18 tables in the corpus arrive with **every cell rule off**, and the
+converter says so in each report. That was the right call while the cell
+records were the only place looked at — they state padding and alignment
+and nothing else, and a cell edge left unstated is one Affinity rules
+itself, in a colour and a weight the `.pub` never mentions. But it means
+a ruled table arrives unruled and the lines have to be redrawn by hand.
+
+### Where they turned out to be
+
+**Not in `Contents` at all.** A control table and the same table with two
+shaded cells and five ruled edges have an *identical* chunk inventory,
+and the only difference in their cell records is a cached text extent.
+
+They are in **`EscherStm`**, which grew 1834 → 3494 bytes between the two
+saves, gaining a second `DgContainer` holding **seven shapes that the
+plain table does not have** — one per shaded cell and one per ruled edge:
+
+| shape | properties | what was set in Publisher |
+|---|---|---|
+| `spid 2051` | `fillColor=255` → RGB(255,0,0) | R1C1 shaded solid red |
+| `spid 2052` | `fillColor=65535` → RGB(255,255,0) | R1C2 shaded solid yellow |
+| `spid 2053–2057` | `lineWidth=38100`, `lineJoinStyle=2` | the four edges of R2C1 and the top edge of R2C2 |
+
+Two shades and five edges, which is exactly what was drawn — so the
+counting is right even though the individual colours are not yet all
+decoded (`2053` reads RGB(0,120,192) where `2054–2057` read 255, and
+which shape is which edge needs the anchor rectangles, whose length here
+is 4/10/16/28/34/40 bytes rather than OfficeArt's fixed 16).
+
+Escher colours are `0x00BBGGRR`, which is already how `pubfile` reads a
+WordArt fill.
 
 ### What is already known
 
 Established here, so don't re-derive it:
 
-- **libmspub never reads it.** It reads per-paragraph stops (and drops
-  them); there is no default-interval block id in `MSPUBBlockID.h` at all.
-- **Publisher names the setting.** It is `DefaultTabStop` on the Document
-  object in Publisher's own VBA — "the default tab stop for all text in
-  the active publication", valid range 1 to 1584 points, always returned
-  in points. So it is a per-publication value, not an application
-  preference, and it must be saved with the file. Factory default is
-  0.5in / 36pt, which is also what InDesign assumes, so a document that
-  never touched the dialog needs nothing done to it.
-- **Document chunk block `0x15` is not it.** It reads 359410 EMU in every
-  corpus file that carries it and is absent from the two that do not,
-  and the three `kerkbode` issues carry it while stating something else
-  entirely in the Quill stream. (The reason given here before was wrong:
-  it said the US-Letter `Blank Note Card` reads 359410 as well, and that
-  file does not carry the block at all. The conclusion still holds, for
-  the better reason that the block never varies.)
+- `pubfile` **already walks this stream** — `_escher_records`,
+  `_read_wordart`, `_read_gradients`, `_read_shape_anchors` — including
+  Publisher's two departures from OfficeArt (a `DGG`/`DG` container is
+  followed by four bytes of tail; `CLIENT_ANCHOR`/`CLIENT_DATA` repeat
+  their own length). What is new is only that a *table's cells* are in
+  there as shapes.
+- The corpus has plenty to read: ~500 `SpContainer`s per `kerkbode`
+  issue, 32 in `Lisa Hoogendijk`.
+- `model.TableCell.unruled` and the `idml` code that writes
+  `*EdgeStrokeWeight`/`*EdgeStrokeColor` per edge are already in place,
+  so a decoded rule has somewhere to go on arrival.
+- The samples are `files/experiments/table-plain.pub` and
+  `table-styled.pub`, and they do **not** need Publisher again.
 
-- **But `0x15` and `SGP ` are the same number in three files, and that
-  narrows the experiment.** At 12700 EMU per point, `0x15`'s constant
-  **359410 EMU is exactly 28.3 pt** — which is precisely what `SGP `
-  states in `Cantico_dei_Cantici`, `MISSAL` and `rotated_text`, and
-  within a twentieth of a point of the 28.2898 pt in `Lisa Hoogendijk`.
-  So the two fields agree in four documents of seven and disagree only in
-  the three `kerkbode` issues.
+### Steps
 
-  That reads as one quantity written in two places — a template default
-  beside the value in force — rather than two unrelated lengths. It also
-  explains the constant: 28.3 pt is 1 cm to within 0.05 pt, which is what
-  a **metric-locale** Publisher would default this setting to, against
-  the 0.5 in / 36 pt the VBA documentation quotes for US installs. Every
-  one of these documents is Dutch, Italian or Portuguese.
+1. Decode the `0xF010` record Publisher writes in a table's drawing — it
+   is not a fixed-size OfficeArt anchor — and place each of the seven
+   shapes on the grid.
+2. With the shapes placed, read `fillColor` for a shaded cell and
+   `lineColor`/`lineWidth` for a ruled edge, and check the five border
+   shapes against the four-plus-one that was drawn.
+3. Tie the drawing back to its table. Every other Escher reader here
+   matches by where a shape sits, and a table already has a grid
+   signature; the `CLIENT_DATA` seqnum is the more direct route if the
+   table's drawing carries one.
+4. Then `convert._apply_cell_insets` sets the rules it has and leaves
+   `unruled` set only for cells with none, and the warning shrinks to the
+   tables that really state nothing.
 
-  **So open a `kerkbode` file for this reading, not one of the others.**
-  It is the only place the two candidates make different predictions:
-
-  | `? ActiveDocument.DefaultTabStop` on `1336 kerkbode.pub` | what it means |
-  |---|---|
-  | **≈ 8.08 pt** | `SGP ` is the field; wire it in as it stands |
-  | **≈ 28.3 pt** | `SGP ` is something else, and `0x15` is the candidate |
-  | **36 pt** | neither; the interval is not in either place |
-
-  Reading `Cantico_dei_Cantici` instead cannot separate the two, because
-  both fields say 28.3 pt there.
-- **The `SGP ` chunk of the Quill stream is the candidate.** It is a bare
-  U32 length and then at most one block — id `0x00`, the same id a tab
-  position carries inside a paragraph's stops, type `0x22`, holding a
-  U32 of EMU. Length 4 means the block is absent, length 10 means the
-  document states one. `research/default_tab.py` prints it. Across the
-  corpus it is **absent from both files that contain no tab** and
-  **present in all seven that contain one**, and unlike block `0x15` it
-  varies: 28.3000pt in `Cantico_dei_Cantici`, `MISSAL` and
-  `rotated_text`, 28.2898pt in `Lisa Hoogendijk`, 8.0787pt in all three
-  `kerkbode` issues. 8.0787pt against InDesign's 36pt is a
-  four-and-a-half-fold error on every tab in the three biggest files in
-  the corpus, which is the size of mistake the warning describes.
-  It is not proven, though: a document-wide length could be a
-  hyphenation zone as easily as a tab interval.
-- **The stops themselves are decoded**, so whatever holds the interval is
-  a plain length, and Publisher measures in **EMU, 914400 per inch**:
-  0.5in reads 457200, 1cm reads 360000, 0.25in reads 228600.
-- It need not be in the Quill stream. `research/diff_blocks.py` parses
-  the `Contents` stream directly, which is where a per-document setting
-  is more likely to live.
-
-### Step 1 — print what the corpus states (on the Mac, ~1 min)
-
-```sh
-cd ~/prive/tools/affinity-converter
-python3 research/default_tab.py files
-```
-
-Nine files, nine numbers, three distinct values. Keep the output; the
-`SGP ` column is what Step 2 is checking.
-
-### Step 2 — read the property in Publisher (on Windows, ~5 min)
-
-No sample file needs authoring. `DefaultTabStop` is a document property,
-so it can be read straight off the files we already have. Copy `files/`
-to the Windows box, and for each one: open it, `Alt+F11` for the VBA
-editor, `Ctrl+G` for the immediate window, and type
-
-```vba
-? ActiveDocument.DefaultTabStop
-```
-
-Points come back either way. Write the number next to the file name.
-
-**If you only have time for one file, make it `1336 kerkbode.pub`.** It
-is the only document where the two candidate fields predict different
-answers — see the table above — so a single reading there identifies the
-field outright. `Lisa Hoogendijk` is the next most useful, as the only
-file stating 28.2898 rather than a flat 28.3.
-
-### Step 3 — read the result
-
-Nine pairs against nine `SGP ` readings:
-
-- **They match** — 8.0787 for the `kerkbode` issues, 28.30 for
-  `Cantico`, `MISSAL` and `rotated_text`, 28.2898 for `Lisa Hoogendijk`,
-  and 36 for the two files with no `SGP ` block. The field is identified,
-  and the ruler already being written is right. Delete the warning
-  `convert._apply_tab_stops` raises for it, and the `⏰` on this item.
-- **They don't** — the true numbers are now known per file, which is a
-  far better starting point than a blind diff: grep each file for its own
-  number as a length in EMU (`value_in_points × 12700`), and if nothing
-  turns up, fall back to authoring two files that differ only in the
-  setting (0.5" and 2.0", four times apart so no block holding one can be
-  confused with a block holding the other) and running
-  `research/diff_blocks.py a=… b=…` over the pair. Then point
-  `pubfile._default_tab_stop` at whatever it finds — everything
-  downstream of it stays as it is.
-
-While reading these, also note whether the number is one the author could
-have typed. 8.0787pt is 2.85mm exactly and 28.2898pt is 9.98mm exactly —
-neither is a value anybody types into a dialog, so if these *are* default
-tab stops they arrived by some route other than the Format → Tabs box,
-and that is worth understanding before trusting them.
-
-### Already wired in
-
-Nothing to build once Step 3 comes out right. `pubfile.read_structure`
-carries the interval as `default_tab_stop`, `convert._apply_tab_stops`
-gives every tabbed paragraph with no stops of its own a ruler at that
-spacing out to the width its tabs have to cross, and `idml` writes it
-out. A file stating no interval is already on half an inch and gets no
-ruler. All that Step 3 changes is whether the warning stays.
-
-### While you are in there
-
-Also settle **which alignment byte is which**. The
-reading — `1` right, `2` centre — comes from geometry alone: the 22
-stops in the corpus that state one come in pairs, at the middle of a
-frame and at its right edge, which is a footer's centre-and-right pair.
-A single file with one left, one centre, one right and one decimal tab
-in one paragraph, read back with `research/tab_stops.py`, confirms it
-outright and says whether a decimal tab has a code at all.
+**Not urgent, and not blocked.** Everything needed is already on this
+Mac.
