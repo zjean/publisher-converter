@@ -15,13 +15,26 @@ This prints the two places a document-wide length turns up, so a reading
 of `ActiveDocument.DefaultTabStop` taken in Publisher can be matched
 against them:
 
-  - **Contents, DOCUMENT chunk, block 0x15.** Ruled out. It reads 359410
-    in all seven corpus files that have it and is absent from the two
-    that do not, so it cannot be the setting: the three `kerkbode`
+  - **Contents, DOCUMENT chunk, block 0x15.** It reads 359410 in all
+    seven corpus files that have it and is absent from the two that do
+    not, so on its own it cannot be the setting: the three `kerkbode`
     issues state 359410 here while stating something else entirely in
     the Quill stream. (The earlier note that ruled this block out gave
     the wrong reason -- it said `Blank Note Card` reads 359410 too, and
     that file does not carry the block at all.)
+
+    Not entirely unrelated to `SGP `, though. At 12700 EMU per point
+    359410 is **exactly 28.3pt**, which is what `SGP ` states in three of
+    these files, and within a twentieth of a point of the fourth. So the
+    two agree in four documents of seven and part company only in the
+    `kerkbode` issues -- which reads as one quantity written twice, a
+    template default beside the value in force, rather than two unrelated
+    lengths. 28.3pt is also 1cm to within 0.05pt: a metric-locale default,
+    against the 0.5in/36pt the VBA documentation quotes.
+
+    Which is why the reading that settles this has to be taken on a
+    `kerkbode` file. It is the only one where the two candidates predict
+    different answers.
 
   - **Quill, `SGP ` chunk.** The candidate. The chunk is a bare U32
     length and then at most one block, of id 0x00 -- the same id a tab

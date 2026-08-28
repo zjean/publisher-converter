@@ -413,11 +413,20 @@ class ShapeAnchor:
     to an item it drew is what says which libmspub page a page chunk turned
     into. Coordinates are measured from the centre of the page, like
     everything else the Escher stream states.
+
+    `width` and `height` describe the box before `librevenge:rotate` turns
+    it, and are the file's own second opinion on the size libmspub reports
+    -- which is the only way to tell a frame libmspub misread from one the
+    document really does state that small. For a shape turned between 45
+    and 135 degrees the two are transposed, because Publisher stores the
+    box pre-swap and libmspub swaps it back.
     """
 
     shape_seq: int
     centre_x: float
     centre_y: float
+    width: float = 0.0
+    height: float = 0.0
 
 
 @dataclass
@@ -1070,6 +1079,8 @@ def _shape_anchors(escher: bytes) -> List[ShapeAnchor]:
                 shape_seq=shape_seq,
                 centre_x=(box[0] + box[2]) / 2.0,
                 centre_y=(box[1] + box[3]) / 2.0,
+                width=box[2] - box[0],
+                height=box[3] - box[1],
             )
         )
     return found

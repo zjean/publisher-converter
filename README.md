@@ -941,12 +941,14 @@ These are real and deliberate, not bugs to be surprised by later.
   waits for the same sample.
 - **Fonts are referenced by name.** Affinity substitutes anything not
   installed — install the source fonts first, or expect reflow.
-- **libmspub sometimes reports a degenerate frame size.** One sample has
-  a 5.5 x 5.7 pt text frame holding 3,869 characters, which Affinity
-  shows as an empty box. Inventing a plausible size would be inventing
-  layout, so the frame is left as reported and the file is flagged
-  `review` with the character count and frame size, ready to be resized
-  by hand.
+- **A source document can state a text box collapsed to nothing.** One
+  sample has a 5.5 x 5.7 pt text frame holding 3,911 characters, which
+  Affinity shows as an empty box. This is not a parsing artefact: the
+  `.pub`'s own Escher anchor for that shape states the same box, so
+  Publisher showed it empty too. Inventing a plausible size would be
+  inventing layout, so the frame is left as stated and the file is
+  flagged `review` with the character count and frame size, ready to be
+  resized by hand.
 - **Text wrap is inferred for images, and read from the file for
   headlines.** libmspub exposes no wrap data at all, and images arrive
   after the text in z-order, so without help they paint over the copy.
@@ -982,11 +984,18 @@ Also confirmed against real documents: multi-page output, accented Latin
 text, font and colour mapping, italics, placed images resolving through
 the sidecar link folder, and text flowing around images.
 
-**Not yet verified:** whether Publisher's rotation *sign* matches ours.
-The magnitude and pivot are right, but confirming the direction needs a
-reference rendering of the same `.pub` — either Publisher itself, or
-LibreOffice, which drives the same libmspub and so shows how the
-reference consumer reads the property.
+**Rotation direction matches libmspub.** libmspub states a rotated shape
+twice — as `librevenge:rotate` on the object, and as an outline polygon
+in absolute page coordinates that it computes from that property — so the
+outline says how the reference consumer reads its own field. Every
+matched object in the corpus lands within 0.5pt of its outline, and the
+shapes that discriminate are decisive: negating the sign moves the
+corners of one 755 × 1155pt frame by 306pt. `research/rotation_sign.py`
+prints it; `RotationSignTest` pins it. A LibreOffice render agrees.
+
+**Not yet verified:** whether *libmspub* matches *Publisher* on that sign.
+That needs a reference rendering from Publisher itself, and is covered by
+the PDF exports actions.md asks for.
 
 ## Layout
 

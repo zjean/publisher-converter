@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -287,6 +288,74 @@ class ImageTypeTest(unittest.TestCase):
                     root = ET.fromstring(archive.read(spread))
                 image = next(root.iter("Image"))
                 self.assertEqual(image.get("ImageTypeName"), expected)
+
+
+class RotationSignTest(unittest.TestCase):
+    """A positive angle must turn the same way the reference consumer turns it.
+
+    Magnitude and pivot were measured long ago; the *direction* was the one
+    thing left unverified, and the plan for settling it was to render the
+    file in LibreOffice and compare by eye. There is a stricter check that
+    needs nothing installed: libmspub reports a rotated shape twice over --
+    once as `librevenge:rotate` on the object, and once as a `drawPolygon`
+    of the shape's outline in absolute page coordinates, which it computes
+    itself. So the outline says how libmspub reads its own property, and our
+    ItemTransform has to land on it. Negate the sign and the corners of the
+    corpus's 755x1155pt frame move 306pt.
+
+    This settles us against libmspub, which is also all the LibreOffice
+    comparison could have settled -- LibreOffice drives the same library.
+    Whether libmspub matches Publisher still needs Publisher.
+    """
+
+    @staticmethod
+    def corners(rotation: float, cx: float, cy: float, width: float, height: float):
+        """Where `_matrix` puts the four corners of a centred rectangle."""
+        a, b, c, d, tx, ty = (
+            float(v) for v in idml._matrix(rotation, cx, cy).split()
+        )
+        return [
+            (a * x + c * y + tx, b * x + d * y + ty)
+            for x, y in (
+                (-width / 2, -height / 2), (width / 2, -height / 2),
+                (width / 2, height / 2), (-width / 2, height / 2),
+            )
+        ]
+
+    def test_a_frame_lands_on_the_outline_libmspub_drew_for_it(self):
+        # The corpus's own numbers: `rotated_text.pub`'s large tilted frame,
+        # and the polygon libmspub emitted for the same shape, both moved to
+        # spread coordinates (the page centred on the origin).
+        width, height, rotation = 755.834, 1154.592, -46.0
+        centre = (-188.052, -132.264)
+        outline = [
+            (-865.850, -261.446), (-340.741, -805.038),
+            (489.760, -3.024), (-35.348, 540.568),
+        ]
+
+        landed = self.corners(rotation, *centre, width, height)
+        for corner in landed:
+            nearest = min(
+                math.dist(corner, vertex) for vertex in outline
+            )
+            self.assertLess(nearest, 1.0, f"{corner} is off the outline")
+
+    def test_negating_the_sign_would_be_obvious(self):
+        # Guards the test above from passing on a shape too symmetric to
+        # tell the two signs apart.
+        width, height, rotation = 755.834, 1154.592, -46.0
+        centre = (-188.052, -132.264)
+        outline = [
+            (-865.850, -261.446), (-340.741, -805.038),
+            (489.760, -3.024), (-35.348, 540.568),
+        ]
+
+        mirrored = self.corners(-rotation, *centre, width, height)
+        worst = max(
+            min(math.dist(corner, vertex) for vertex in outline)
+            for corner in mirrored
+        )
+        self.assertGreater(worst, 100.0)
 
 
 class ContentTransformTest(unittest.TestCase):

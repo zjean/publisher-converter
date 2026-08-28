@@ -212,6 +212,20 @@ class RealFileTest(unittest.TestCase):
             ],
         )
 
+    @needs_samples
+    def test_the_file_states_the_collapsed_frame_libmspub_reports(self):
+        # The 5.5 x 5.7pt frame holding 3,785 characters was written up as
+        # libmspub reporting a degenerate size. It is not: the .pub's own
+        # Escher anchor for that shape states the same box, so the document
+        # really does contain a text box collapsed to nothing, and Publisher
+        # would have shown it empty too. The two are transposed because the
+        # shape is turned -46 degrees, which is inside the 45-135 band where
+        # Publisher stores the box before the swap and libmspub swaps back.
+        structure = pubfile.read_structure(SAMPLES / "rotated_text.pub")
+        anchor = min(structure.anchors, key=lambda a: a.width * a.height)
+        self.assertAlmostEqual(anchor.width, 5.67, places=2)
+        self.assertAlmostEqual(anchor.height, 5.46, places=2)
+
     def test_a_file_with_no_wordart_reports_none(self):
         structure = pubfile.read_structure(SAMPLES / "MISSAL MARIANA E PEDRO.pub")
         self.assertEqual(structure.wordart, [])
@@ -1498,6 +1512,12 @@ class ShapeSeqnumReadingTest(unittest.TestCase):
         self.assertAlmostEqual(anchors[0].centre_y, -35.0)
         self.assertAlmostEqual(anchors[1].centre_x, 20.0)
         self.assertAlmostEqual(anchors[1].centre_y, 30.0)
+        # The box's size, not only its middle: it is the file's own second
+        # opinion on the size libmspub reports.
+        self.assertAlmostEqual(anchors[0].width, 200.0)
+        self.assertAlmostEqual(anchors[0].height, 30.0)
+        self.assertAlmostEqual(anchors[1].width, 40.0)
+        self.assertAlmostEqual(anchors[1].height, 60.0)
 
     def test_a_shape_missing_either_half_is_not_an_anchor(self):
         self.assertEqual(pubfile._shape_anchors(wordart_shape(shape_seq=None)), [])

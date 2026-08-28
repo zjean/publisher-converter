@@ -1674,11 +1674,19 @@ def _check_unrenderable_paths(document: model.Document) -> None:
 def _check_overset_text(document: model.Document) -> None:
     """Flag text frames far too small to show the text they contain.
 
-    libmspub sometimes reports a degenerate size for a text object — one
-    file in the sample set has a 5.5 x 5.7 pt frame carrying 3,869
+    One file in the sample set has a 5.5 x 5.7 pt frame carrying 3,911
     characters, which Affinity renders as an empty box. Guessing the
     intended geometry would be inventing layout, so the frame is left
     alone and the operator is told exactly which file needs a human.
+
+    This was written up as libmspub reporting a degenerate size, and that
+    was wrong: the .pub's own Escher anchor for that shape states the same
+    box to two decimals, so the document really does contain a text box
+    collapsed to nothing and Publisher showed it empty too. The message
+    says so, because the difference decides what the operator does —
+    a parser artefact is worth reporting upstream, whereas a collapsed box
+    is a judgement about what the hidden copy was for.
+    (`test_the_file_states_the_collapsed_frame_libmspub_reports`.)
 
     A threaded story is measured against the whole chain, since that is
     what has to hold it. Checking each link on its own reported a normal
@@ -1708,7 +1716,8 @@ def _check_overset_text(document: model.Document) -> None:
                 document.warnings.append(
                     f"text frame too small for its content: {characters} characters "
                     f"in a {item.width:.1f}x{item.height:.1f}pt frame "
-                    f"(libmspub reported a degenerate size; resize it in Affinity)"
+                    f"(the .pub states that size itself, so Publisher showed "
+                    f"it empty too; resize it in Affinity to read the copy)"
                 )
 
 

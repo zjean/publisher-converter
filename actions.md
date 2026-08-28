@@ -345,28 +345,63 @@ version can be dropped.
 
 ---
 
-## 4. Confirm the rotation sign  ⏰ quick, no Publisher needed
+## 4. Confirm the rotation sign — **answered against libmspub**
 
-Rotation **magnitude and pivot are verified correct** (a 300 dpi render
+Rotation **magnitude and pivot** were already verified (a 300 dpi render
 measured 274.6 × 175.9 pt against a predicted 274.8 × 176.0 for a 300×30
-bar at 30°, rotated about its centre). What is unverified is the
-**direction**: we render `+30` clockwise, but nothing confirms that
-matches Publisher's sign convention.
+bar at 30°, rotated about its centre). The **direction** is now verified
+too, and no rendering was needed.
 
-Cheapest check — LibreOffice drives the *same* libmspub, so it shows how
-the reference consumer reads the property:
+### How it was settled
+
+libmspub reports a rotated shape **twice**: once as `librevenge:rotate`
+on the object, and once as a `drawPolygon` giving that shape's outline in
+absolute page coordinates, which libmspub computes from the property
+itself. So the polygon is libmspub stating how it reads its own field,
+and the question is arithmetic — does the `ItemTransform` `idml.py`
+writes put the frame's corners on that outline?
 
 ```sh
-brew install --cask libreoffice
-soffice --headless --convert-to pdf --outdir /tmp/ref files/rotated_text.pub
+python3 research/rotation_sign.py files
 ```
 
-Compare `/tmp/ref/rotated_text.pdf` against the Affinity render of
-`converted/rotated_text.idml`. If the text tilts the same way, the sign
-is right. If mirrored, negate the return of `_rotation()` in
-`pubidml/model.py` — a one-line change.
+Across the corpus every object whose outline can be matched lands within
+**0.5pt**, and the shapes that can tell the two signs apart are decisive:
 
-This also gives a free reference renderer for action 3.
+| file | angle | size | as written | sign negated |
+|---|---|---|---|---|
+| `rotated_text.pub` | −46° | 755.8 × 1154.6pt | **0.458pt** | 305.7pt |
+| `1336 kerkbode.pub` | −179° | 380.8 × 32.5pt | **0.005pt** | 6.7pt |
+
+A shape at ±90° or ±180° reads small either way — the two signs give the
+same footprint — so the probe prints both columns and those rows are
+simply not evidence.
+
+Pinned by `RotationSignTest` in `tests/test_idml.py`, which carries the
+corpus's own numbers so the check survives without the sample files.
+
+The LibreOffice render was done as well and agrees: the text in
+`rotated_text.pub` runs **up** and to the right, which is what −46° means
+in a y-down system.
+
+### What is still open, and where it moved
+
+This settles us against **libmspub** — which is also all the LibreOffice
+comparison could ever have settled, since LibreOffice drives the same
+library. Whether *libmspub* matches *Publisher* is a different question
+and needs Publisher. It costs nothing extra: any PDF exported from
+Publisher for actions §1–§3 answers it, so it is one line on the
+Publisher checklist rather than an action of its own.
+
+### An aside, checked and clear
+
+The probe first reported a 386pt error on `Blank Note Card` and 592pt on
+one `1336` shape. Both were the probe pairing an object with a polygon
+that was not its own — the note card draws a small logo box immediately
+before its rotated credit block. Confirmed correct against LibreOffice:
+that sheet is laid out with the credits on the left and the photographs
+on the right, exactly as libmspub's numbers say. The probe now requires a
+polygon to measure the same box before it will pair with an object.
 
 ---
 
@@ -732,6 +767,33 @@ Established here, so don't re-derive it:
   it said the US-Letter `Blank Note Card` reads 359410 as well, and that
   file does not carry the block at all. The conclusion still holds, for
   the better reason that the block never varies.)
+
+- **But `0x15` and `SGP ` are the same number in three files, and that
+  narrows the experiment.** At 12700 EMU per point, `0x15`'s constant
+  **359410 EMU is exactly 28.3 pt** — which is precisely what `SGP `
+  states in `Cantico_dei_Cantici`, `MISSAL` and `rotated_text`, and
+  within a twentieth of a point of the 28.2898 pt in `Lisa Hoogendijk`.
+  So the two fields agree in four documents of seven and disagree only in
+  the three `kerkbode` issues.
+
+  That reads as one quantity written in two places — a template default
+  beside the value in force — rather than two unrelated lengths. It also
+  explains the constant: 28.3 pt is 1 cm to within 0.05 pt, which is what
+  a **metric-locale** Publisher would default this setting to, against
+  the 0.5 in / 36 pt the VBA documentation quotes for US installs. Every
+  one of these documents is Dutch, Italian or Portuguese.
+
+  **So open a `kerkbode` file for this reading, not one of the others.**
+  It is the only place the two candidates make different predictions:
+
+  | `? ActiveDocument.DefaultTabStop` on `1336 kerkbode.pub` | what it means |
+  |---|---|
+  | **≈ 8.08 pt** | `SGP ` is the field; wire it in as it stands |
+  | **≈ 28.3 pt** | `SGP ` is something else, and `0x15` is the candidate |
+  | **36 pt** | neither; the interval is not in either place |
+
+  Reading `Cantico_dei_Cantici` instead cannot separate the two, because
+  both fields say 28.3 pt there.
 - **The `SGP ` chunk of the Quill stream is the candidate.** It is a bare
   U32 length and then at most one block — id `0x00`, the same id a tab
   position carries inside a paragraph's stops, type `0x22`, holding a
@@ -775,8 +837,12 @@ editor, `Ctrl+G` for the immediate window, and type
 ```
 
 Points come back either way. Write the number next to the file name.
-The three `kerkbode` issues and `Lisa Hoogendijk` are the ones that
-matter — they are the files whose `SGP ` value differs.
+
+**If you only have time for one file, make it `1336 kerkbode.pub`.** It
+is the only document where the two candidate fields predict different
+answers — see the table above — so a single reading there identifies the
+field outright. `Lisa Hoogendijk` is the next most useful, as the only
+file stating 28.2898 rather than a flat 28.3.
 
 ### Step 3 — read the result
 
