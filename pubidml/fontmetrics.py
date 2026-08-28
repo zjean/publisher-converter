@@ -14,6 +14,7 @@ their advances and `glyf` for the box each one inks.
 """
 import os
 import struct
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -383,3 +384,95 @@ def find_face(family: str, bold: bool, italic: bool) -> Optional[Face]:
         return faces(path.read_bytes())[position]
     except (OSError, FontError, struct.error, IndexError):
         return None
+
+
+# What a headline face averages, for a font this machine cannot read.
+# Measured off two rendered headlines -- Monotype Corsiva at 20 pt inking
+# 14.1 pt and a substituted Pristina at 30.1 pt inking 20.8 pt -- and
+# checked against Publisher's own page, where a dropped initial inks 39.7
+# pt of a 40.1 pt band. These were the only numbers the converter had
+# before it could read a font; they are now the last resort.
+#
+# The ink and the glyph width do not agree (0.55 against an average
+# advance of 0.50) because the width is deliberately generous: a headline
+# sized by height alone overflows its band and wraps, and overset text is
+# hidden rather than drawn. That asymmetry is preserved exactly, because
+# it is what the output looks like today.
+_AVERAGE_INK_PER_EM = 0.70
+_AVERAGE_EM_PER_GLYPH = 0.55
+_AVERAGE_EM_PER_ADVANCE = 0.50
+
+# Faces measured once on a machine that has them, so a document converts
+# the same way everywhere. `research/font_metrics.py` prints these.
+# Entries are (ink per em, mean advance per em, em per glyph).
+BAKED: Dict[str, Tuple[float, float, float]] = {}
+
+
+@dataclass(frozen=True)
+class Metrics:
+    """What a string measures, per em, and where the numbers came from."""
+
+    ink_per_em: float
+    width_per_em: float
+    mean_advance_per_em: float
+    #: 'font' read from the font itself, 'table' a baked family average,
+    #: 'average' the global constants above.
+    source: str
+
+    @property
+    def exact(self) -> bool:
+        """True only when these came from the font this text is set in.
+
+        Only an exact measurement earns a horizontal scale: condensing
+        glyphs by a ratio worked out from a guessed width is a
+        confident-looking wrong answer.
+        """
+        return self.source == "font"
+
+
+def _averages(text: str) -> Metrics:
+    return Metrics(
+        ink_per_em=_AVERAGE_INK_PER_EM,
+        width_per_em=_AVERAGE_EM_PER_GLYPH * max(len(text), 1),
+        mean_advance_per_em=_AVERAGE_EM_PER_ADVANCE,
+        source="average",
+    )
+
+
+def measure(family: Optional[str], bold: bool, italic: bool, text: str) -> Metrics:
+    """What `text` measures in the font that sets it.
+
+    Three tiers, best first: the font itself if this machine has it, a
+    baked average for the family if it does not, and the global averages
+    if neither. A font that is installed but covers none of the string --
+    Corsiva Hebrew asked for Latin -- counts as not having it.
+    """
+    if not text:
+        text = " "
+    if family:
+        face = find_face(family, bold, italic)
+        if face is not None:
+            try:
+                found = face.measure(text)
+            except (FontError, struct.error):
+                found = None
+            if found is not None:
+                ink, width, advance = found
+                return Metrics(
+                    # A CFF face states advances but no outlines, so the
+                    # width is real and only the ink has to be borrowed.
+                    ink_per_em=ink if ink else _AVERAGE_INK_PER_EM,
+                    width_per_em=width,
+                    mean_advance_per_em=advance,
+                    source="font",
+                )
+        baked = BAKED.get(family.casefold())
+        if baked:
+            ink, advance, per_glyph = baked
+            return Metrics(
+                ink_per_em=ink,
+                width_per_em=per_glyph * max(len(text), 1),
+                mean_advance_per_em=advance,
+                source="table",
+            )
+    return _averages(text)

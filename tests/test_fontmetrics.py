@@ -318,3 +318,72 @@ class FontIndexTest(unittest.TestCase):
             self.assertIsNone(
                 fontmetrics.find_face("Kerk Display", bold=False, italic=False)
             )
+
+
+class TierTest(unittest.TestCase):
+    """Which of the three sources a headline's metrics come from."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        patch = mock.patch.object(
+            fontmetrics, "font_directories", lambda: [self.root]
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        fontmetrics.reset_index()
+        self.addCleanup(fontmetrics.reset_index)
+
+    def test_an_installed_font_is_measured_exactly(self):
+        (self.root / "kerk.ttf").write_bytes(
+            build_font(family="Kerk Display", glyphs=_GLYPHS)
+        )
+        found = fontmetrics.measure("Kerk Display", False, False, "Ay")
+        self.assertEqual(found.source, "font")
+        self.assertTrue(found.exact)
+        self.assertAlmostEqual(found.ink_per_em, 0.900)
+        self.assertAlmostEqual(found.width_per_em, 1.100)
+        self.assertAlmostEqual(found.mean_advance_per_em, 0.550)
+
+    def test_a_baked_family_is_used_when_the_font_is_not_installed(self):
+        with mock.patch.dict(
+            fontmetrics.BAKED, {"pristina": (0.62, 0.41, 0.44)}, clear=False
+        ):
+            found = fontmetrics.measure("Pristina", False, False, "Kerkbode")
+        self.assertEqual(found.source, "table")
+        self.assertFalse(found.exact)
+        self.assertAlmostEqual(found.ink_per_em, 0.62)
+        self.assertAlmostEqual(found.mean_advance_per_em, 0.41)
+        self.assertAlmostEqual(found.width_per_em, 0.44 * len("Kerkbode"))
+
+    def test_an_unknown_font_falls_back_to_the_averages(self):
+        found = fontmetrics.measure("Nothing Here", False, False, "Kerkbode")
+        self.assertEqual(found.source, "average")
+        self.assertFalse(found.exact)
+        self.assertAlmostEqual(found.ink_per_em, 0.70)
+        self.assertAlmostEqual(found.mean_advance_per_em, 0.50)
+        self.assertAlmostEqual(found.width_per_em, 0.55 * len("Kerkbode"))
+
+    def test_a_font_stating_no_name_falls_back_to_the_averages(self):
+        found = fontmetrics.measure(None, False, False, "Kerkbode")
+        self.assertEqual(found.source, "average")
+
+    def test_a_font_without_the_string_s_glyphs_falls_through(self):
+        # Found, parses, states a cmap, covers none of the string.
+        (self.root / "hebrew.ttf").write_bytes(build_font(
+            family="Corsiva Hebrew", glyphs={"א": (500, (0, 0, 400, 600))}
+        ))
+        found = fontmetrics.measure("Corsiva Hebrew", False, False, "Kerkbode")
+        self.assertEqual(found.source, "average")
+
+    def test_a_font_with_no_outlines_falls_through_for_ink_only(self):
+        # An OpenType/CFF face has advances but no glyf boxes. The width is
+        # still real; only the ink has to be borrowed.
+        face = build_font(family="Kerk Display", glyphs=_GLYPHS)
+        (self.root / "kerk.ttf").write_bytes(face)
+        with mock.patch.object(fontmetrics.Face, "bbox", lambda self, glyph: None):
+            found = fontmetrics.measure("Kerk Display", False, False, "Ay")
+        self.assertEqual(found.source, "font")
+        self.assertAlmostEqual(found.width_per_em, 1.100)
+        self.assertAlmostEqual(found.ink_per_em, 0.70)
