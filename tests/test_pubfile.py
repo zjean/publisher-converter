@@ -1184,6 +1184,7 @@ def wordart_bools(**flags) -> int:
     bits = {
         "strikethrough": 0x00, "small_caps": 0x01, "shadow": 0x02,
         "underline": 0x03, "italic": 0x04, "bold": 0x05,
+        "stretch": 0x0A,
     }
     value = stated = 0
     for name, on in flags.items():
@@ -1257,23 +1258,22 @@ class WordArtReadingTest(unittest.TestCase):
         self.assertAlmostEqual(art.centre_x, 0.0)
         self.assertAlmostEqual(art.centre_y, -35.0)
 
-    def test_a_shape_stating_no_size_is_fitted_to_its_band(self):
-        # WordArt states that it stretches its glyphs to the shape, and
-        # measuring Publisher's own page confirms it: a dropped initial
-        # inked 39.7 pt of a 40.1 pt band. So the size to invent for a
-        # shape that states none is the one that fills the band -- as much
-        # as its height allows, and no more than its width does.
+    def test_a_shape_stating_no_size_says_so_rather_than_inventing_one(self):
+        # The parser used to work a size back from the band here, out of
+        # two averaged constants. Sizing needs the font the words are set
+        # in, which is `convert`'s to read: `WordArtSizingTest` in
+        # test_convert.py now holds the assertions that were here.
         art = self.one(text="D", size=None, box=(0, 0, 45, 40))
         self.assertTrue(art.fitted)
-        self.assertAlmostEqual(art.size, 40.0 / 0.70, places=4)
+        self.assertIsNone(art.size)
 
-    def test_a_fitted_size_is_held_back_by_a_narrow_band(self):
-        # One long word in a shallow band cannot be set at the size its
-        # height would allow: Publisher condenses the glyphs to fit the
-        # width and straight text cannot, so the width is what binds.
-        # Overflowing the band would wrap the headline onto two lines.
+    def test_the_band_is_reported_whatever_shape_it_is(self):
+        # The band is what `convert` fits the headline into, so both of its
+        # dimensions have to survive the parse even when no size does.
         art = self.one(text="Kerkdiensten", size=None, box=(0, 0, 120, 40))
-        self.assertAlmostEqual(art.size, 120.0 / (12 * 0.55), places=4)
+        self.assertIsNone(art.size)
+        self.assertAlmostEqual(art.width, 120.0)
+        self.assertAlmostEqual(art.height, 40.0)
 
     def test_a_stated_size_is_still_the_file_s_own(self):
         # Only the invented number changes here. What the file states is
@@ -1334,29 +1334,14 @@ class WordArtReadingTest(unittest.TestCase):
     def test_a_stream_of_rubbish_does_not_raise(self):
         pubfile._wordart_shapes(bytes(range(256)) * 4)
 
-    def test_a_headline_on_three_lines_is_sized_by_the_line_not_the_band(self):
-        # The band holds all three, so taking the whole of it for one line
-        # would treble the size. The longest line is what the width has to
-        # hold, for the same reason.
-        art = self.one(text="a\r\nb\r\nc", size=None, box=(0, 0, 200, 120))
-        self.assertTrue(art.fitted)
-        self.assertAlmostEqual(art.size, 120.0 / 3 / 0.70, places=4)
-
-    def test_a_headline_on_one_line_is_sized_by_the_whole_band(self):
-        art = self.one(text="o", size=None, box=(0, 0, 200, 40))
-        self.assertAlmostEqual(art.size, 40.0 / 0.70, places=4)
-
-    def test_a_line_break_is_read_however_it_is_written(self):
+    def test_a_line_break_is_carried_however_it_is_written(self):
+        # How many lines a headline is set on decides its size, so the
+        # breaks have to survive the parse verbatim -- the splitting itself
+        # belongs to `convert`, which is where the sizing moved.
         for break_ in ("\r\n", "\r", "\n"):
             with self.subTest(break_=break_):
-                art = self.one(
-                    text=f"o{break_}t", size=None, box=(0, 0, 200, 80)
-                )
-                self.assertAlmostEqual(art.size, 80.0 / 2 / 0.70, places=4)
-
-    def test_the_widest_line_is_the_one_the_band_has_to_hold(self):
-        art = self.one(text="ab\r\nabcdefgh", size=None, box=(0, 0, 40, 200))
-        self.assertAlmostEqual(art.size, 40.0 / (8 * 0.55), places=4)
+                art = self.one(text=f"o{break_}t", size=None)
+                self.assertEqual(art.text, f"o{break_}t")
 
 
 class WordArtBooleanTest(unittest.TestCase):
@@ -2793,3 +2778,39 @@ class RealGradientRotationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WordArtStretchTest(unittest.TestCase):
+    """The flag that says the glyphs are fitted to the shape.
+
+    All 48 WordArt shapes in the corpus state it and all 48 have it set,
+    which is what lets a stated point size be treated as a floor rather
+    than the truth.
+    """
+
+    def one(self, **kwargs):
+        return pubfile._wordart_shapes(wordart_shape(**kwargs))[0]
+
+    def test_the_stretch_flag_is_read(self):
+        self.assertTrue(self.one(bools=wordart_bools(stretch=True)).stretch)
+
+    def test_a_shape_that_does_not_state_stretch_is_not_stretched(self):
+        self.assertFalse(self.one(bools=wordart_bools(bold=True)).stretch)
+
+    def test_a_shape_stating_stretch_false_is_not_stretched(self):
+        self.assertFalse(self.one(bools=wordart_bools(stretch=False)).stretch)
+
+
+class WordArtStatedSizeTest(unittest.TestCase):
+    """What the file states, and nothing worked out from the band."""
+
+    def test_a_stated_size_is_reported_as_stated(self):
+        art = pubfile._wordart_shapes(wordart_shape(size=20.0))[0]
+        self.assertEqual(art.size, 20.0)
+        self.assertFalse(art.fitted)
+
+    def test_a_shape_with_no_stated_size_reports_none(self):
+        # Sizing needs the font, which the parser has no business reading.
+        art = pubfile._wordart_shapes(wordart_shape(size=None))[0]
+        self.assertIsNone(art.size)
+        self.assertTrue(art.fitted)

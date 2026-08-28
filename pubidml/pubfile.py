@@ -153,7 +153,6 @@ Format, from libmspub 0.1.5 MSPUBParser.cpp:
 
 from __future__ import annotations
 
-import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -233,6 +232,11 @@ _PROP_WRAP_DISTANCES = (0x0384, 0x0385, 0x0386, 0x0387)
 _PROP_WORDART_BOOLS = 0x00FF
 _WORDART_STRIKETHROUGH, _WORDART_UNDERLINE = 0x00, 0x03
 _WORDART_ITALIC, _WORDART_BOLD = 0x04, 0x05
+# Bit 10 is property 0xF5, gtextFStretch: the file saying the glyphs are
+# stretched to the shape rather than set at a size and left there. All 48
+# WordArt shapes in the corpus state it and all 48 have it set, which is
+# what authorises `convert` to treat a stated point size as a floor.
+_WORDART_STRETCH = 0x0A
 
 # The shape record, whose `instance` is the shape type. 136 is
 # msosptTextPlainText -- WordArt that is not warped at all, only fitted to
@@ -284,27 +288,6 @@ _COLOR_FROM_PALETTE = 0x08
 _COLOR_CHANGE_INTENSITY = 0x10
 _INTENSITY_BLACK_BASE, _INTENSITY_WHITE_BASE = 0x01, 0x02
 _FIXED_16_16 = 65536.0
-# WordArt stretches its glyphs to fill the shape -- every shape in the
-# corpus states the stretch flag -- so the band is the glyphs, and a shape
-# that states no size at all needs one that fills it.
-#
-# How much of an em a line of headline type inks, ascender to baseline:
-# measured off two rendered headlines, Monotype Corsiva at 20 pt inking
-# 14.1 pt and a substituted Pristina at 30.1 pt inking 20.8 pt. Publisher's
-# own page is the check on the result -- a dropped initial there inks 39.7
-# pt of a 40.1 pt band, and this puts it at 40.1. A headline with
-# descenders inks more of its em than this and comes out a little large;
-# nothing in the corpus states a size for one.
-_BAND_INK_PER_EM = 0.70
-# How wide an average headline glyph is, in ems. The width matters because
-# WordArt condenses glyphs to fit a band and straight text cannot, so a
-# headline sized by its band's height alone would overflow the band, wrap,
-# and be hidden as overset text -- the one failure worth erring away from.
-# 'Meditatie' set at 20 pt inks 95.5 pt across nine glyphs, which is 0.53;
-# this rounds that up, so a headline the width decides lands inside its
-# band rather than exactly on the edge of it.
-_BAND_EM_PER_GLYPH = 0.55
-
 # Sequence numbers libmspub hard-codes as dummy pages and never emits
 # (MSPUBParser::getPageTypeBySeqNum).
 _DUMMY_PAGE_SEQNUMS = frozenset({0x10D, 0x110, 0x113, 0x117})
@@ -384,6 +367,9 @@ class WordArt:
     rotation: float = 0.0
     #: True when the file stated no size and one was taken from the band.
     fitted: bool = False
+    #: True when the file says the glyphs are stretched to the shape, which
+    #: is what makes the band the size rather than the stated point size.
+    stretch: bool = False
     #: WordArt's own character formatting, which is stated on the shape
     #: rather than on the text and is therefore lost with it.
     bold: bool = False
@@ -1093,30 +1079,6 @@ def _wordart_boolean(value, bit: int) -> bool:
     return bool(value >> 16 & (1 << bit)) and bool(value & (1 << bit))
 
 
-def _band_size(width: float, height: float, text: str) -> float:
-    """The point size that fills a band, for a shape stating none.
-
-    WordArt sets the words and then stretches them to the shape, so the
-    band is not a box the words sit inside -- it *is* the words, and the
-    size that fills it is the size Publisher drew. What the file leaves out
-    has to be worked back from that.
-
-    Both directions bind. A band holds as many lines as the words are set
-    on, so it is a line's share of the height that stands for the size --
-    sizing a three-line headline from the whole band trebles it -- and the
-    longest line is what the width has to hold. Publisher condenses glyphs
-    to fit a band and straight text cannot, so a headline sized by height
-    alone would overflow its band and wrap, which is worse than a headline
-    slightly small.
-    """
-    lines = re.split(r"\r\n|\r|\n", text) or [text]
-    longest = max((len(line) for line in lines), default=1) or 1
-    return min(
-        height / len(lines) / _BAND_INK_PER_EM,
-        width / (longest * _BAND_EM_PER_GLYPH),
-    )
-
-
 def _wordart_shapes(escher: bytes) -> List[WordArt]:
     """The WordArt shapes in an Escher stream."""
     found: List[WordArt] = []
@@ -1171,13 +1133,17 @@ def _wordart_shapes(escher: bytes) -> List[WordArt]:
             WordArt(
                 text=text,
                 font=font,
-                size=_band_size(width, height, text) if fitted else size,
+                # What the file states, and nothing more: working a size
+                # back from the band needs the font the words are set in,
+                # which is `convert`'s to read, not the parser's.
+                size=size,
                 centre_x=(box[0] + box[2]) / 2.0,
                 centre_y=(box[1] + box[3]) / 2.0,
                 width=width,
                 height=height,
                 rotation=rotation or 0.0,
                 fitted=fitted,
+                stretch=_wordart_boolean(flags, _WORDART_STRETCH),
                 bold=_wordart_boolean(flags, _WORDART_BOLD),
                 italic=_wordart_boolean(flags, _WORDART_ITALIC),
                 underline=_wordart_boolean(flags, _WORDART_UNDERLINE),
