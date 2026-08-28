@@ -27,6 +27,7 @@ REPORT_COLUMNS = [
     "images",
     "shapes",
     "characters",
+    "wordart",
     "fonts",
     "warnings",
     "error",
@@ -287,6 +288,8 @@ def _print_result(result: convert.Result) -> None:
         f"{result.pages}p {result.text_frames} frames "
         f"{result.images} images {result.characters} chars"
     )
+    if result.wordart:
+        detail += f" {result.wordart} wordart"
     print(f"[{marker}] {name}: {detail}")
     for warning in result.warnings:
         print(f"           ! {warning}")
@@ -322,6 +325,7 @@ def _write_report(path: Path, results: List[convert.Result]) -> None:
                     result.images,
                     result.shapes,
                     result.characters,
+                    result.wordart,
                     _csv_safe("; ".join(result.fonts)),
                     _csv_safe("; ".join(result.warnings)),
                     _csv_safe(result.error or ""),

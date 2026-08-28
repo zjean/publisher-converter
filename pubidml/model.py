@@ -471,6 +471,10 @@ class Document:
     warnings: List[str] = field(default_factory=list)
     # chain id -> the frames of one threaded story, in reading order.
     text_chains: Dict[str, List[TextFrame]] = field(default_factory=dict)
+    #: How many WordArt headlines were recovered from the .pub. A count,
+    #: not a warning: a headline that converted correctly is not something
+    #: a person has to act on, but it is worth seeing beside the frames.
+    wordart: int = 0
     # True once the parser's endDocument event has been seen. A stream that
     # is cut on a line boundary otherwise replays as a syntactically perfect
     # but silently short document, which would be reported as a success.

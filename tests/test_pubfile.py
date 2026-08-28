@@ -1719,18 +1719,6 @@ class WordArtRecoveryTest(unittest.TestCase):
         convert._recover_wordart(document, self.structure_with(self.art()))
         self.assertIsInstance(document.masters[0].items[0], model.TextFrame)
 
-    def test_a_recovered_headline_is_reported(self):
-        document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art()))
-        self.assertTrue(any("1 WordArt headline" in w for w in document.warnings))
-
-    def test_a_fitted_size_is_reported_as_such(self):
-        document = self.document_with(self.guides())
-        convert._recover_wordart(
-            document, self.structure_with(self.art(fitted=True))
-        )
-        self.assertTrue(any("sized to fill that band" in w for w in document.warnings))
-
     def span(self, document):
         return document.pages[0].items[0].story.paragraphs[0].spans[0]
 
@@ -1758,6 +1746,59 @@ class WordArtRecoveryTest(unittest.TestCase):
             (span.bold, span.italic, span.underline, span.strikethrough),
             (False, False, False, False),
         )
+
+    # -- what the report says -------------------------------------------
+    #
+    # Only what a person has to act on. A headline that was measured, set
+    # straight because the file never bent it, and had its duplicate paint
+    # dropped is a converted headline, not a warning -- fifteen of those
+    # used to print a paragraph explaining, four different ways, that
+    # nothing had gone wrong. The count reaches the detail line instead.
+
+    def test_a_clean_recovery_warns_about_nothing(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertEqual(document.warnings, [])
+
+    def test_a_clean_recovery_is_still_counted(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertEqual(document.wordart, 1)
+
+    def test_a_dropped_repeat_is_not_a_warning(self):
+        # Dropping the second paint of the same guides is what stops the
+        # outline drawing rules across the words. It is the fix, not a loss.
+        document = self.document_with(self.guides(), self.outlined())
+        convert._recover_wordart(document, self.structure_with(self.art()))
+        self.assertEqual(document.warnings, [])
+
+    def test_a_headline_at_normal_spacing_is_not_reported(self):
+        document = self.document_with(self.guides())
+        convert._recover_wordart(document, self.structure_with(self.art(spacing=1.2)))
+        self.assertEqual(document.warnings, [])
+
+    def test_a_bent_headline_is_reported_and_named(self):
+        # The one real loss, and it is rare: 47 of the corpus's 48 shapes
+        # are not bent at all.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(
+            document, self.structure_with(self.art(warp="button curve"))
+        )
+        self.assertEqual(len(document.warnings), 1)
+        warning = document.warnings[0]
+        self.assertIn("bent", warning)
+        self.assertIn("button curve", warning)
+        self.assertIn("Kerkdiensten", warning)
+
+    def test_an_unmeasured_font_is_reported_by_name(self):
+        # Naming the font is the actionable part: installing it is the fix.
+        document = self.document_with(self.guides())
+        convert._recover_wordart(
+            document, self.structure_with(self.art(font=self.UNMEASURABLE))
+        )
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn(self.UNMEASURABLE, document.warnings[0])
+        self.assertIn("sized from averages", document.warnings[0])
 
     # A family no machine has, so these measure on the global averages
     # rather than on whichever headline faces happen to be installed here.
@@ -1790,35 +1831,6 @@ class WordArtRecoveryTest(unittest.TestCase):
                     document, self.structure_with(self.art(spacing=spacing))
                 )
                 self.assertIsNone(self.span(document).tracking)
-
-    def test_a_bent_headline_says_so_because_that_part_is_lost(self):
-        document = self.document_with(self.guides())
-        convert._recover_wordart(
-            document, self.structure_with(self.art(warp="button curve"))
-        )
-        warning = next(w for w in document.warnings if "WordArt headline" in w)
-        self.assertIn("1 of them bent", warning)
-        self.assertIn("button curve", warning)
-
-    def test_an_unbent_headline_says_so_rather_than_staying_silent(self):
-        # Nearly every headline in a real document is unbent, so "none of
-        # them is bent" is the answer to whether the loss applies here.
-        document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art()))
-        warning = next(w for w in document.warnings if "WordArt headline" in w)
-        self.assertIn("none of them is bent", warning)
-
-    def test_spacing_that_had_to_be_approximated_is_reported(self):
-        document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art(spacing=1.2)))
-        warning = next(w for w in document.warnings if "WordArt headline" in w)
-        self.assertIn("character spacing", warning)
-
-    def test_a_headline_at_normal_spacing_is_not_reported_as_approximated(self):
-        document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art()))
-        warning = next(w for w in document.warnings if "WordArt headline" in w)
-        self.assertNotIn("character spacing", warning)
 
     def test_a_shape_with_nowhere_to_go_is_named_rather_than_dropped(self):
         document = self.document_with()
@@ -1912,11 +1924,6 @@ class WordArtRecoveryTest(unittest.TestCase):
         self.assertEqual(span.color, (0, 51, 128))       # from the fill pass
         self.assertEqual(span.stroke, (54, 27, 0))       # from the outline pass
         self.assertAlmostEqual(span.stroke_width, 0.75)
-
-    def test_a_dropped_repeat_is_reported(self):
-        document = self.document_with(self.guides(), self.outlined())
-        convert._recover_wordart(document, self.structure_with(self.art()))
-        self.assertTrue(any("repeated paint" in w for w in document.warnings))
 
     def test_a_gradient_on_the_shape_stays_a_gradient_on_the_words(self):
         ramp = model.Gradient(

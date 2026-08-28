@@ -316,3 +316,30 @@ class DestinationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DetailLineTest(unittest.TestCase):
+    """What the one-line summary says about a converted file.
+
+    A recovered WordArt headline is a count rather than a warning, so this
+    is where it has to show: a file with fifteen of them used to print a
+    paragraph about them and now prints nothing unless something is wrong.
+    """
+
+    @staticmethod
+    def printed(result: convert.Result) -> str:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli._print_result(result)
+        return out.getvalue()
+
+    def test_the_detail_line_counts_recovered_headlines(self):
+        result = convert.Result(source=Path("x.pub"), pages=1, wordart=15)
+        self.assertIn("15 wordart", self.printed(result))
+
+    def test_a_file_with_no_headlines_says_nothing_about_them(self):
+        result = convert.Result(source=Path("x.pub"), pages=1, wordart=0)
+        self.assertNotIn("wordart", self.printed(result))
+
+    def test_the_count_reaches_the_csv(self):
+        self.assertIn("wordart", cli.REPORT_COLUMNS)

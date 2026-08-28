@@ -66,6 +66,7 @@ class Result:
     images: int = 0
     shapes: int = 0
     characters: int = 0
+    wordart: int = 0
     fonts: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -1218,58 +1219,38 @@ def _recover_wordart(
         master.items = rebuild(master.items)
 
     recovered = len(groups)
-    fitted = sum(1 for art_id in groups if by_id[art_id].fitted)
-    repainted = len(superseded)
+    document.wordart += recovered
     placed = set(groups)
-    # A headline the file bends is the one real loss here, and it is rare:
-    # 47 of the corpus's 48 WordArt shapes are not bent at all, so straight
-    # text is what they already were. Naming the shape the file asked for
-    # is the difference between "this is fine" and "this one is not".
-    warped = sorted(
-        {by_id[art_id].warp for art_id in groups if by_id[art_id].warp}
-    )
 
-    spaced = sum(1 for art_id in groups if by_id[art_id].spacing)
-    wrapping = sum(1 for art_id in groups if by_id[art_id].wraps_text)
-
-    if recovered:
-        detail = [
-            f"{sum(1 for a in groups if by_id[a].warp)} of them bent into a "
-            f"shape IDML cannot state ({', '.join(warped)}), which is the one "
-            f"part of a headline straight text does not stand in for"
-            if warped else
-            "none of them is bent into a shape, so straight text in that band "
-            "is what Publisher drew"
-        ]
-        if fitted:
-            detail.append(
-                f"{fitted} of them sized to fill that band because the file "
-                f"states no size, which is what WordArt does with the size it "
-                f"does state — it stretches the glyphs to the shape"
-            )
-        if spaced:
-            detail.append(
-                f"{spaced} of them set in WordArt's own character spacing, which "
-                f"it states as a multiple and IDML counts in ems, so the "
-                f"tracking on those is close rather than exact"
-            )
-        if wrapping:
-            detail.append(
-                f"{wrapping} of them float over copy that flows around them "
-                f"— a dropped initial does — so the text near those moves to "
-                f"make the same room the file says it kept"
-            )
-        if repainted:
-            detail.append(
-                f"{repainted} repeated paint(s) of the same guides dropped "
-                f"rather than left drawing rules across the words"
-            )
+    # Only what a person has to act on reaches the report. A headline that
+    # was measured, set straight because the file never bent it, and had
+    # its duplicate paint dropped is a converted headline, not a warning --
+    # and fifteen of those used to print a paragraph explaining, four
+    # different ways, that nothing had gone wrong. The count goes in the
+    # detail line instead, beside the frames and the images.
+    bent = [by_id[art_id] for art_id in groups if by_id[art_id].warp]
+    if bent:
+        shapes = ", ".join(sorted({art.warp for art in bent}))
         document.warnings.append(
-            f"{recovered} WordArt headline(s) recovered as ordinary text: "
-            f"Publisher stores the words in the Escher stream and libmspub "
-            f"reports only the band they were stretched into, so they come "
-            f"back with the font, size and styling the file states, set "
-            f"straight in that band — " + _sentence(detail)
+            f"{len(bent)} WordArt headline(s) bent into a shape IDML cannot "
+            f"state ({shapes}); straight text in the band is all that comes "
+            f"across \u2014 redraw {_wordart_names(bent)}"
+        )
+
+    # A font this machine cannot read leaves the headline sized from
+    # averages rather than from its own proportions. Naming the font is the
+    # actionable part: installing it is the fix.
+    estimated = [
+        by_id[art_id] for art_id in groups
+        if by_id[art_id].applied_source != "font"
+    ]
+    if estimated:
+        fonts = sorted({art.font or "an unnamed font" for art in estimated})
+        document.warnings.append(
+            f"{len(estimated)} WordArt headline(s) sized from averages: "
+            f"{', '.join(repr(f) for f in fonts)} could not be measured on "
+            f"this machine, so their size and letter-spacing are close "
+            f"rather than exact \u2014 install the font and convert again"
         )
 
     # A WordArt shape libmspub reported nothing at all for. Its words, its
@@ -1841,6 +1822,7 @@ def _count_content(document: model.Document, result: Result) -> None:
             result.images += 1
         elif isinstance(item, (model.Rectangle, model.Ellipse, model.Polygon, model.Path)):
             result.shapes += 1
+    result.wordart = document.wordart
 
 
 def _convert(
