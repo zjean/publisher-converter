@@ -186,3 +186,59 @@ class FaceReadingTest(unittest.TestCase):
             with self.subTest(cut=cut):
                 with self.assertRaises(fontmetrics.FontError):
                     fontmetrics.faces(font[:cut])
+
+
+# A face with two glyphs of known advance and known box, so every number
+# below is arithmetic on values stated in the test rather than a
+# measurement of a real font that might change under us.
+_GLYPHS = {
+    "A": (600, (50, 0, 550, 700)),      # no descender: inks 700 of 1000
+    "y": (500, (20, -200, 480, 500)),   # descends to -200
+}
+
+
+class MeasurementTest(unittest.TestCase):
+    def face(self, **kwargs):
+        return fontmetrics.faces(build_font(glyphs=_GLYPHS, **kwargs))[0]
+
+    def test_one_glyph_measures_its_own_box_and_advance(self):
+        ink, width, advance = self.face().measure("A")
+        self.assertAlmostEqual(ink, 0.700)
+        self.assertAlmostEqual(width, 0.600)
+        self.assertAlmostEqual(advance, 0.600)
+
+    def test_ink_spans_the_tallest_and_deepest_glyph_of_the_string(self):
+        # 700 up and 200 down is 900 units of a 1000-unit em. This is the
+        # descender case the old 0.70 constant got wrong by construction.
+        ink, width, advance = self.face().measure("Ay")
+        self.assertAlmostEqual(ink, 0.900)
+        self.assertAlmostEqual(width, 1.100)
+        self.assertAlmostEqual(advance, 0.550)
+
+    def test_a_short_loca_font_measures_the_same(self):
+        ink, _width, _advance = self.face(long_loca=False).measure("A")
+        self.assertAlmostEqual(ink, 0.700)
+
+    def test_a_format_12_cmap_is_read(self):
+        ink, _width, _advance = self.face(cmap_format=12).measure("A")
+        self.assertAlmostEqual(ink, 0.700)
+
+    def test_units_per_em_scales_the_result(self):
+        big = fontmetrics.faces(
+            build_font(upem=2000, glyphs={"A": (1200, (100, 0, 1100, 1400))})
+        )[0]
+        ink, width, _advance = big.measure("A")
+        self.assertAlmostEqual(ink, 0.700)
+        self.assertAlmostEqual(width, 0.600)
+
+    def test_a_face_covering_none_of_the_string_measures_nothing(self):
+        # Corsiva Hebrew is real and does exactly this: it parses, it has a
+        # cmap, and it has no Latin letters at all. Measuring it would put a
+        # headline at whatever punctuation happened to match.
+        self.assertIsNone(self.face().measure("שלום"))
+
+    def test_characters_the_face_lacks_are_skipped_not_counted(self):
+        ink, width, advance = self.face().measure("Aא")
+        self.assertAlmostEqual(ink, 0.700)
+        self.assertAlmostEqual(width, 0.600)
+        self.assertAlmostEqual(advance, 0.600)

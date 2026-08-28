@@ -78,6 +78,90 @@ def _read_names(buf: bytes, offset: int) -> Dict[int, str]:
     return found
 
 
+def _cmap_format_4(buf: bytes, at: int) -> Dict[int, int]:
+    segments = struct.unpack_from(">H", buf, at + 6)[0] // 2
+    ends = at + 14
+    starts = ends + segments * 2 + 2
+    deltas = starts + segments * 2
+    ranges = deltas + segments * 2
+    table: Dict[int, int] = {}
+    for i in range(segments):
+        end = struct.unpack_from(">H", buf, ends + 2 * i)[0]
+        start = struct.unpack_from(">H", buf, starts + 2 * i)[0]
+        delta = struct.unpack_from(">h", buf, deltas + 2 * i)[0]
+        offset = struct.unpack_from(">H", buf, ranges + 2 * i)[0]
+        if start == 0xFFFF:
+            continue
+        for code in range(start, min(end, 0xFFFE) + 1):
+            if offset == 0:
+                glyph = (code + delta) & 0xFFFF
+            else:
+                at_glyph = ranges + 2 * i + offset + 2 * (code - start)
+                if at_glyph + 2 > len(buf):
+                    continue
+                glyph = struct.unpack_from(">H", buf, at_glyph)[0]
+                if glyph:
+                    glyph = (glyph + delta) & 0xFFFF
+            if glyph:
+                table[code] = glyph
+    return table
+
+
+def _cmap_format_12(buf: bytes, at: int) -> Dict[int, int]:
+    count = struct.unpack_from(">I", buf, at + 12)[0]
+    table: Dict[int, int] = {}
+    for i in range(count):
+        start, end, glyph = struct.unpack_from(">III", buf, at + 16 + 12 * i)
+        # A group covering the whole plane is a corrupt font, not a font
+        # with a million glyphs; expanding it would hang the converter.
+        if end - start > 0x10000:
+            continue
+        for code in range(start, end + 1):
+            table[code] = glyph + (code - start)
+    return table
+
+
+def _cmap_format_6(buf: bytes, at: int) -> Dict[int, int]:
+    first, count = struct.unpack_from(">HH", buf, at + 6)
+    table = {}
+    for i in range(count):
+        glyph = struct.unpack_from(">H", buf, at + 10 + 2 * i)[0]
+        if glyph:
+            table[first + i] = glyph
+    return table
+
+
+_CMAP_READERS = {4: _cmap_format_4, 12: _cmap_format_12, 6: _cmap_format_6}
+# Which subtable to prefer. A font may carry several, and the first one
+# listed is not always the one with the coverage: the pick is by
+# preference, and a subtable that reads as empty falls through to the next.
+_CMAP_PREFERENCE = ((3, 10), (0, 4), (0, 6), (3, 1), (0, 3), (0, 1), (0, 0), (3, 0))
+
+
+def _cmap_lookup(buf: bytes, offset: int) -> Dict[int, int]:
+    count = struct.unpack_from(">H", buf, offset + 2)[0]
+    subtables: Dict[tuple, int] = {}
+    for i in range(count):
+        platform, encoding, at = struct.unpack_from(">HHI", buf, offset + 4 + 8 * i)
+        subtables.setdefault((platform, encoding), offset + at)
+    order = [key for key in _CMAP_PREFERENCE if key in subtables]
+    order += [key for key in subtables if key not in _CMAP_PREFERENCE]
+    for key in order:
+        at = subtables[key]
+        if at + 4 > len(buf):
+            continue
+        reader = _CMAP_READERS.get(struct.unpack_from(">H", buf, at)[0])
+        if reader is None:
+            continue
+        try:
+            table = reader(buf, at)
+        except struct.error:
+            continue
+        if table:
+            return table
+    raise FontError("no readable unicode cmap")
+
+
 _NAME_FAMILY, _NAME_SUBFAMILY = 1, 2
 
 
@@ -102,6 +186,75 @@ class Face:
             ">H", buf, self.tables["hhea"][0] + 34
         )[0]
         self._cmap: Optional[Dict[int, int]] = None
+
+    @property
+    def cmap(self) -> Dict[int, int]:
+        if self._cmap is None:
+            self._cmap = _cmap_lookup(self.buf, self.tables["cmap"][0])
+        return self._cmap
+
+    def advance(self, glyph: int) -> int:
+        """One glyph's advance width, in font units.
+
+        `hmtx` states the last advance once and lets every glyph after it
+        share it, which is how a monospaced tail is stored, so a glyph past
+        the end of the metrics array takes the last one rather than none.
+        """
+        offset, length = self.tables["hmtx"]
+        index = min(glyph, max(self._num_h_metrics - 1, 0))
+        at = offset + 4 * index
+        if at + 2 > offset + length:
+            return 0
+        return struct.unpack_from(">H", self.buf, at)[0]
+
+    def bbox(self, glyph: int) -> Optional[Tuple[int, int, int, int]]:
+        """The box one glyph inks, or None for a glyph that inks nothing.
+
+        A composite glyph states its own box in the same header as a simple
+        one, so nothing here has to follow the components.
+        """
+        if "glyf" not in self.tables or "loca" not in self.tables:
+            return None
+        loca = self.tables["loca"][0]
+        try:
+            if self.long_loca:
+                start, end = struct.unpack_from(">II", self.buf, loca + 4 * glyph)
+            else:
+                short_start, short_end = struct.unpack_from(
+                    ">HH", self.buf, loca + 2 * glyph
+                )
+                start, end = short_start * 2, short_end * 2
+        except struct.error:
+            return None
+        if end <= start:
+            return None
+        at = self.tables["glyf"][0] + start
+        try:
+            return struct.unpack_from(">hhhh", self.buf, at + 2)
+        except struct.error:
+            return None
+
+    def measure(self, text: str):
+        """(ink, width, mean advance) for `text`, per em, or None.
+
+        None means this face covers none of the string. That is not a
+        malformed font: Corsiva Hebrew parses cleanly, states a cmap and
+        has no Latin letters at all, and measuring a headline against the
+        punctuation that happened to match would be worse than declining.
+        """
+        glyphs = [self.cmap.get(ord(char)) for char in text]
+        glyphs = [glyph for glyph in glyphs if glyph]
+        if not glyphs:
+            return None
+        width = sum(self.advance(glyph) for glyph in glyphs)
+        boxes = [self.bbox(glyph) for glyph in glyphs]
+        boxes = [box for box in boxes if box]
+        ink = max(b[3] for b in boxes) - min(b[1] for b in boxes) if boxes else None
+        return (
+            (ink / self.upem) if ink else None,
+            width / self.upem,
+            width / len(glyphs) / self.upem,
+        )
 
 
 def faces(buf: bytes) -> List[Face]:
