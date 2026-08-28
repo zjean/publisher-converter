@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from . import idml, logsetup, metafile, model, pubfile, textrepair, wmf
+from . import (
+    fontmetrics, idml, logsetup, metafile, model, pubfile, textrepair, wmf,
+)
 
 log = logsetup.get_logger("convert")
 
@@ -1295,17 +1297,12 @@ def _recover_wordart(
             )
 
 
-# WordArt states character spacing as a multiple of normal -- 1.2 is what
-# its gallery calls Loose, and 36 of the corpus's 48 shapes state it --
-# where IDML states the space *added*, in thousandths of an em. The two
-# are not the same measure: the multiple scales each glyph's advance, and
-# an advance is not an em. A headline face averages about half an em per
-# glyph, which is the number below, so Loose comes out at 100/1000 rather
-# than the 200 that reading the multiple as em-relative would give.
-# Approximate either way, and the band the glyphs are stretched into is
-# already an approximation, so it is set where a headline looks right
-# rather than left out for not being exact.
-_EM_PER_ADVANCE = 0.5
+# How far a headline may be condensed or stretched before the result is
+# worse than not condensing it. Publisher will squeeze glyphs hard, but a
+# ratio this far out means the metrics are wrong -- a substituted font, or
+# a band that is not the one these words were drawn in -- and an
+# unreadable smear is a worse answer than a headline that overflows.
+_MIN_HORIZONTAL_SCALE, _MAX_HORIZONTAL_SCALE = 25.0, 400.0
 
 
 def _sentence(clauses: List[str]) -> str:
@@ -1462,17 +1459,73 @@ def _place_unreported(
     return settled, unplaced
 
 
-def _wordart_tracking(spacing: Optional[float]) -> Optional[float]:
+def _wordart_tracking(
+    spacing: Optional[float], mean_advance_per_em: float
+) -> Optional[float]:
     """WordArt's spacing multiple as the tracking IDML would write.
 
+    The multiple scales each glyph's advance; IDML states the space added,
+    in thousandths of an em. An advance is not an em, so the conversion
+    needs to know how wide this font's glyphs actually are -- which used
+    to be a flat half-em for every font, and is now measured. Times New
+    Roman averages 0.44 of an em across a headline and Arial Black 0.61,
+    so the guess was out by a quarter either way.
+
     Rounded to whole thousandths, because the multiple arrives as 16.16
-    fixed point and Publisher's Loose reads 1.2001 rather than 1.2 --
-    writing 100.05188 would state a precision the half-em above does not
-    have.
+    fixed point and Publisher's Loose reads 1.2001 rather than 1.2.
     """
     if spacing is None or abs(spacing - 1.0) < 0.001:
         return None
-    return float(round((spacing - 1.0) * _EM_PER_ADVANCE * 1000.0))
+    return float(round((spacing - 1.0) * mean_advance_per_em * 1000.0))
+
+
+def _wordart_fit(
+    art: "pubfile.WordArt", lines: List[str], measure
+) -> tuple:
+    """The point size and horizontal scale a headline is drawn at.
+
+    WordArt sets the words and stretches them to the shape, so the band is
+    not a box the words sit inside -- it *is* the words. Two things follow.
+
+    The height decides the size: a band holds as many lines as the words
+    are set on, so each line gets its share, and the line that inks most of
+    its em is the one that must fit. The width decides the condensation
+    rather than the size, because IDML can state that directly. That is the
+    whole of what WordArt's stretch does, and it is why a stated point size
+    is a floor rather than the truth -- the *Meditatie* headline states 20
+    and Publisher draws it at about 38.
+
+    A size worked out this way is only as good as the metrics behind it, so
+    a font this machine cannot read takes the older, safer rule instead:
+    the smaller of what the height allows and what the width allows, and no
+    condensation at all. Condensing by a ratio derived from a guessed width
+    would state a precision that is not there.
+    """
+    measured = [measure(art.font, art.bold, art.italic, line) for line in lines]
+    spacing = art.spacing or 1.0
+    per_line = art.height / max(len(lines), 1)
+    ink = max((m.ink_per_em for m in measured), default=0.0)
+    widest = max((m.width_per_em for m in measured), default=0.0) * spacing
+    exact = all(m.exact for m in measured)
+    source = measured[0].source if measured else "average"
+
+    # A shape that does not state the stretch flag was set at a size and
+    # left there, so the file's word is final. Nothing in the corpus is
+    # one of these, but the flag is what says so rather than an assumption.
+    if art.size is not None and not art.stretch:
+        return art.size, None, source
+
+    by_height = per_line / ink if ink > 0 else art.size or per_line
+    if not exact or widest <= 0:
+        by_width = art.width / widest if widest > 0 else by_height
+        return min(by_height, by_width), None, source
+
+    scale = art.width / (widest * by_height) * 100.0
+    return (
+        by_height,
+        min(max(scale, _MIN_HORIZONTAL_SCALE), _MAX_HORIZONTAL_SCALE),
+        source,
+    )
 
 
 def _wordart_frame(
@@ -1480,6 +1533,7 @@ def _wordart_frame(
     art: "pubfile.WordArt",
     page_width: float,
     page_height: float,
+    measure=fontmetrics.measure,
 ) -> model.TextFrame:
     """One WordArt shape as a text frame, in the band the file gives it.
 
@@ -1504,6 +1558,12 @@ def _wordart_frame(
     outline_width = first(lambda s: s.stroke_width or None) or 0.0 if outline else 0.0
 
     lines = re.split(r"\r\n|\r|\n", art.text)
+    size, scale, source = _wordart_fit(art, lines, measure)
+    tracking = _wordart_tracking(
+        art.spacing,
+        measure(art.font, art.bold, art.italic, art.text).mean_advance_per_em,
+    )
+    art.applied_source = source
 
     # The frame is the band, exactly. Making it taller so a headline
     # wrapped by a substituted font still had somewhere to go was tried
@@ -1562,7 +1622,7 @@ def _wordart_frame(
             model.Span(
                 text=model.clean_text(line),
                 font=art.font,
-                size_pt=art.size,
+                size_pt=size,
                 # What libmspub reported for this shape describes the
                 # glyphs, not a box behind them, so it goes on the run: the
                 # fill is their colour, the ramp their ramp, and the stroke
@@ -1581,7 +1641,8 @@ def _wordart_frame(
                 italic=art.italic,
                 underline=art.underline,
                 strikethrough=art.strikethrough,
-                tracking=_wordart_tracking(art.spacing),
+                tracking=tracking,
+                horizontal_scale=scale,
             )
         )
         frame.story.paragraphs.append(paragraph)

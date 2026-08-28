@@ -1438,27 +1438,6 @@ class WordArtSpacingTest(unittest.TestCase):
         self.assertAlmostEqual(self.one(spacing=0.8).spacing, 0.8, places=4)
 
 
-class WordArtTrackingTest(unittest.TestCase):
-    """WordArt's spacing multiple as the tracking IDML states."""
-
-    def test_normal_spacing_is_no_tracking_at_all(self):
-        for spacing in (None, 1.0, 1.0005):
-            with self.subTest(spacing=spacing):
-                self.assertIsNone(convert._wordart_tracking(spacing))
-
-    def test_the_multiple_is_taken_against_half_an_em_of_advance(self):
-        # The multiple scales each glyph's advance and IDML counts ems, so
-        # the two are only the same measure through an average advance.
-        self.assertEqual(convert._wordart_tracking(1.2), 100.0)
-        self.assertEqual(convert._wordart_tracking(0.8), -100.0)
-
-    def test_fixed_point_noise_does_not_reach_the_file(self):
-        # The multiple arrives as 16.16, so Publisher's Loose reads
-        # 1.2001; writing 100.05 would claim a precision half an em of
-        # average advance does not have.
-        self.assertEqual(convert._wordart_tracking(1.200103759765625), 100.0)
-
-
 class SentenceTest(unittest.TestCase):
     """Clauses joined so a report reads as prose rather than a list."""
 
@@ -1780,16 +1759,26 @@ class WordArtRecoveryTest(unittest.TestCase):
             (False, False, False, False),
         )
 
+    # A family no machine has, so these measure on the global averages
+    # rather than on whichever headline faces happen to be installed here.
+    # What tracking becomes for a font that *can* be read is
+    # `WordArtTrackingTest` in test_convert.py.
+    UNMEASURABLE = "No Such Face"
+
     def test_loose_spacing_becomes_tracking(self):
         # 1.2 is Publisher's Loose. IDML states the space added, in
         # thousandths of an em, against a multiple of the glyph advance.
         document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art(spacing=1.2)))
+        convert._recover_wordart(document, self.structure_with(
+            self.art(spacing=1.2, font=self.UNMEASURABLE)
+        ))
         self.assertAlmostEqual(self.span(document).tracking, 100.0)
 
     def test_tight_spacing_becomes_negative_tracking(self):
         document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art(spacing=0.8)))
+        convert._recover_wordart(document, self.structure_with(
+            self.art(spacing=0.8, font=self.UNMEASURABLE)
+        ))
         self.assertAlmostEqual(self.span(document).tracking, -100.0)
 
     def test_a_headline_at_normal_spacing_states_no_tracking(self):

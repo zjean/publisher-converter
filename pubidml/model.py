@@ -221,11 +221,9 @@ class Span:
     #: It decides hyphenation, so it moves line breaks rather than looks.
     language: Optional[str] = None
     #: Horizontal glyph scaling as a percentage, where 100 is unscaled.
+    #: WordArt condenses its glyphs to fit the band, and this is how that
+    #: reaches IDML rather than as a smaller point size.
     horizontal_scale: Optional[float] = None
-    #: Extra space between characters, in thousandths of an em, which is
-    #: how IDML measures it. Publisher body text never states any; this
-    #: carries a WordArt headline set looser or tighter than normal.
-    tracking: Optional[float] = None
 
     def format_key(self) -> tuple:
         return (
@@ -244,7 +242,6 @@ class Span:
             self.tracking,
             self.language,
             self.horizontal_scale,
-            self.tracking,
         )
 
 

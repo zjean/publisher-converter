@@ -389,6 +389,10 @@ class WordArt:
     #: This shape's seqnum, the number its page chunk lists it by. The only
     #: way to the page a shape libmspub never reported belongs to.
     shape_seq: Optional[int] = None
+    #: Which of `fontmetrics`' three tiers sized this headline, filled in by
+    #: `convert` once it has measured. Here rather than recomputed for the
+    #: report, so the report counts what was actually applied.
+    applied_source: str = "average"
 
 
 @dataclass

@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-from pubidml import convert, model, pubfile
+from pubidml import convert, fontmetrics, model, pubfile
 
 from . import support, test_metafile
 from .support import event
@@ -878,3 +878,146 @@ class UnnamedLanguageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def fake_measure(table, default=(0.70, 0.55, 0.50, "average")):
+    """A stand-in for fontmetrics.measure keyed by the string measured.
+
+    Sizing is tested against numbers the test states, so it needs no font
+    installed -- which matters, because the two faces 46 of the corpus's
+    headlines use are not installed on every machine.
+    """
+    def measure(family, bold, italic, text):
+        ink, width_per_glyph, advance, source = table.get(text, default)
+        return fontmetrics.Metrics(
+            ink_per_em=ink,
+            width_per_em=width_per_glyph * max(len(text), 1),
+            mean_advance_per_em=advance,
+            source=source,
+        )
+    return measure
+
+
+class WordArtFitTest(unittest.TestCase):
+    """The size and condensation a band and a font decide between them."""
+
+    def art(self, **kwargs):
+        fields = dict(
+            text="Kerkbode", font="Kerk Display", width=200.0, height=40.0,
+            size=None, fitted=True, stretch=True,
+        )
+        fields.update(kwargs)
+        return pubfile.WordArt(**fields)
+
+    def test_the_size_fills_the_band_s_height(self):
+        # One line, 40 pt of band, a font inking 0.8 of its em: 50 pt.
+        measure = fake_measure({"Kerkbode": (0.80, 0.50, 0.50, "font")})
+        size, _scale, _source = convert._wordart_fit(
+            self.art(), ["Kerkbode"], measure
+        )
+        self.assertAlmostEqual(size, 50.0)
+
+    def test_each_line_gets_its_own_share_of_the_band(self):
+        # Two lines in the same 40 pt band is 20 pt each.
+        measure = fake_measure({
+            "Kerk": (0.80, 0.50, 0.50, "font"),
+            "bode": (0.80, 0.50, 0.50, "font"),
+        })
+        size, _scale, _source = convert._wordart_fit(
+            self.art(text="Kerk\rbode"), ["Kerk", "bode"], measure
+        )
+        self.assertAlmostEqual(size, 25.0)
+
+    def test_the_tallest_line_binds_the_size(self):
+        # A line with descenders inks more of its em, so it decides.
+        measure = fake_measure({
+            "Kerk": (0.80, 0.50, 0.50, "font"),
+            "bygy": (1.00, 0.50, 0.50, "font"),
+        })
+        size, _scale, _source = convert._wordart_fit(
+            self.art(text="Kerk\rbygy"), ["Kerk", "bygy"], measure
+        )
+        self.assertAlmostEqual(size, 20.0)
+
+    def test_the_width_becomes_a_horizontal_scale_not_a_smaller_size(self):
+        # 8 glyphs at 0.5 em is 4 em; at 50 pt that sets 200 pt wide, in a
+        # 200 pt band, so nothing is condensed.
+        measure = fake_measure({"Kerkbode": (0.80, 0.50, 0.50, "font")})
+        size, scale, _source = convert._wordart_fit(
+            self.art(), ["Kerkbode"], measure
+        )
+        self.assertAlmostEqual(size, 50.0)
+        self.assertAlmostEqual(scale, 100.0)
+
+    def test_a_headline_wider_than_its_band_is_condensed(self):
+        # Same headline in a 100 pt band: it has to set at half the width.
+        measure = fake_measure({"Kerkbode": (0.80, 0.50, 0.50, "font")})
+        size, scale, _source = convert._wordart_fit(
+            self.art(width=100.0), ["Kerkbode"], measure
+        )
+        self.assertAlmostEqual(size, 50.0)
+        self.assertAlmostEqual(scale, 50.0)
+
+    def test_the_scale_is_clamped(self):
+        measure = fake_measure({"I": (0.80, 0.10, 0.10, "font")})
+        _size, scale, _source = convert._wordart_fit(
+            self.art(text="I", width=400.0), ["I"], measure
+        )
+        self.assertAlmostEqual(scale, convert._MAX_HORIZONTAL_SCALE)
+
+    def test_spacing_widens_the_headline_before_it_is_fitted(self):
+        # WordArt's multiple scales every advance, so a loose headline sets
+        # wider and is condensed harder to reach the same band.
+        measure = fake_measure({"Kerkbode": (0.80, 0.50, 0.50, "font")})
+        _size, scale, _source = convert._wordart_fit(
+            self.art(spacing=1.2), ["Kerkbode"], measure
+        )
+        self.assertAlmostEqual(scale, 100.0 / 1.2)
+
+    def test_a_stated_size_is_overridden_when_the_shape_stretches(self):
+        measure = fake_measure({"Kerkbode": (0.80, 0.50, 0.50, "font")})
+        size, _scale, _source = convert._wordart_fit(
+            self.art(size=20.0, fitted=False), ["Kerkbode"], measure
+        )
+        self.assertAlmostEqual(size, 50.0)
+
+    def test_a_stated_size_stands_when_the_shape_does_not_stretch(self):
+        measure = fake_measure({"Kerkbode": (0.80, 0.50, 0.50, "font")})
+        size, scale, _source = convert._wordart_fit(
+            self.art(size=20.0, fitted=False, stretch=False), ["Kerkbode"], measure
+        )
+        self.assertAlmostEqual(size, 20.0)
+        self.assertIsNone(scale)
+
+    def test_metrics_that_are_not_exact_take_no_scale(self):
+        measure = fake_measure({"Kerkbode": (0.80, 0.50, 0.50, "table")})
+        _size, scale, source = convert._wordart_fit(
+            self.art(), ["Kerkbode"], measure
+        )
+        self.assertIsNone(scale)
+        self.assertEqual(source, "table")
+
+    def test_without_exact_metrics_the_width_binds_the_size_as_before(self):
+        # Today's rule exactly: min(height share / ink, band / natural width).
+        # 8 glyphs at 0.55 em is 4.4 em; 100 pt / 4.4 em is 22.7 pt, which
+        # is smaller than the 50 pt the height alone would give.
+        measure = fake_measure({"Kerkbode": (0.80, 0.55, 0.50, "average")})
+        size, scale, _source = convert._wordart_fit(
+            self.art(width=100.0), ["Kerkbode"], measure
+        )
+        self.assertAlmostEqual(size, 100.0 / (0.55 * 8))
+        self.assertIsNone(scale)
+
+
+class WordArtTrackingTest(unittest.TestCase):
+    def test_normal_spacing_states_no_tracking(self):
+        self.assertIsNone(convert._wordart_tracking(None, 0.5))
+        self.assertIsNone(convert._wordart_tracking(1.0, 0.5))
+
+    def test_tracking_uses_the_measured_advance(self):
+        # Loose (1.2) against a real mean advance of 0.44 em, not a guess
+        # of 0.5: 0.2 x 0.44 x 1000.
+        self.assertEqual(convert._wordart_tracking(1.2, 0.44), 88.0)
+
+    def test_the_old_constant_is_what_an_unmeasured_font_still_gets(self):
+        self.assertEqual(convert._wordart_tracking(1.2, 0.50), 100.0)
