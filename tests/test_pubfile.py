@@ -12,8 +12,9 @@ import struct
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from pubidml import convert, model, pubfile
+from pubidml import convert, fontmetrics, model, pubfile
 from pubidml.pubfile import _read_stream
 
 REPO = Path(__file__).resolve().parent.parent
@@ -1747,6 +1748,21 @@ class WordArtRecoveryTest(unittest.TestCase):
             (False, False, False, False),
         )
 
+    # These tests are about what the *report* says, so what the headline
+    # measures has to be stated rather than read off whichever fonts this
+    # machine has. Monotype Corsiva is installed on the machine this was
+    # written on and not on the build runner, which is exactly the way a
+    # test like this fails somewhere else.
+    def measured(self, source="font"):
+        def measure(family, bold, italic, text):
+            return fontmetrics.Metrics(
+                ink_per_em=0.8,
+                width_per_em=0.5 * max(len(text), 1),
+                mean_advance_per_em=0.5,
+                source=source,
+            )
+        return mock.patch.object(convert.fontmetrics, "measure", measure)
+
     # -- what the report says -------------------------------------------
     #
     # Only what a person has to act on. A headline that was measured, set
@@ -1756,39 +1772,44 @@ class WordArtRecoveryTest(unittest.TestCase):
     # nothing had gone wrong. The count reaches the detail line instead.
 
     def test_a_clean_recovery_warns_about_nothing(self):
-        document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art()))
-        self.assertEqual(document.warnings, [])
+        with self.measured():
+            document = self.document_with(self.guides())
+            convert._recover_wordart(document, self.structure_with(self.art()))
+            self.assertEqual(document.warnings, [])
 
     def test_a_clean_recovery_is_still_counted(self):
-        document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art()))
-        self.assertEqual(document.wordart, 1)
+        with self.measured():
+            document = self.document_with(self.guides())
+            convert._recover_wordart(document, self.structure_with(self.art()))
+            self.assertEqual(document.wordart, 1)
 
     def test_a_dropped_repeat_is_not_a_warning(self):
         # Dropping the second paint of the same guides is what stops the
         # outline drawing rules across the words. It is the fix, not a loss.
-        document = self.document_with(self.guides(), self.outlined())
-        convert._recover_wordart(document, self.structure_with(self.art()))
-        self.assertEqual(document.warnings, [])
+        with self.measured():
+            document = self.document_with(self.guides(), self.outlined())
+            convert._recover_wordart(document, self.structure_with(self.art()))
+            self.assertEqual(document.warnings, [])
 
     def test_a_headline_at_normal_spacing_is_not_reported(self):
-        document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art(spacing=1.2)))
-        self.assertEqual(document.warnings, [])
+        with self.measured():
+            document = self.document_with(self.guides())
+            convert._recover_wordart(document, self.structure_with(self.art(spacing=1.2)))
+            self.assertEqual(document.warnings, [])
 
     def test_a_bent_headline_is_reported_and_named(self):
         # The one real loss, and it is rare: 47 of the corpus's 48 shapes
         # are not bent at all.
-        document = self.document_with(self.guides())
-        convert._recover_wordart(
-            document, self.structure_with(self.art(warp="button curve"))
-        )
-        self.assertEqual(len(document.warnings), 1)
-        warning = document.warnings[0]
-        self.assertIn("bent", warning)
-        self.assertIn("button curve", warning)
-        self.assertIn("Kerkdiensten", warning)
+        with self.measured():
+            document = self.document_with(self.guides())
+            convert._recover_wordart(
+                document, self.structure_with(self.art(warp="button curve"))
+            )
+            self.assertEqual(len(document.warnings), 1)
+            warning = document.warnings[0]
+            self.assertIn("bent", warning)
+            self.assertIn("button curve", warning)
+            self.assertIn("Kerkdiensten", warning)
 
     def test_an_unmeasured_font_is_reported_by_name(self):
         # Naming the font is the actionable part: installing it is the fix.

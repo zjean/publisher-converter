@@ -1514,7 +1514,7 @@ def _wordart_frame(
     art: "pubfile.WordArt",
     page_width: float,
     page_height: float,
-    measure=fontmetrics.measure,
+    measure=None,
 ) -> model.TextFrame:
     """One WordArt shape as a text frame, in the band the file gives it.
 
@@ -1538,6 +1538,11 @@ def _wordart_frame(
     outline = stroke if (fill is not None or gradient is not None) else None
     outline_width = first(lambda s: s.stroke_width or None) or 0.0 if outline else 0.0
 
+    # Resolved here rather than as a default argument, which would bind
+    # `fontmetrics.measure` once at import and leave no way to stand in
+    # for it. A test that measures whatever fonts the machine happens to
+    # have is a test that passes here and fails on a build runner.
+    measure = measure or fontmetrics.measure
     lines = re.split(r"\r\n|\r|\n", art.text)
     size, scale, source = _wordart_fit(art, lines, measure)
     tracking = _wordart_tracking(
