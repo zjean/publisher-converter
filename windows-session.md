@@ -277,13 +277,21 @@ Copy back:
 Then, on the Mac — each takes about a minute:
 
 ```sh
-# A — nothing to run; the numbers you wrote down are the answer
+cd ~/prive/tools/affinity-converter
 
-# B: build the instrumented parser first (actions.md §1 Step 1), then
+# A — nothing to run; the numbers you wrote down are the answer.
+#     Compare them against what the files state:
+python3 research/default_tab.py files
+
+# B — build the debug-instrumented pubdump first (actions.md §1 Step 1),
+#     then:
 python3 research/diff_wrap.py /tmp/pubdump_debug \
     square=files/wrap-samples/wrap-square.pub \
     none=files/wrap-samples/wrap-none.pub \
-    tight=files/wrap-samples/wrap-tight.pub
+    tight=files/wrap-samples/wrap-tight.pub \
+    through=files/wrap-samples/wrap-through.pub \
+    topbottom=files/wrap-samples/wrap-topbottom.pub \
+    behind=files/wrap-samples/wrap-behind.pub
 
 # C
 python3 research/diff_blocks.py \
@@ -291,10 +299,10 @@ python3 research/diff_blocks.py \
     b=files/margin-samples/margins-b.pub
 
 # D
-python3 research/quill_tokens.py files/field-samples
+python3 research/quill_tokens.py files/field-samples/*.pub
 
 # E
-python3 research/probe_cell_rules.py files/table-samples
+python3 research/table_cells.py files/table-samples/*.pub
 
 # G — confirm the fonts took
 python3 -m research.font_metrics "Maiandra GD"

@@ -5,6 +5,12 @@ already prepared so each one is short to execute.
 
 Ordered by deadline, then value.
 
+> **Five of these need Publisher, which retires on 1 October 2026.**
+> [`windows-session.md`](windows-session.md) collects them into one
+> sitting at a Windows machine — the clicks in running order, roughly 75
+> minutes, and what to run back here afterwards. This file stays the
+> reference for *why* each one matters and how to wire the answer in.
+
 ---
 
 ## 1. Identify Publisher's text-wrap field  ⏰ needs Publisher, before 1 Oct 2026
