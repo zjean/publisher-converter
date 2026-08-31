@@ -775,7 +775,7 @@ def _apply_cell_insets(
     if structure is None or not structure.tables:
         return
 
-    tables = cells = 0
+    tables = cells = silenced = 0
     for item in document.all_items():
         if not isinstance(item, model.Table):
             continue
@@ -785,6 +785,8 @@ def _apply_cell_insets(
         alignments = (
             structure.cell_alignments(item.column_widths, item.row_heights) or {}
         )
+        drawn = structure.cell_rules(item.column_widths, item.row_heights) or {}
+        shades = structure.cell_shades(item.column_widths, item.row_heights) or {}
         tables += 1
         for cell in item.cells:
             found = insets.get((cell.row, cell.column))
@@ -793,18 +795,106 @@ def _apply_cell_insets(
             cell.insets = model.CellInsets(*found)
             cell.unruled = True
             cell.vertical_align = alignments.get((cell.row, cell.column))
+            cell.rules = _rules_of(cell, drawn)
+            cell.shade = shades.get((cell.row, cell.column))
             cells += 1
+        if not drawn and not shades:
+            silenced += 1
 
     if tables:
-        log.info("cell insets read for %d table(s), %d cell(s)", tables, cells)
+        log.info(
+            "cell insets read for %d table(s), %d cell(s); %d drawn",
+            tables, cells, tables - silenced,
+        )
+    if silenced:
         document.warnings.append(
-            f"{tables} table(s) written with every cell rule off: their "
-            f"{cells} cell record(s) state padding, alignment and cached "
-            f"extents but no rule anywhere in the corpus, and a cell edge "
-            f"left unstated is one the reader rules "
-            f"itself. Publisher keeps cell rules and shading outside those "
-            f"records, in the Escher stream (actions.md §11), and they are "
-            f"not read yet — re-add any lines and fills by hand"
+            f"{silenced} table(s) written with every cell rule off: the "
+            f"file draws no line and no shade on any of their cells, and "
+            f"a cell edge left unstated is one the reader rules itself. "
+            f"Publisher keeps cell rules and shading in the Escher stream "
+            f"rather than in the cell records, so this is what that stream "
+            f"states — check them against the original before adding lines "
+            f"by hand"
+        )
+
+
+def _rules_of(cell: model.TableCell, drawn: dict) -> Dict[str, model.CellRule]:
+    """The lines drawn on one cell, out of the lines drawn on the grid.
+
+    A rule is stated per grid position and a merged cell covers several,
+    so its four sides are the sides of its *footprint*: the top of every
+    column it spans, the bottom of the last row, and so on. A line lying
+    inside the footprint is one IDML cannot draw -- there is a single
+    stroke per side -- and is left out rather than promoted to a whole
+    side Publisher never ruled.
+    """
+    rows = range(cell.row, cell.row + cell.row_span)
+    columns = range(cell.column, cell.column + cell.column_span)
+    sides = {
+        "top": [(cell.row, column) for column in columns],
+        "bottom": [(cell.row + cell.row_span - 1, column) for column in columns],
+        "left": [(row, cell.column) for row in rows],
+        "right": [(row, cell.column + cell.column_span - 1) for row in rows],
+    }
+    found: Dict[str, model.CellRule] = {}
+    for side, positions in sides.items():
+        for position in positions:
+            rule = drawn.get((*position, side))
+            if rule is not None:
+                found[side] = model.CellRule(rule.weight, rule.color)
+                break
+    return found
+
+
+def _drop_blank_tables(document: model.Document) -> None:
+    """Take out the grids that contribute nothing to the page.
+
+    An empty grid is as much nothing as an empty text frame is, and a
+    third of the corpus's tables are one. But "empty" has to mean empty
+    of everything, and a table's lines and fills are not in the event
+    stream at all: they are shapes in the drawing stream, read onto the
+    cells by `_apply_cell_insets`. So this runs after that pass, and only
+    that ordering makes the test honest -- asked any earlier, a blank
+    ruled grid is indistinguishable from a blank one, and Publisher's
+    layout grids are mostly blank and mostly ruled.
+    """
+
+    def blank(item: model.Item) -> bool:
+        if not isinstance(item, model.Table):
+            return False
+        if item.style.fill or item.style.stroke:
+            return False
+        return all(
+            cell.story.is_empty() and not cell.rules and cell.shade is None
+            for cell in item.cells
+        )
+
+    dropped = 0
+
+    def prune(items: List[model.Item]) -> List[model.Item]:
+        nonlocal dropped
+        kept: List[model.Item] = []
+        for item in items:
+            if blank(item):
+                dropped += 1
+                continue
+            if isinstance(item, model.Group):
+                item.children = prune(item.children)
+            kept.append(item)
+        return kept
+
+    for page in document.pages:
+        page.items = prune(page.items)
+    for master in document.masters:
+        master.items = prune(master.items)
+
+    if dropped:
+        # Worth a line even though dropping it is right: these are the
+        # grids a page is laid out on, so a reader looking for one in the
+        # package should be told it went, and why.
+        document.warnings.append(
+            f"{dropped} empty table(s) dropped: no text, no rule, no shade, "
+            f"no fill, no stroke"
         )
 
 
@@ -2112,6 +2202,9 @@ def _convert(
         _note_detected_facing(document, facing_pages, structure)
     _apply_master_pages(document, structure)
     _apply_cell_insets(document, structure)
+    # After the insets pass, which is where a table's rules and shades
+    # arrive: a grid with no text is only blank if it draws nothing too.
+    _drop_blank_tables(document)
     _apply_page_margins(document, structure)
     # Before the WordArt pass, which takes a shape's paint as it finds it.
     _restore_gradient_ramps(document, structure)

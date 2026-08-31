@@ -638,48 +638,24 @@ class CellTextResourceTest(unittest.TestCase):
 
 
 class EmptyTableTest(unittest.TestCase):
-    """An empty grid contributes nothing, exactly as an empty frame does."""
+    """A grid with no text in it is kept here, and judged later.
 
-    def test_a_table_with_no_text_and_no_fill_is_dropped(self):
+    An empty grid does contribute nothing and is dropped -- but the event
+    stream cannot tell an empty grid from an empty *ruled* one, because a
+    table's lines and shades are not in it at all. They come off the
+    drawing stream, and `convert._drop_blank_tables` asks once they have.
+    So the model's job is to keep what libmspub reported.
+    """
+
+    def test_a_table_with_no_text_and_no_fill_survives_this_layer(self):
         doc = support.document(
             *table_events(["1in", "1in"], [("0.5in", [(None, 1, 1), (None, 1, 1)])])
         )
-        self.assertEqual(doc.pages[0].items, [])
-
-    def test_a_table_with_any_text_is_kept(self):
-        doc = support.document(
-            *table_events(["1in", "1in"], [("0.5in", [(None, 1, 1), ("x", 1, 1)])])
-        )
         self.assertEqual(len(doc.pages[0].items), 1)
 
-    def test_an_empty_table_with_a_fill_is_kept(self):
-        doc = support.document(
-            event("setStyle", {"draw:fill": "solid", "draw:fill-color": "#ff0000"}),
-            *table_events(["1in"], [("0.5in", [(None, 1, 1)])]),
-        )
-        self.assertEqual(len(doc.pages[0].items), 1)
-
-    def test_dropping_one_is_said_rather_than_done_in_silence(self):
-        # A grid Publisher drew and the package does not have is worth a
-        # line even when dropping it is right: 13 of the corpus's 31 tables
-        # go this way, and until now nothing said so.
+    def test_nothing_is_said_about_it_here_either(self):
         doc = support.document(
             *table_events(["1in", "1in"], [("0.5in", [(None, 1, 1), (None, 1, 1)])])
-        )
-        self.assertEqual(
-            doc.warnings, ["1 empty table(s) dropped: no text, no fill, no stroke"]
-        )
-
-    def test_they_are_counted_into_one_line_rather_than_one_each(self):
-        empty = table_events(["1in"], [("0.5in", [(None, 1, 1)])])
-        doc = support.document(*(empty * 3))
-        self.assertEqual(
-            doc.warnings, ["3 empty table(s) dropped: no text, no fill, no stroke"]
-        )
-
-    def test_a_table_that_is_kept_says_nothing(self):
-        doc = support.document(
-            *table_events(["1in", "1in"], [("0.5in", [(None, 1, 1), ("x", 1, 1)])])
         )
         self.assertEqual(doc.warnings, [])
 

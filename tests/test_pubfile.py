@@ -631,6 +631,189 @@ class CellInsetReadingTest(unittest.TestCase):
                 )
 
 
+def cell_rule_shape(table_seq, segment, weight=0.5, color=0x0000FF) -> bytes:
+    """One Escher shape of the kind Publisher writes for a ruled cell edge.
+
+    A rule is stated as a segment on the grid's lattice -- the lines
+    between cells, numbered from zero -- rather than as a side of a cell,
+    which is why one shape can rule several cells at once.
+    """
+    start_row, start_column, end_row, end_column = segment
+    pairs = [(0x2001, 1 if start_row == end_row else 2)]
+    for key, value in (
+        (0x2004, start_row), (0x2005, start_column),
+        (0x2006, end_row), (0x2007, end_column),
+    ):
+        # Publisher leaves a zero out rather than writing it.
+        if value:
+            pairs.append((key, value))
+    pairs.append((0x6802, table_seq))
+    return _escher_container(0xF004, [
+        _escher_properties([(0x0181, color), (0x01CB, round(weight * 12700))]),
+        _escher_values(0xF010, sorted(pairs)),
+    ])
+
+
+def cell_shade_shape(table_seq, cell, color=0x0000FF) -> bytes:
+    """One Escher shape of the kind Publisher writes for a shaded cell.
+
+    A shade names a single cell rather than a run of lattice, so it
+    carries no orientation and no line width -- which is what separates
+    it from a rule in the same stream.
+    """
+    row, column = cell
+    pairs = [(key, value) for key, value in ((0x2002, row), (0x2003, column)) if value]
+    pairs.append((0x6802, table_seq))
+    return _escher_container(0xF004, [
+        _escher_properties([(0x0181, color)]),
+        _escher_values(0xF010, sorted(pairs)),
+    ])
+
+
+class TableRuleReadingTest(unittest.TestCase):
+    """The cell rules Publisher keeps in EscherStm rather than in the cell.
+
+    A cell's own record states padding and alignment and no line anywhere
+    in the corpus. The lines are shapes in the drawing stream, one per
+    ruled edge, tied back to their table by its own chunk seqnum.
+    """
+
+    def read(self, *shapes, widths=(72.0, 36.0), heights=(18.0, 18.0), palette=()):
+        contents, refs = b"\x00" * 8, []
+        for seq, (kind, payload) in enumerate((
+            (0x10, table_chunk(widths, heights, cells_seqnum=1)),
+            (0x63, cells_chunk((0, 0, {0x0A: 12700}))),
+        )):
+            refs.append((seq, kind, len(contents)))
+            contents += payload
+        tables = pubfile._read_tables(
+            contents, refs, escher=b"".join(shapes), palette=list(palette)
+        )
+        return tables[pubfile.table_signature(list(widths), list(heights))]
+
+    def test_a_horizontal_segment_rules_the_top_of_the_cell_below_it(self):
+        table = self.read(cell_rule_shape(0, (1, 0, 1, 1)))
+        self.assertIn((1, 0, "top"), table.rules)
+
+    def test_a_vertical_segment_rules_the_left_of_the_cell_beside_it(self):
+        table = self.read(cell_rule_shape(0, (0, 1, 1, 1)))
+        self.assertIn((0, 1, "left"), table.rules)
+
+    def test_an_interior_line_is_given_to_both_cells_that_share_it(self):
+        # One line on the page, but two cells state it. A cell whose
+        # record was read has its unruled sides written off, so leaving
+        # the cell above to say nothing would put a zero against the rule.
+        table = self.read(cell_rule_shape(0, (1, 0, 1, 1)))
+        self.assertIn((0, 0, "bottom"), table.rules)
+
+    def test_an_interior_line_down_the_grid_is_shared_the_same_way(self):
+        table = self.read(cell_rule_shape(0, (0, 1, 1, 1)))
+        self.assertIn((0, 0, "right"), table.rules)
+
+    def test_the_line_along_the_foot_of_the_table_rules_the_last_row(self):
+        # There is no row below it to carry the rule as a top edge, and a
+        # cell that is not in the table must not be keyed at all.
+        table = self.read(cell_rule_shape(0, (2, 0, 2, 1)))
+        self.assertIn((1, 0, "bottom"), table.rules)
+        self.assertNotIn((2, 0, "top"), table.rules)
+
+    def test_the_line_down_the_side_of_the_table_rules_the_last_column(self):
+        table = self.read(cell_rule_shape(0, (0, 2, 1, 2)))
+        self.assertIn((0, 1, "right"), table.rules)
+        self.assertNotIn((0, 2, "left"), table.rules)
+
+    def test_the_colour_is_the_fill_because_the_shape_is_a_filled_bar(self):
+        # 0x00BBGGRR, as everywhere else in this stream: 0x0000FF is red,
+        # not blue. The shape states no line colour at all -- 545 of the
+        # corpus's 604 do not -- because Publisher draws the rule as a
+        # thin filled rectangle rather than as a stroke.
+        table = self.read(cell_rule_shape(0, (1, 0, 1, 1), color=0x0000FF))
+        self.assertEqual(table.rules[(1, 0, "top")].color, (255, 0, 0))
+
+    def test_a_colour_named_from_the_palette_is_resolved(self):
+        # Two thirds of the corpus's rules name a palette entry rather
+        # than stating a colour, which is the form ColorReference reads.
+        table = self.read(
+            cell_rule_shape(0, (1, 0, 1, 1), color=0x08000001),
+            palette=[(0, 0, 0), (17, 34, 51)],
+        )
+        self.assertEqual(table.rules[(1, 0, "top")].color, (17, 34, 51))
+
+    def test_the_weight_arrives_in_points(self):
+        table = self.read(cell_rule_shape(0, (1, 0, 1, 1), weight=0.5))
+        self.assertAlmostEqual(table.rules[(1, 0, "top")].weight, 0.5)
+
+    def test_a_shaded_cell_is_read_by_the_cell_it_names(self):
+        table = self.read(cell_shade_shape(0, (1, 1), color=0x00FFFF))
+        self.assertEqual(table.shades[(1, 1)], (255, 255, 0))
+
+    def test_a_shade_of_the_first_cell_states_neither_row_nor_column(self):
+        # Publisher leaves a zero out, so the top-left cell's shade names
+        # no coordinates at all and is not thereby a shade of nothing.
+        table = self.read(cell_shade_shape(0, (0, 0)))
+        self.assertIn((0, 0), table.shades)
+
+
+STYLED_TABLE = SAMPLES / "experiments" / "table-styled.pub"
+
+
+@unittest.skipUnless(STYLED_TABLE.exists(), "the styled table sample is absent")
+class StyledTableTest(unittest.TestCase):
+    """The one sample whose ruling is known from outside the file.
+
+    It was drawn in Publisher to order: R1C1 and R1C2 shaded, every side
+    of R2C1 ruled and the top of R2C2, row 3 untouched. So this is the
+    only place the lattice reading can be checked against a human's
+    intention rather than against itself.
+    """
+
+    def setUp(self):
+        structure = pubfile.read_structure(STYLED_TABLE)
+        self.table = next(
+            table for table in structure.tables.values() if table is not None
+        )
+
+    def test_every_side_of_the_bordered_cell_is_ruled(self):
+        self.assertEqual(
+            sorted(
+                side for (row, column, side) in self.table.rules
+                if (row, column) == (1, 0)
+            ),
+            ["bottom", "left", "right", "top"],
+        )
+
+    def test_the_cell_bordered_on_one_side_is_ruled_there_and_not_below(self):
+        sides = {
+            side for (row, column, side) in self.table.rules
+            if (row, column) == (1, 1)
+        }
+        # Its left is R2C1's right: one line, and both cells state it.
+        self.assertEqual(sides, {"top", "left"})
+
+    def test_the_untouched_row_states_only_the_line_it_shares(self):
+        # Row 3 was left alone, so the only rule it can carry is the one
+        # along its top, which is also the foot of the bordered cell.
+        self.assertEqual(
+            {
+                (column, side) for (row, column, side) in self.table.rules
+                if row == 2
+            },
+            {(0, "top")},
+        )
+
+    def test_the_rules_carry_the_weight_and_colour_that_were_drawn(self):
+        rule = self.table.rules[(1, 0, "top")]
+        self.assertAlmostEqual(rule.weight, 3.0)
+        self.assertEqual(rule.color, (255, 0, 0))
+
+    def test_the_two_shaded_cells_are_the_colours_they_were_given(self):
+        # Solid red and solid yellow across the top row, and the third
+        # cell of that row left unshaded.
+        self.assertEqual(
+            self.table.shades, {(0, 0): (255, 0, 0), (0, 1): (255, 255, 0)}
+        )
+
+
 def shape_chunk(story_id=None, chain_index=None) -> bytes:
     """A SHAPE chunk saying which story it holds and where in it."""
     blocks = []
@@ -737,10 +920,16 @@ class CellInsetApplicationTest(unittest.TestCase):
         document = model.Document(pages=[page_with(table)])
         return document, table
 
-    def structure_with(self, insets, widths=(72.0, 36.0), heights=(18.0,)):
+    def structure_with(
+        self, insets, widths=(72.0, 36.0), heights=(18.0,), rules=None, shades=None
+    ):
         signature = pubfile.table_signature(list(widths), list(heights))
         return pubfile.FileStructure(
-            tables={signature: pubfile.TableStructure(insets=insets)}
+            tables={
+                signature: pubfile.TableStructure(
+                    insets=insets, rules=rules or {}, shades=shades or {}
+                )
+            }
         )
 
     def test_a_matched_table_gets_its_padding(self):
@@ -796,6 +985,59 @@ class CellInsetApplicationTest(unittest.TestCase):
         )
         self.assertTrue(table.cells[0].unruled)
 
+    def test_a_ruled_edge_reaches_the_cell_it_rules(self):
+        document, table = self.document_with_table()
+        rule = pubfile.CellRule(weight=0.5, color=(17, 34, 51))
+        carried = model.CellRule(weight=0.5, color=(17, 34, 51))
+        convert._apply_cell_insets(
+            document,
+            self.structure_with(
+                {(0, 0): (1.0, 1.0, 1.0, 1.0)}, rules={(0, 0, "top"): rule}
+            ),
+        )
+        self.assertEqual(table.cells[0].rules, {"top": carried})
+
+    def test_a_spanning_cell_takes_its_right_edge_from_the_far_column(self):
+        # A rule is stated per grid position, and a merged cell covers
+        # several. Its right-hand side is the right of the last column it
+        # spans, not the right of the one it starts in -- which is a line
+        # running through the middle of it.
+        document, table = self.document_with_table()
+        table.cells = [model.TableCell(row=0, column=0, column_span=2)]
+        rule = pubfile.CellRule(weight=0.5)
+        convert._apply_cell_insets(
+            document,
+            self.structure_with(
+                {(0, 0): (1.0, 1.0, 1.0, 1.0)}, rules={(0, 1, "right"): rule}
+            ),
+        )
+        self.assertEqual(set(table.cells[0].rules), {"right"})
+
+    def test_a_line_through_the_middle_of_a_spanning_cell_is_not_drawn(self):
+        # IDML has one stroke per side of a cell, so half of one cannot
+        # be ruled. Claiming the whole side would draw a line Publisher
+        # did not, which is worse than the line it cannot draw.
+        document, table = self.document_with_table()
+        table.cells = [model.TableCell(row=0, column=0, column_span=2)]
+        convert._apply_cell_insets(
+            document,
+            self.structure_with(
+                {(0, 0): (1.0, 1.0, 1.0, 1.0)},
+                rules={(0, 1, "left"): pubfile.CellRule(weight=0.5)},
+            ),
+        )
+        self.assertEqual(table.cells[0].rules, {})
+
+    def test_a_shaded_cell_reaches_the_cell_it_fills(self):
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document,
+            self.structure_with(
+                {(0, 0): (1.0, 1.0, 1.0, 1.0)}, shades={(0, 0): (17, 34, 51)}
+            ),
+        )
+        self.assertEqual(table.cells[0].shade, (17, 34, 51))
+
     def test_a_cell_the_file_does_not_mention_is_not_marked(self):
         document, table = self.document_with_table()
         convert._apply_cell_insets(
@@ -817,6 +1059,85 @@ class CellInsetApplicationTest(unittest.TestCase):
             any("cell rule" in warning for warning in document.warnings),
             document.warnings,
         )
+
+    def test_a_table_whose_lines_were_read_is_not_reported_as_silenced(self):
+        # The warning is about lines that were lost, and this table's
+        # were not: they came out of the drawing stream onto its cells.
+        document, _table = self.document_with_table()
+        convert._apply_cell_insets(
+            document,
+            self.structure_with(
+                {(0, 0): (1.0, 2.0, 3.0, 4.0)},
+                rules={(0, 0, "top"): pubfile.CellRule(weight=0.5)},
+            ),
+        )
+        self.assertEqual(document.warnings, [])
+
+    def test_a_ruled_table_with_no_text_in_it_is_kept(self):
+        # The grid a blank ruled table draws is the whole of what it
+        # contributes, and until the drawing stream was read there was
+        # nothing to see it by.
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document,
+            self.structure_with(
+                {(0, 0): (1.0, 1.0, 1.0, 1.0)},
+                rules={(0, 0, "top"): pubfile.CellRule(weight=0.5)},
+            ),
+        )
+        convert._drop_blank_tables(document)
+        self.assertEqual(document.pages[0].items, [table])
+
+    def test_a_table_with_text_in_it_is_kept(self):
+        document, table = self.document_with_table()
+        table.cells[0].story.paragraphs.append(
+            model.Paragraph(spans=[model.Span(text="x")])
+        )
+        convert._drop_blank_tables(document)
+        self.assertEqual(document.pages[0].items, [table])
+
+    def test_a_table_with_a_fill_of_its_own_is_kept(self):
+        document, table = self.document_with_table()
+        table.style.fill = (255, 0, 0)
+        convert._drop_blank_tables(document)
+        self.assertEqual(document.pages[0].items, [table])
+
+    def test_a_table_that_draws_nothing_and_says_nothing_is_dropped(self):
+        document, _table = self.document_with_table()
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 1.0, 1.0, 1.0)})
+        )
+        convert._drop_blank_tables(document)
+        self.assertEqual(document.pages[0].items, [])
+
+    def test_dropping_a_table_is_said_rather_than_done_in_silence(self):
+        document, _table = self.document_with_table()
+        convert._drop_blank_tables(document)
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("1 empty table(s) dropped", document.warnings[0])
+
+    def test_a_table_that_is_kept_says_nothing(self):
+        document, _table = self.document_with_table()
+        convert._apply_cell_insets(
+            document,
+            self.structure_with(
+                {(0, 0): (1.0, 1.0, 1.0, 1.0)},
+                rules={(0, 0, "top"): pubfile.CellRule(weight=0.5)},
+            ),
+        )
+        document.warnings.clear()
+        convert._drop_blank_tables(document)
+        self.assertEqual(document.warnings, [])
+
+    def test_a_shaded_table_is_not_reported_as_silenced_either(self):
+        document, _table = self.document_with_table()
+        convert._apply_cell_insets(
+            document,
+            self.structure_with(
+                {(0, 0): (1.0, 2.0, 3.0, 4.0)}, shades={(0, 0): (255, 0, 0)}
+            ),
+        )
+        self.assertEqual(document.warnings, [])
 
 
 def quill_stream(*chunks: tuple) -> bytes:

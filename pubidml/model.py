@@ -359,6 +359,14 @@ class CellInsets:
     bottom: float = 0.0
 
 
+@dataclass(frozen=True)
+class CellRule:
+    """One line along one side of a cell, in points."""
+
+    weight: float = 0.0
+    color: Optional[Color] = None
+
+
 @dataclass
 class TableCell:
     """One cell. `row_span`/`column_span` are 1 unless it covers neighbours."""
@@ -383,6 +391,12 @@ class TableCell:
     #: Publisher leaves the field out for top, so a cell we have read
     #: always has one -- None means the record was not read at all.
     vertical_align: Optional[str] = None
+    #: The lines Publisher draws on this cell, by side name. They come
+    #: from the drawing stream rather than from the cell's own record,
+    #: which states none: `unruled` writes off the sides not named here.
+    rules: Dict[str, CellRule] = field(default_factory=dict)
+    #: The colour Publisher fills this cell with, where it fills it.
+    shade: Optional[Color] = None
 
 
 @dataclass
@@ -551,6 +565,15 @@ class Document:
     def colors(self) -> List[Color]:
         found = set()
         for item in self.all_items():
+            if isinstance(item, Table):
+                # A cell's own paint, which is not the table's: Publisher
+                # keeps both the rules and the shades per cell.
+                for cell in item.cells:
+                    if cell.shade:
+                        found.add(cell.shade)
+                    for rule in cell.rules.values():
+                        if rule.color:
+                            found.add(rule.color)
             if item.style.fill:
                 found.add(item.style.fill)
             if item.style.stroke:
@@ -672,7 +695,6 @@ class ModelBuilder:
         self._list_stack: List[bool] = []  # True where the level is ordered
         self._in_master = False
         self._dropped = 0
-        self._empty_tables = 0
 
     # -- event dispatch ---------------------------------------------------
 
@@ -691,11 +713,6 @@ class ModelBuilder:
         if self._dropped:
             self.doc.warnings.append(
                 f"{self._dropped} item(s) dropped: geometry outside sane bounds"
-            )
-        if self._empty_tables:
-            self.doc.warnings.append(
-                f"{self._empty_tables} empty table(s) dropped: "
-                "no text, no fill, no stroke"
             )
         return self.doc
 
@@ -894,15 +911,11 @@ class ModelBuilder:
         self._span = None
         if table is None:
             return
-        # An empty grid with no fill or stroke contributes nothing, the same
-        # rule an empty text frame follows. Unlike a frame it is worth
-        # saying so: these are the layout grids a page is built on, so a
-        # reader looking for one in the package should be told it went and
-        # why, rather than left to find the absence.
-        if all(cell.story.is_empty() for cell in table.cells):
-            if not table.style.fill and not table.style.stroke:
-                self._empty_tables += 1
-                return
+        # An empty grid contributes nothing and is dropped -- but not
+        # here. A table's rules and shades are not in the event stream at
+        # all, so at this point a blank ruled grid and a blank one look
+        # the same; `convert._drop_blank_tables` asks once the drawing
+        # stream has been read onto the cells.
         if table.cells:
             self._place(table)
 

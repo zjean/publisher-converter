@@ -272,6 +272,15 @@ _PROPERTY_RECORDS = frozenset({0xF00B, 0xF121, 0xF122})
 _ESCHER_TAIL = {0xF000: 4, 0xF002: 4}
 _ESCHER_EXTRA_HEADER = {0xF010: 4, 0xF011: 4}
 _ANCHOR_SIDES = (0x2001, 0x2002, 0x2003, 0x2004)
+# A table's rules and shades are shapes in this stream rather than fields
+# of the cell records (actions.md 11), and the record that on an ordinary
+# shape is the anchor box carries their place on the grid instead: which
+# table they belong to, and for a rule the run of lattice it covers.
+_CELL_DRAWING_TABLE = 0x6802
+_CELL_RULE_ORIENTATION = 0x2001
+_CELL_SHADE_CELL = (0x2002, 0x2003)
+_CELL_RULE_START = (0x2004, 0x2005)
+_CELL_RULE_END = (0x2006, 0x2007)
 _PROP_ROTATION = 0x0004
 _PROP_WORDART_TEXT, _PROP_WORDART_SIZE, _PROP_WORDART_FONT = 0x00C0, 0x00C3, 0x00C5
 _PROP_WORDART_SPACING = 0x00C4
@@ -326,6 +335,7 @@ _WORDART_WARPS = {
 # when there is one, so a Publisher gradient stated as "these two colours,
 # with a waypoint in between" reaches librevenge as the waypoint by itself.
 _PROP_FILL_TYPE, _PROP_FILL_COLOR, _PROP_FILL_BACK = 0x0180, 0x0181, 0x0183
+_PROP_LINE_WIDTH = 0x01CB
 _PROP_FILL_SHADE = 0x0197
 _PROP_FILL_ANGLE, _PROP_FILL_FOCUS = 0x018B, 0x018C
 # Two angles the file states ninety degrees out, corrected by name in
@@ -458,6 +468,43 @@ class TableStructure:
     #: cell whose record was read has one, since the field being left out
     #: is itself the statement that the cell is top-aligned.
     alignments: Dict[tuple, str] = field(default_factory=dict)
+    #: The lines Publisher draws, keyed by (row, column, side). Empty
+    #: where the table's drawing states none, which is a table with no
+    #: rules rather than one nobody looked at.
+    rules: Dict[tuple, "CellRule"] = field(default_factory=dict)
+    #: The cells Publisher fills, keyed by (row, column).
+    shades: Dict[tuple, Tuple[int, int, int]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CellRule:
+    """One ruled cell edge: the weight Publisher states, and its colour."""
+
+    weight: float
+    color: Optional[Tuple[int, int, int]] = None
+
+
+@dataclass
+class _TableDrawing:
+    """What one table's shapes in the drawing stream come to."""
+
+    segments: List["_RuleSegment"] = field(default_factory=list)
+    shades: Dict[tuple, Tuple[int, int, int]] = field(default_factory=dict)
+
+
+@dataclass
+class _RuleSegment:
+    """A rule as the file states it: a run along the grid's lattice.
+
+    Publisher does not rule a cell side; it draws a line between two
+    lattice points, which is why one shape can rule a whole row of cells
+    at once. `start` and `end` are (row, column) on the lattice, where
+    row 0 is the top of the table and row *n* the bottom of its last row.
+    """
+
+    start: Tuple[int, int]
+    end: Tuple[int, int]
+    rule: CellRule
 
 
 @dataclass
@@ -697,6 +744,20 @@ class FileStructure:
         """Vertical alignment by (row, column) for this grid, if known."""
         found = self.tables.get(table_signature(column_widths, row_heights))
         return found.alignments if found is not None else None
+
+    def cell_rules(
+        self, column_widths: List[float], row_heights: List[float]
+    ) -> Optional[Dict[tuple, "CellRule"]]:
+        """The lines drawn on this grid, by (row, column, side), if known."""
+        found = self.tables.get(table_signature(column_widths, row_heights))
+        return found.rules if found is not None else None
+
+    def cell_shades(
+        self, column_widths: List[float], row_heights: List[float]
+    ) -> Optional[Dict[tuple, Tuple[int, int, int]]]:
+        """The cells filled on this grid, by (row, column), if known."""
+        found = self.tables.get(table_signature(column_widths, row_heights))
+        return found.shades if found is not None else None
 
 
 def table_signature(column_widths: List[float], row_heights: List[float]) -> tuple:
@@ -1207,11 +1268,14 @@ def _guides_from_array(contents: bytes, block: "_Block") -> Optional[PageGuides]
     )
 
 
-def _read_tables(contents: bytes, refs) -> Dict[tuple, Optional[TableStructure]]:
-    """Cell insets for every table in the file, keyed by grid signature."""
+def _read_tables(
+    contents: bytes, refs, escher: bytes = b"", palette=()
+) -> Dict[tuple, Optional[TableStructure]]:
+    """Cell insets and rules for every table, keyed by grid signature."""
     cells_at = {seq: offset for seq, kind, offset in refs if kind == _CELLS_CHUNK}
+    drawings = _table_drawings(escher, palette)
     tables: Dict[tuple, Optional[TableStructure]] = {}
-    for _seq, kind, offset in refs:
+    for seq, kind, offset in refs:
         if kind != _TABLE_CHUNK:
             continue
         fields, signature = _table_grid(contents, offset)
@@ -1221,6 +1285,12 @@ def _read_tables(contents: bytes, refs) -> Dict[tuple, Optional[TableStructure]]
         if cells_offset is None:
             continue
         table = _table_cells(contents, cells_offset)
+        # A table's drawing names it by the seqnum its own chunk carries,
+        # which is also the seqnum its page lists the shape by.
+        columns, rows = signature
+        drawing = drawings.get(seq, _TableDrawing())
+        table.rules = _rules_on_cells(drawing.segments, len(rows), len(columns))
+        table.shades = dict(drawing.shades)
         # Two tables drawing the same grid are only usable while they agree
         # about their cells; where they differ, neither is.
         if tables.setdefault(signature, table) != table:
@@ -1359,6 +1429,86 @@ def _shape_anchors(escher: bytes) -> List[ShapeAnchor]:
                 height=box[3] - box[1],
             )
         )
+    return found
+
+
+def _table_drawings(escher: bytes, palette) -> Dict[int, _TableDrawing]:
+    """Every table's rules and shades, keyed by the table they belong to.
+
+    Publisher keeps a table's lines and fills out of its cell records and
+    draws them here instead, one shape per ruled run and one per shaded
+    cell. Both are filled rectangles rather than stroked lines -- their
+    fill booleans say so -- so the colour to read is the fill either way,
+    and a rule's weight is the line width the shape still carries.
+
+    A rule names the run of lattice it covers and a shade names one cell,
+    which is what tells the two apart.
+    """
+    found: Dict[int, _TableDrawing] = {}
+    if not escher:
+        return found
+    for body, end in _escher_shapes(escher, 0, len(escher)):
+        props: dict = {}
+        anchor: Dict[int, int] = {}
+        for _version, instance, rec_type, sub_body, sub_end in _escher_records(
+            escher, body, end
+        ):
+            if rec_type in _PROPERTY_RECORDS:
+                # Merged, not replaced: Publisher writes a table's cell
+                # shapes with a second property record after the first,
+                # and taking only the last one loses the line width.
+                props.update(_escher_properties(escher, sub_body, sub_end, instance))
+            elif rec_type == _CLIENT_ANCHOR:
+                anchor = _escher_values(escher, sub_body, sub_end)
+        table_seq = anchor.get(_CELL_DRAWING_TABLE)
+        if table_seq is None:
+            continue
+        fill = props.get(_PROP_FILL_COLOR)
+        color = _real_color(fill, palette) if isinstance(fill, int) else None
+        drawing = found.setdefault(table_seq, _TableDrawing())
+        if _CELL_RULE_ORIENTATION not in anchor:
+            if color is not None:
+                cell = tuple(anchor.get(key, 0) for key in _CELL_SHADE_CELL)
+                drawing.shades[cell] = color
+            continue
+        weight = props.get(_PROP_LINE_WIDTH)
+        if not isinstance(weight, int):
+            continue
+        drawing.segments.append(
+            _RuleSegment(
+                start=tuple(anchor.get(key, 0) for key in _CELL_RULE_START),
+                end=tuple(anchor.get(key, 0) for key in _CELL_RULE_END),
+                rule=CellRule(weight=weight / _EMU_PER_POINT, color=color),
+            )
+        )
+    return found
+
+
+def _rules_on_cells(segments, rows: int, columns: int) -> Dict[tuple, CellRule]:
+    """A table's lattice segments as the cell sides IDML states.
+
+    Both cells along an interior line are given it. They share one line on
+    the page, so stating it once would do -- but a cell whose record was
+    read has its other three sides written off, and a zero on this side of
+    the line would then argue with the rule on that side.
+    """
+    found: Dict[tuple, CellRule] = {}
+    for segment in segments:
+        (start_row, start_column), (end_row, end_column) = segment.start, segment.end
+        if start_row == end_row:
+            for column in range(
+                min(start_column, end_column), max(start_column, end_column)
+            ):
+                if start_row < rows:
+                    found[(start_row, column, "top")] = segment.rule
+                if start_row:
+                    found[(start_row - 1, column, "bottom")] = segment.rule
+        else:
+            for row in range(min(start_row, end_row), max(start_row, end_row)):
+                if start_column < columns:
+                    found[(row, start_column, "left")] = segment.rule
+                if start_column:
+                    found[(row, start_column - 1, "right")] = segment.rule
     return found
 
 
@@ -1792,7 +1942,12 @@ def read_structure(source: Path) -> Optional[FileStructure]:
         refs = _chunk_references(contents)
         structure = FileStructure(
             has_fields=_has_field_table(quill),
-            tables=_read_tables(contents, refs),
+            tables=_read_tables(
+                contents,
+                refs,
+                escher=_read_stream(data, *_ESCHER_STREAM) or b"",
+                palette=_read_palette(contents, refs),
+            ),
             wordart=_read_wordart(data),
             paragraph_stops=_paragraph_stops(quill),
             gradients=_read_gradients(data, _read_palette(contents, refs)),

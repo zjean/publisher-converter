@@ -970,13 +970,20 @@ These are real and deliberate, not bugs to be surprised by later.
   completely — a width per column, a height per row, and a row/column pair
   plus any spans on every cell — so it becomes a real IDML table rather
   than cells flowed into one frame as consecutive paragraphs. Cells that a
-  span covers are not emitted twice. An all-empty grid with no fill or
-  stroke is dropped, the same rule an empty text frame follows — **and
-  the report says how many went**, one counted line per document rather
-  than one per table. These are the layout grids a Publisher page is
-  built on and they draw nothing, so dropping them is right; 13 of the 31
-  tables in the three newsletters go this way, and a reader looking for a
-  grid in the package should be told rather than left to find the gap.
+  span covers are not emitted twice. A grid that is empty of *everything*
+  is dropped, the same rule an empty text frame follows — **and the report
+  says how many went**, one counted line per document rather than one per
+  table.
+
+  Empty of everything is the whole of that test, and it used to be asked
+  too early. A table's lines and fills are not in the event stream at all;
+  they are shapes in the drawing stream, and until they were read a blank
+  ruled grid and a blank one looked identical. So 13 of the 31 tables in
+  the three newsletters were dropped as contributing nothing — and 11 of
+  those 13 rule themselves, which is the whole of what a layout grid
+  contributes. The question is now asked after the rules have been read
+  onto the cells, which leaves 2 dropped across the three files and keeps
+  the other 11 with their lines on.
 
   **A row keeps the height the file states.** Publisher's row heights have
   no slack in them — a row measures the leading of the text it holds and
@@ -1060,13 +1067,43 @@ These are real and deliberate, not bugs to be surprised by later.
   since checked and prints no lines, so the zeros are not deleting a
   default of Publisher's own.
 
-  **Publisher does rule tables, and the lines are not in those records.**
-  A styled table and a plain one have an identical `Contents` chunk
-  inventory; the shading and the rules are in the Escher stream instead,
-  as a shape per shaded cell and a shape per ruled edge (`actions.md`
-  §11). Until those are read a ruled table still arrives unruled, so
-  every document carrying tables names the count in its report and says
-  to re-add the lines and fills by hand.
+  **Publisher does rule tables, and the lines are not in those records —
+  they are read now, out of the Escher stream.** A styled table and a
+  plain one have an identical `Contents` chunk inventory; the shading and
+  the rules are in the drawing stream instead, as a shape per shaded cell
+  and a shape per ruled run, tied back to their table by the seqnum its
+  own chunk carries.
+
+  A rule is not stated as a side of a cell. It is a segment on the grid's
+  *lattice* — the lines between cells, numbered from zero — running from
+  one lattice point to another, which is why one shape can rule a whole
+  row of cells at once and why 80 of the corpus's 604 do. The record that
+  on an ordinary shape is the anchor box carries it: an orientation, a
+  start row and column and an end row and column, with a zero left out
+  rather than written. Both cells along an interior line are given it,
+  because a cell whose record was read has its unruled sides written off
+  and a zero on the other side of the line would otherwise argue with the
+  rule. Publisher draws each one as a thin filled rectangle rather than as
+  a stroke — the shape's own fill booleans say so — so the colour to read
+  is the fill, resolved through the file's palette like every other, and
+  the weight is the line width the shape still carries.
+
+  **A merged cell is ruled on its footprint.** A rule is stated per grid
+  position and a spanning cell covers several, so its four sides are the
+  sides of what it covers: the top of every column it spans, the bottom
+  of the last row it reaches, and so on. A line lying *inside* a merged
+  cell is one IDML cannot draw — there is a single stroke per side — and
+  is left out rather than promoted to a whole side Publisher never ruled.
+  Across the three newsletters that is 24 rules that would otherwise have
+  been dropped, and none invented.
+
+  Checked against the one sample whose ruling is known from outside the
+  file: a 3 × 3 table drawn to order in Publisher with two shaded cells,
+  every side of R2C1 ruled and the top of R2C2. All nine cells come out
+  exactly as drawn, colours included, and the plain control beside it
+  comes out with every edge still off. Across `1337 kerkbode` that is 409
+  ruled cell sides at 0.25, 0.5 and 2pt where all of them used to be
+  written off as no line.
 
   **A cell's own runs count as text.** Fonts and colours were collected by
   walking text frames alone, so anything named only inside a table never
@@ -1076,14 +1113,13 @@ These are real and deliberate, not bugs to be surprised by later.
   shared walk — `model.Document.stories`, cells included — now feeds the
   fonts, the swatches, the gradient resources and the language list alike.
 
-  Cell *fill*, and real rule weights and colours, are still not carried,
-  and this is a property of the corpus rather than a gap in the reader: no
-  table in any sample file records either. Every cell record holds only its
-  row and column bounds, its insets, and two cached extents. A ruled or
-  shaded table therefore still needs a sample before it can be read;
-  `actions.md` says how to make one, and the writer it plugs into is the
-  one already writing the zeros. A table's *own* fill and border do arrive,
-  as the rectangle libmspub draws behind it.
+  **A cell's fill is carried the same way**, from a shape naming one cell
+  rather than a run of lattice, and written as the cell's `FillColor`.
+  What is *not* in the cell records remains true and is worth keeping
+  straight: every cell record holds only its row and column bounds, its
+  insets, its alignment and two cached extents, in all 1,260 of them. The
+  rules and the shades were never there to find. A table's *own* fill and
+  border arrive separately, as the rectangle libmspub draws behind it.
 
   **A field the file leaves out is absent rather than defaulted**, which
   is what lets a missing inset be read as zero, and it is measured rather

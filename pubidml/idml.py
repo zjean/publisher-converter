@@ -1406,8 +1406,23 @@ class IdmlWriter:
             # reader that reads either.
             if cell.unruled:
                 for edge in _CELL_EDGES:
-                    attributes[f"{edge}EdgeStrokeWeight"] = fmt(0.0)
-                    attributes[f"{edge}EdgeStrokeColor"] = "Swatch/None"
+                    rule = cell.rules.get(edge.lower())
+                    if rule is None:
+                        attributes[f"{edge}EdgeStrokeWeight"] = fmt(0.0)
+                        attributes[f"{edge}EdgeStrokeColor"] = "Swatch/None"
+                        continue
+                    # A side Publisher did draw. Its weight is the one
+                    # the drawing states; a rule whose colour did not
+                    # resolve keeps the reader's, which is a line of the
+                    # right thickness in the wrong colour rather than no
+                    # line at all.
+                    attributes[f"{edge}EdgeStrokeWeight"] = fmt(rule.weight)
+                    if rule.color is not None:
+                        attributes[f"{edge}EdgeStrokeColor"] = self._color_ref(
+                            rule.color
+                        )
+            if cell.shade is not None:
+                attributes["FillColor"] = self._color_ref(cell.shade)
             node = ET.SubElement(element, "Cell", attributes)
             paragraphs = cell.story.paragraphs or [setting.placeholder()]
             for position, block in enumerate(paragraphs):

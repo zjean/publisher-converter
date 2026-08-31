@@ -344,16 +344,15 @@ produced, which keeps the speculation in the probe.
 Defining `[Basic Table]` ourselves is therefore not needed, and neither
 was any new IDML machinery.
 
-**One question is left, and this probe cannot answer it**: whether a plain
-Publisher table prints lines at all. That is `actions.md` §9's control
-file, and it is now a check on what ships rather than a prerequisite for
-it. If it prints none, the zeros are right and nothing changes. If it
-prints lines, they are Publisher's own default, the zeros are deleting
-them, and what should be written instead is that default's real weight and
-colour — from §9's styled sample, through the same attributes. Until it is
-opened, every document carrying tables names the count in its report and
-says to re-add by hand any lines that Publisher drew from outside the cell
-records.
+**The question that was left here is answered.** It was whether a plain
+Publisher table prints lines at all — and if it does, where the weight
+and colour of them live. `table-plain.pub` states no rule anywhere, so
+the zeros are right for it; `table-styled.pub` states seven shapes in
+`EscherStm`, and those are now read onto the cells through the very
+attributes this probe validated (`actions.md` §11). A zero is written
+only for a side the drawing does not name, so this section's finding —
+that a per-cell, per-edge override beats the reader's own grid — is what
+carries Publisher's real lines rather than only silencing Affinity's.
 
 ---
 

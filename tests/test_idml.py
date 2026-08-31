@@ -1724,6 +1724,58 @@ class CellRuleOutputTest(unittest.TestCase):
             story = ET.fromstring(archive.read(name))
         return {c.get("Name"): c for c in story.iter("Cell")}
 
+    def _ruled(self, rules=None, shade=None):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        table = model.Table(
+            x=0.0, y=0.0, width=200.0, height=50.0,
+            column_widths=[100.0, 100.0],
+            row_heights=[50.0],
+        )
+        table.cells = [
+            model.TableCell(
+                row=0, column=0, unruled=True, rules=rules or {}, shade=shade
+            ),
+            model.TableCell(row=0, column=1),
+        ]
+        document.pages[0].items.append(table)
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+            resources = ET.fromstring(archive.read("Resources/Graphic.xml"))
+        return {c.get("Name"): c for c in story.iter("Cell")}, resources
+
+    def test_a_ruled_edge_is_written_with_the_weight_publisher_drew(self):
+        rule = model.CellRule(weight=0.5, color=(0, 120, 192))
+        cell, _ = self._ruled(rules={"top": rule})
+        self.assertEqual(cell["0:0"].get("TopEdgeStrokeWeight"), "0.5")
+
+    def test_a_ruled_edge_names_its_own_colour_not_the_none_swatch(self):
+        rule = model.CellRule(weight=0.5, color=(0, 120, 192))
+        cell, _ = self._ruled(rules={"top": rule})
+        self.assertEqual(cell["0:0"].get("TopEdgeStrokeColor"), "Color/C_0078C0")
+
+    def test_the_sides_publisher_did_not_draw_are_still_written_off(self):
+        # The point of reading the rules is not to stop silencing edges:
+        # a side the drawing does not name is a side Publisher left blank,
+        # and the reader would otherwise rule it itself.
+        rule = model.CellRule(weight=0.5, color=(0, 120, 192))
+        cell, _ = self._ruled(rules={"top": rule})
+        for edge in ("Left", "Bottom", "Right"):
+            self.assertEqual(cell["0:0"].get(f"{edge}EdgeStrokeWeight"), "0", edge)
+
+    def test_a_rules_colour_is_defined_in_the_package(self):
+        # A dangling swatch reference reads as the override being ignored.
+        rule = model.CellRule(weight=0.5, color=(0, 120, 192))
+        _, resources = self._ruled(rules={"top": rule})
+        self.assertIn(
+            "Color/C_0078C0", [c.get("Self") for c in resources.iter("Color")]
+        )
+
+    def test_a_shaded_cell_is_filled_with_the_colour_publisher_gave_it(self):
+        cell, _ = self._ruled(shade=(255, 255, 0))
+        self.assertEqual(cell["0:0"].get("FillColor"), "Color/C_FFFF00")
+
     def test_every_edge_is_silenced_both_ways(self):
         cell = self._cells(True)["0:0"]
         for edge in self.EDGES:

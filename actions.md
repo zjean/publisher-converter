@@ -8,10 +8,10 @@ Ordered by deadline, then value.
 > **A Publisher session has happened** (28 August 2026), and it settled
 > §2, §9 and §10 — page margins, cell vertical alignment and the default
 > tab interval are all read from the file now. §1 and §3 came back
-> partially and are still open, §11 is new: the table ruling that
-> session found, which needs no Publisher at all — and so is §12, the
-> booklet flag, which does need Publisher and is the last thing standing
-> between a newsletter and a correct spread layout.
+> partially and are still open. §11, the table ruling that session found,
+> needed no Publisher and is now answered and wired in. §12, the booklet
+> flag, does need Publisher and is the last thing standing between a
+> newsletter and a correct spread layout.
 >
 > [`windows-session.md`](windows-session.md) is the running order for a
 > sitting at a Windows machine, with what came back and what did not.
@@ -774,80 +774,85 @@ tab has a code at all. ⏰ needs Publisher, before 1 Oct 2026.
 
 ---
 
-## 11. Read table rules and shading out of the Escher stream
+## 11. Table rules and shading — **answered, and wired in**
 
-### Why this matters
+18 tables in the corpus arrived with **every cell rule off**, and 13 more
+were dropped outright as empty. Both are fixed: the rules are read out of
+`EscherStm` and written per edge, and the drop test now runs after them.
 
-18 tables in the corpus arrive with **every cell rule off**, and the
-converter says so in each report. That was the right call while the cell
-records were the only place looked at — they state padding and alignment
-and nothing else, and a cell edge left unstated is one Affinity rules
-itself, in a colour and a weight the `.pub` never mentions. But it means
-a ruled table arrives unruled and the lines have to be redrawn by hand.
-
-### Where they turned out to be
+### Where they were, and how they read
 
 **Not in `Contents` at all.** A control table and the same table with two
 shaded cells and five ruled edges have an *identical* chunk inventory,
 and the only difference in their cell records is a cached text extent.
 
-They are in **`EscherStm`**, which grew 1834 → 3494 bytes between the two
-saves, gaining a second `DgContainer` holding **seven shapes that the
-plain table does not have** — one per shaded cell and one per ruled edge:
+They are shapes in **`EscherStm`** — one per shaded cell and one per
+ruled run — and the record that on an ordinary shape is the anchor box
+carries their place on the grid instead. That record is not an anchor and
+not a fixed size; it is the same `(u16 id, u32 value)` list
+`_escher_values` already reads everywhere else, and its fields are:
 
-| shape | properties | what was set in Publisher |
+| field | on | meaning |
 |---|---|---|
-| `spid 2051` | `fillColor=255` → RGB(255,0,0) | R1C1 shaded solid red |
-| `spid 2052` | `fillColor=65535` → RGB(255,255,0) | R1C2 shaded solid yellow |
-| `spid 2053–2057` | `lineWidth=38100`, `lineJoinStyle=2` | the four edges of R2C1 and the top edge of R2C2 |
+| `0x6802` | both | the table, by the seqnum its own chunk carries |
+| `0x2001` | a rule | 1 for a run along a row, 2 for one down a column |
+| `0x2002` / `0x2003` | a shade | the cell's row and column |
+| `0x2004` / `0x2005` | a rule | where the run starts, as a row and column of the *lattice* |
+| `0x2006` / `0x2007` | a rule | where it ends |
 
-Two shades and five edges, which is exactly what was drawn — so the
-counting is right even though the individual colours are not yet all
-decoded (`2053` reads RGB(0,120,192) where `2054–2057` read 255, and
-which shape is which edge needs the anchor rectangles, whose length here
-is 4/10/16/28/34/40 bytes rather than OfficeArt's fixed 16).
+A zero is left out rather than written, the way this format leaves out an
+inset of zero. The lattice is the grid's lines rather than its cells, so
+a run from (1,0) to (1,3) rules the tops of three cells at once — 80 of
+the corpus's 604 runs cover more than one.
 
-Escher colours are `0x00BBGGRR`, which is already how `pubfile` reads a
-WordArt fill.
+**Confirmed, not inferred.** The orientation field agrees with the
+geometry on all 604 shapes across four files: every `0x2001 = 1` has an
+equal start and end row and every `2` does not. And `table-styled.pub`,
+drawn to order in Publisher, comes out cell for cell as it was drawn —
+two shades, four sides on R2C1, the top of R2C2, nothing on row 3.
 
-### What is already known
+Two more things that were not obvious:
 
-Established here, so don't re-derive it:
+- **The colour is the fill, not the line colour.** 545 of the 604 shapes
+  state no `lineColor` at all. Publisher draws a rule as a thin *filled*
+  rectangle — the shape's `fillStyleBooleanProperties` says `fFilled`
+  and its line booleans say `fLine` is off — so `0x0181` is the colour
+  and `0x01CB` is only carrying the weight. Colours resolve through
+  `_resolve_color` like every other, and two thirds of them name a
+  palette entry rather than stating a colour outright.
+- **A shape's second property record has to be *merged* into the first**,
+  not replace it. Publisher writes a cell shape's `0xF00B` and then a
+  `0xF122`, and taking only the last one loses the line width — which is
+  what made the first attempt read nothing at all from a real file.
 
-- `pubfile` **already walks this stream** — `_escher_records`,
-  `_read_wordart`, `_read_gradients`, `_read_shape_anchors` — including
-  Publisher's two departures from OfficeArt (a `DGG`/`DG` container is
-  followed by four bytes of tail; `CLIENT_ANCHOR`/`CLIENT_DATA` repeat
-  their own length). What is new is only that a *table's cells* are in
-  there as shapes.
-- The corpus has plenty to read: ~500 `SpContainer`s per `kerkbode`
-  issue, 32 in `Lisa Hoogendijk`.
-- `model.TableCell.unruled` and the `idml` code that writes
-  `*EdgeStrokeWeight`/`*EdgeStrokeColor` per edge are already in place,
-  so a decoded rule has somewhere to go on arrival.
-- The samples are `files/experiments/table-plain.pub` and
-  `table-styled.pub`, and they do **not** need Publisher again.
+### One correction to carry
 
-### Steps
+`windows-session.md` records the styled sample as having been given a
+**4pt blue** border on both cells. The file says otherwise, consistently:
+3pt (38100 EMU), red on R2C1's four sides and blue only on R2C2's top.
+The geometry and the colour agree with each other about which shape is
+which — the one shape that is placed differently is also the one coloured
+differently — so it is the note that is imprecise, not the reading. Worth
+knowing before anyone uses that sample as ground truth again.
 
-1. Decode the `0xF010` record Publisher writes in a table's drawing — it
-   is not a fixed-size OfficeArt anchor — and place each of the seven
-   shapes on the grid.
-2. With the shapes placed, read `fillColor` for a shaded cell and
-   `lineColor`/`lineWidth` for a ruled edge, and check the five border
-   shapes against the four-plus-one that was drawn.
-3. Tie the drawing back to its table. Every other Escher reader here
-   matches by where a shape sits, and a table already has a grid
-   signature; the `CLIENT_DATA` seqnum is the more direct route if the
-   table's drawing carries one.
-4. Then `convert._apply_cell_insets` sets the rules it has and leaves
-   `unruled` set only for cells with none, and the warning shrinks to the
-   tables that really state nothing.
+One consequence worth recording: because a rule is stated per grid
+position, a **merged** cell has to be ruled on its whole footprint — the
+top of every column it spans, the bottom of the last row it reaches — and
+a line falling inside it is one IDML has no stroke for and is dropped.
+`convert._rules_of` does that; asking only about the position the cell
+starts in loses 24 rules across the three newsletters and puts one of
+them down the middle of a merged cell.
 
-**Not urgent, and not blocked.** Everything needed is already on this
-Mac.
+### What this left open
 
----
+- **A shade names its cell in `0x2002`/`0x2003`, and only the column is
+  exercised.** The corpus holds four shaded cells; three are at (0,0) and
+  state nothing, and the fourth is at (0,1) and states `0x2003 = 1`. So
+  the column reading rests on one sample and the row field on none. A
+  file shading anything below the first row would settle it.
+- **Publisher's border *style* is not read** — dashed, double and the
+  rest. Every rule in the corpus is a plain line, so there is no sample
+  and nothing to read it against.
 
 ## 12. Confirm the booklet flag  ⏰ needs Publisher, before 1 Oct 2026
 
