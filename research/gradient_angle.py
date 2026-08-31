@@ -126,6 +126,20 @@ def _function_colors(objs: dict, number: int, depth: int = 0):
         for ref in re.findall(rb"(\d+)\s+\d+\s+R", listed.group(1)):
             out.extend(_function_colors(objs, int(ref), depth + 1))
         return out
+    if kind.group(1) == b"0":
+        # A sampled ramp, which is how Publisher states the ones it draws
+        # for WordArt. Only the ends are wanted, but the whole table is
+        # cheap and the middle is what tells a mirrored ramp apart.
+        payload = _stream(body)
+        size = re.search(rb"/Size\s*\[\s*(\d+)", body)
+        if payload is None or size is None:
+            return []
+        count = int(size.group(1))
+        width = len(payload) // count if count else 0
+        if width < 3:
+            return []
+        return [[payload[i * width + c] / 255.0 for c in range(3)]
+                for i in range(count)]
     return []
 
 
@@ -203,13 +217,19 @@ def main(pub: Path, pdf: Path) -> None:
             if gradient is None:
                 continue
             mine = ours(item)
-            palette = {
-                _swatch([c / 255.0 for c in stop.color])
-                for stop in gradient.stops
-            }
+            # Publisher's own rounding moves a channel by one, so a stop
+            # counts as stated if the shading passes close to it rather
+            # than exactly through it.
+            def carries(shading, stop):
+                return any(
+                    max(abs(int(swatch[1 + 2 * c:3 + 2 * c], 16) - stop.color[c])
+                        for c in range(3)) <= 2
+                    for swatch in shading["colours"]
+                )
+
             matches = [
                 shading for shading in found
-                if palette.issubset(set(shading["colours"]))
+                if all(carries(shading, stop) for stop in gradient.stops)
             ]
             size = f"{item.width:.1f}x{item.height:.1f}"
             if not matches:
@@ -228,12 +248,22 @@ def main(pub: Path, pdf: Path) -> None:
                 return min(abs(ratio - 1.0), abs(ratio - 2.0))
 
             matches.sort(key=spans)
-            theirs = matches[0]
-            if spans(theirs) > 0.02:
-                print(f"{index:>5} {size:>14} {gradient.angle:>7.1f} "
-                      f"{mine['bearing']:>7.1f} {'-':>7} {'-':>7}  "
-                      f"{len(matches)} share these colours, none spans the box")
-                continue
+            tight = [s for s in matches if spans(s) <= 0.02]
+            if tight:
+                theirs, loose = tight[0], False
+            else:
+                # A ramp drawn once and used by every glyph of a word is
+                # one shading repeated, not several candidates: collapse
+                # by geometry before giving up on it.
+                shapes = {(round(s["bearing"], 1), round(s["length"], 1))
+                          for s in matches}
+                if len(shapes) != 1:
+                    print(f"{index:>5} {size:>14} {gradient.angle:>7.1f} "
+                          f"{mine['bearing']:>7.1f} {'-':>7} {'-':>7}  "
+                          f"{len(matches)} share these colours, "
+                          f"{len(shapes)} geometries, none spans the box")
+                    continue
+                theirs, loose = matches[0], True
             # A ramp's axis is a line: half a turn either way is the same
             # line drawn from the other end, which the colour order settles
             # rather than the angle.
@@ -249,6 +279,15 @@ def main(pub: Path, pdf: Path) -> None:
                 near = near - 180.0 if near > 90.0 else near
                 print(f"{'':>5} {'':>14} bands along the shape's diagonal "
                       f"would be {predicted:.1f}, which is {near:+.1f} off")
+            if loose:
+                # Worth saying rather than hiding: the ramp does not span
+                # the box we hold, so the box is not the one Publisher
+                # drew over and the bearing is only as good as the box.
+                across = (abs(item.width * math.cos(math.radians(theirs["bearing"])))
+                          + abs(item.height * math.sin(math.radians(theirs["bearing"]))))
+                print(f"{'':>5} {'':>14} its ramp runs {theirs['length']:.1f} "
+                      f"where the box measures {across:.1f} across -- "
+                      f"the painted shape is not the box we hold")
 
 
 if __name__ == "__main__":
