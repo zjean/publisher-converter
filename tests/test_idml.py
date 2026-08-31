@@ -2055,3 +2055,152 @@ class CellVerticalAlignmentTest(unittest.TestCase):
 
     def test_a_cell_whose_record_was_not_read_states_nothing(self):
         self.assertEqual(self._cells(None), [None])
+
+
+class CellEdgeSpacingTest(unittest.TestCase):
+    """Paragraph spacing that falls against a cell's own edge.
+
+    Publisher states space after on the cell paragraphs of 351 paragraphs
+    in the corpus and lays out none of it: those tables' rows measure the
+    leading plus under a point, and the row heights sum to the table's
+    stated height to the point, so there is nowhere for 14pt a paragraph
+    to go. Written out, a reader that does honour it grows every row --
+    which is only downwards, so the grid sinks out of the frame it was
+    placed in. `research/probe_table_placement.py` and backlog.md 11.
+    """
+
+    def _cell_paragraphs(self, *spacings):
+        """One cell holding a paragraph per (space_before, space_after)."""
+        table = model.Table(
+            x=0.0, y=0.0, width=100.0, height=50.0,
+            column_widths=[100.0], row_heights=[50.0],
+        )
+        cell = model.TableCell(row=0, column=0)
+        for before, after in spacings:
+            paragraph = model.Paragraph(space_before=before, space_after=after)
+            paragraph.spans.append(model.Span(text="cell", size_pt=10.0))
+            cell.story.paragraphs.append(paragraph)
+        table.cells = [cell]
+        document = support.document()
+        document.pages[0].items.append(table)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        return list(next(story.iter("Cell")).iter("ParagraphStyleRange"))
+
+    def test_the_last_paragraph_in_a_cell_drops_its_space_after(self):
+        paragraph = self._cell_paragraphs((0.0, 14.0))[-1]
+        self.assertIsNone(paragraph.get("SpaceAfter"))
+
+    def test_the_first_paragraph_in_a_cell_drops_its_space_before(self):
+        paragraph = self._cell_paragraphs((14.0, 0.0))[0]
+        self.assertIsNone(paragraph.get("SpaceBefore"))
+
+    def test_space_between_two_paragraphs_of_one_cell_survives(self):
+        # Only the cell's own edges have nothing to separate. Between two
+        # real paragraphs the space is doing the job it was set for.
+        first, second = self._cell_paragraphs((0.0, 14.0), (12.0, 14.0))
+        self.assertEqual(first.get("SpaceAfter"), "14")
+        self.assertEqual(second.get("SpaceBefore"), "12")
+
+    def test_an_ordinary_text_frame_keeps_the_spacing_it_states(self):
+        # The suppression belongs to a cell, not to paragraphs at large:
+        # a frame's story is free to end on space after.
+        frame = model.TextFrame(x=0.0, y=0.0, width=200.0, height=100.0)
+        paragraph = model.Paragraph(space_before=14.0, space_after=14.0)
+        paragraph.spans.append(model.Span(text="body", size_pt=10.0))
+        frame.story.paragraphs.append(paragraph)
+        document = support.document()
+        document.pages[0].items.append(frame)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        written = next(story.iter("ParagraphStyleRange"))
+        self.assertEqual(written.get("SpaceBefore"), "14")
+        self.assertEqual(written.get("SpaceAfter"), "14")
+
+
+class EmptyCellTypeSizeTest(unittest.TestCase):
+    """An empty cell still has to state a size, or the reader picks 12pt.
+
+    Publisher records no run in a cell with no text, and a paragraph that
+    states no size is set in the reader's default -- 12pt, against rows
+    these documents build at 9. The row cannot shrink to fit, so it grows,
+    and everything below it sinks. The size the rest of the table is set
+    in is the one the empty cell would have had.
+    """
+
+    def _sizes(self, *stated):
+        """A one-row table whose cells carry the given sizes; None is empty."""
+        table = model.Table(
+            x=0.0, y=0.0, width=72.0 * len(stated), height=18.0,
+            column_widths=[72.0] * len(stated), row_heights=[18.0],
+        )
+        for column, size in enumerate(stated):
+            cell = model.TableCell(row=0, column=column)
+            paragraph = model.Paragraph()
+            if size is not None:
+                paragraph.spans.append(model.Span(text="x", size_pt=size))
+            cell.story.paragraphs.append(paragraph)
+            table.cells.append(cell)
+        document = support.document()
+        document.pages[0].items.append(table)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        return [
+            run.get("PointSize")
+            for cell in next(story.iter("Table")).iter("Cell")
+            for run in cell.iter("CharacterStyleRange")
+        ]
+
+    def test_an_empty_cell_takes_the_size_the_table_is_set_in(self):
+        self.assertEqual(self._sizes(9.0, None), ["9", "9"])
+
+    def test_the_size_most_of_the_table_uses_is_the_one_it_takes(self):
+        self.assertEqual(self._sizes(9.0, 24.0, 9.0, None), ["9", "24", "9", "9"])
+
+    def test_a_table_stating_no_size_anywhere_leaves_the_reader_its_own(self):
+        self.assertEqual(self._sizes(None, None), [None, None])
+
+
+class EmptyCellLeadingTest(unittest.TestCase):
+    """And the line spacing, for the same reason as the size.
+
+    A size on its own leaves the reader's Auto leading -- 120% of it --
+    where the table's own paragraphs are set tighter. On 1338's 41-row
+    schedules that is 1.8pt a row against rows the file builds at 9, and
+    40 empty cells turn it into 72pt of drift.
+    """
+
+    def _leadings(self, spacing, *stated):
+        """A cell given None holds no paragraph at all, which is how
+        Publisher records a cell with nothing in it."""
+        table = model.Table(
+            x=0.0, y=0.0, width=72.0 * len(stated), height=18.0,
+            column_widths=[72.0] * len(stated), row_heights=[18.0],
+        )
+        for column, size in enumerate(stated):
+            cell = model.TableCell(row=0, column=column)
+            if size is not None:
+                paragraph = model.Paragraph(line_spacing_multiple=spacing)
+                paragraph.spans.append(model.Span(text="x", size_pt=size))
+                cell.story.paragraphs.append(paragraph)
+            table.cells.append(cell)
+        document = support.document()
+        document.pages[0].items.append(table)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        found = []
+        for cell in next(story.iter("Table")).iter("Cell"):
+            leading = next(cell.iter("Leading"), None)
+            found.append(None if leading is None else leading.text)
+        return found
+
+    def test_an_empty_cell_is_led_like_the_rest_of_the_table(self):
+        # 0.75 spaces of 9pt type is 0.75 x 1.2 x 9 = 8.1pt.
+        self.assertEqual(self._leadings(0.75, 9.0, None), ["8.1", "8.1"])
+
+    def test_a_table_led_automatically_leaves_the_empty_cell_automatic(self):
+        self.assertEqual(self._leadings(None, 9.0, None), [None, None])

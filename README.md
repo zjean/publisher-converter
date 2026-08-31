@@ -978,6 +978,25 @@ These are real and deliberate, not bugs to be surprised by later.
   tables in the three newsletters go this way, and a reader looking for a
   grid in the package should be told rather than left to find the gap.
 
+  **A row keeps the height the file states.** Publisher's row heights have
+  no slack in them — a row measures the leading of the text it holds and
+  under a point more — and a row in a reader can only grow, so anything
+  written into a cell that the row cannot hold pushes every row under it
+  down and the grid sinks out of the frame it was placed in. Two things
+  used to do that, and both were the converter inventing rather than
+  reading. Paragraph space after, which libmspub reports on 351 cell
+  paragraphs of the corpus at 14pt against rows of 9 and which Publisher
+  lays out none of, is now dropped at a cell's own edges — the first
+  paragraph's space before and the last one's space after, the two that
+  have nothing to space away from — while space between two paragraphs of
+  one cell is left alone. And a cell Publisher left empty, which it records
+  with no run and often no paragraph at all, is set the way the body of its
+  own table is set instead of in the reader's own 12pt on Auto. That took
+  the worst table in the corpus from 621pt of drift to none, and 16 of the
+  18 land exactly; the two that do not are a stated 150% line spacing in
+  9.16pt rows and one cell holding three paragraphs where its rows were
+  built for two, both in `1338` and both written up in `backlog.md` §11.
+
   **Cell insets are carried**, read out of the .pub rather than from
   libmspub, which stops at a cell's row and column and marks the rest of
   the record "width/height of content + margins?" in a comment. The file

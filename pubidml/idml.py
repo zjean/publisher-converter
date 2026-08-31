@@ -1366,6 +1366,7 @@ class IdmlWriter:
                     "SingleColumnWidth": fmt(width),
                 },
             )
+        setting = _table_setting(table)
         for cell in table.cells:
             # A cell is named column first, then row.
             attributes = {
@@ -1408,10 +1409,22 @@ class IdmlWriter:
                     attributes[f"{edge}EdgeStrokeWeight"] = fmt(0.0)
                     attributes[f"{edge}EdgeStrokeColor"] = "Swatch/None"
             node = ET.SubElement(element, "Cell", attributes)
-            paragraphs = cell.story.paragraphs or [model.Paragraph()]
+            paragraphs = cell.story.paragraphs or [setting.placeholder()]
             for position, block in enumerate(paragraphs):
+                last = position == len(paragraphs) - 1
                 self._emit_paragraph(
-                    node, block, last=(position == len(paragraphs) - 1)
+                    node,
+                    block,
+                    last=last,
+                    # A cell's own edge has nothing to space away from, and
+                    # Publisher lays out none of it there: the rows of the
+                    # tables that state it measure the leading and no more.
+                    # Written out, the reader grows every row that carries
+                    # it -- downwards, out of the frame the table was placed
+                    # in. backlog.md 11.
+                    drop_space_before=(position == 0),
+                    drop_space_after=last,
+                    fill_size=setting.size,
                 )
         return _serialise(root)
 
@@ -1586,14 +1599,17 @@ class IdmlWriter:
         paragraph: model.Paragraph,
         last: bool,
         box: Optional[tuple] = None,
+        drop_space_before: bool = False,
+        drop_space_after: bool = False,
+        fill_size: Optional[float] = None,
     ) -> None:
         attributes = {
             "AppliedParagraphStyle": NO_PARAGRAPH_STYLE,
             "Justification": _JUSTIFICATION.get(paragraph.align, "LeftAlign"),
         }
-        if paragraph.space_before:
+        if paragraph.space_before and not drop_space_before:
             attributes["SpaceBefore"] = fmt(paragraph.space_before)
-        if paragraph.space_after:
+        if paragraph.space_after and not drop_space_after:
             attributes["SpaceAfter"] = fmt(paragraph.space_after)
         if paragraph.margin_left:
             attributes["LeftIndent"] = fmt(paragraph.margin_left)
@@ -1611,7 +1627,7 @@ class IdmlWriter:
         range_element = ET.SubElement(story, "ParagraphStyleRange", attributes)
         _emit_tab_stops(range_element, paragraph)
 
-        spans = paragraph.spans or [model.Span()]
+        spans = paragraph.spans or [model.Span(size_pt=fill_size)]
         for span in spans:
             self._emit_span(range_element, span, _leading_for(paragraph, span), box)
 
@@ -1760,6 +1776,64 @@ def _tab_field(name: str, kind: str, value: str) -> ET.Element:
     element = ET.Element(name, {"type": kind})
     element.text = value
     return element
+
+
+class _TableSetting(NamedTuple):
+    """How the body of a table is set, for a cell that records nothing.
+
+    Publisher records no run -- often no paragraph at all -- in a cell
+    with nothing in it, and what states no size and no leading is set in
+    the reader's own: 12pt on Auto, against rows these documents build at
+    9. A row cannot shrink to fit, so the reader's default grows it and
+    everything below sinks. How the rest of the table is set is how that
+    cell would have been set.
+    """
+
+    size: Optional[float] = None
+    line_spacing_multiple: Optional[float] = None
+    line_spacing_pt: Optional[float] = None
+
+    def placeholder(self) -> model.Paragraph:
+        """The paragraph to stand in for one the file never recorded."""
+        return model.Paragraph(
+            line_spacing_multiple=self.line_spacing_multiple,
+            line_spacing_pt=self.line_spacing_pt,
+        )
+
+
+def _table_setting(table: model.Table) -> _TableSetting:
+    """How most of a table's own text is set. Empty where it states none."""
+    counts: Dict[_TableSetting, int] = {}
+    for cell in table.cells:
+        for paragraph in cell.story.paragraphs:
+            for span in paragraph.spans:
+                if not span.size_pt:
+                    continue
+                found = _TableSetting(
+                    span.size_pt,
+                    paragraph.line_spacing_multiple,
+                    paragraph.line_spacing_pt,
+                )
+                counts[found] = counts.get(found, 0) + 1
+    if not counts:
+        return _TableSetting()
+
+    def rank(setting: _TableSetting) -> tuple:
+        # Most used first, then the tightest, then the smallest: where the
+        # table is set two ways equally, the setting that cannot make a
+        # row taller than the file states is the safer stand-in.
+        return (-counts[setting], _setting_leading(setting), setting.size or 0.0)
+
+    return min(counts, key=rank)
+
+
+def _setting_leading(setting: _TableSetting) -> float:
+    """What one line of `setting` measures, Auto resolved the way IDML does."""
+    if setting.line_spacing_pt is not None:
+        return setting.line_spacing_pt
+    size = setting.size or DEFAULT_POINT_SIZE
+    multiple = setting.line_spacing_multiple
+    return (multiple if multiple is not None else 1.0) * SINGLE_LINE_SPACING * size
 
 
 def _leading_for(paragraph: model.Paragraph, span: model.Span) -> Optional[float]:

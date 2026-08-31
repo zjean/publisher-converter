@@ -462,39 +462,77 @@ Two things are now measured rather than assumed, both by
   text sit exactly right. So `SingleRowHeight` is being read as a
   minimum, and the text is wrapping to more lines than Publisher laid out.
 
-**And the reason is missing fonts, not anything the converter does.**
-Measured on `1336`'s first table, against the leading and insets the
-converter itself writes, with every paragraph on one line:
+### It was the converter after all — **fixed**
+
+This was written up as missing fonts: 7 of the 12 families these documents
+use were not installed, Calibri is the body font of these tables,
+Publisher's row heights have no slack, and a substitute 1–2% wider turns a
+line that just fitted into two. Every part of that is true and **none of it
+was the cause.** Calibri and Carlito are both installed now and the tables
+still sank. Measured again with **every paragraph forced onto one line**,
+so wrapping cannot contribute at all, the drift was still 150 to 620pt a
+table. Wrapping was a garnish on a 620pt error.
+
+Two things the converter wrote were:
+
+- **Paragraph space after, inside a cell.** libmspub reports
+  `fo:margin-bottom: 0.1944in` — 13.9968pt — on 351 cell paragraphs of the
+  corpus, and `_emit_paragraph` wrote it out as `SpaceAfter`. The rows it
+  lands in are 9 to 11pt tall. Publisher laid out none of it: those rows
+  measure the leading plus under a point (9.7272 against 0.75 × 1.2 ×
+  10.0008 = 9.0007), and the row heights sum to the frame's stated height
+  to the point, so there is nowhere for 14pt a paragraph to go. A reader
+  that does honour it grows every row — and a row only ever grows
+  downwards, so the grid sinks out of the frame it was placed in.
+- **Nothing at all, in a cell with nothing in it.** Publisher records no
+  run — often no paragraph either — in an empty cell, and what states no
+  size and no leading is set in the reader's own: 12pt on Auto, against
+  rows these documents build at 9.
+
+Both are now written the other way. Space before is dropped on the first
+paragraph of a cell and space after on the last, the two edges with
+nothing to space away from; space *between* two paragraphs of one cell is
+left alone, since that is the job it was set for. An empty cell is set the
+way the body of its own table is set — the most used stated size, and the
+leading that goes with it, tie-broken to the tighter setting, which cannot
+make a row taller than the file states.
+
+Measured over the 18 tables the corpus writes, as the height every row
+needs against the height the file states:
 
 ```
- row  stated   needs   slack
-  0    36.04   36.14   -0.10
-  1    30.47   30.38   +0.09
-  2    37.56   38.06   -0.50
-  3    61.65   59.18   +2.47
-  4    32.32   30.38   +1.94
-  5    32.32   30.38   +1.94
-  6    32.32   15.02  +17.30   (empty)
+                    worst table   every table
+1336  7 tables    621.5 -> 0.0    all 7 exact
+1337  5 tables    112.3 -> 0.0    all 5 exact
+1338  6 tables    216.0 -> 26.5   4 of 6 exact
 ```
 
-Publisher's row heights *are* the height of the text it laid out — two
-rows are already fractionally over before anything wraps. One extra
-wrapped line costs 7.68pt at 8pt type, and no row has that to spare. So
-the geometry has no tolerance at all: a single line breaking differently
-grows the table.
+Pinned by `CellEdgeSpacingTest`, `EmptyCellTypeSizeTest` and
+`EmptyCellLeadingTest` in `tests/test_idml.py`, each of which asserts the
+guard as well as the fix: an ordinary text frame keeps the spacing it
+states, and a table that states no size or no leading anywhere still
+leaves the reader its own.
 
-Lines do break differently because **7 of the 12 font families these
-documents use are not installed**: Calibri, Monotype Corsiva, Pristina,
-Aptos, Blackadder ITC, MV Boli, Segoe Script. Calibri is the body font of
-these tables. A substitute with even 1–2% wider glyphs turns a line that
-just fitted into two.
+### What is left, and why it is not the same thing
 
-Nothing to fix in the converter: it writes the file's own numbers, and
-they are right. The fix is on the machine opening the package — install
-Calibri, or **Carlito**, which is metric-compatible with it and free, so
-the wrapping matches exactly. Worth confirming that way before spending
-anything on `AutoGrow`; the probe's four treatments are there if it turns
-out to be needed for files whose fonts genuinely cannot be had.
+Two tables in `1338`, both a stated value the file's own geometry
+contradicts rather than a value we invented:
+
+- **150% line spacing in 9.16pt rows** — `1338`'s 3 x 4 schedule, 26.5pt.
+  libmspub reports `fo:line-height: 150.0000%` on 6 paragraphs of the
+  file, all of them in two columns of this one table, and 1.5 × 1.2 ×
+  10.0008 is 18pt of leading in a 9.16pt row. Publisher plainly did not
+  render it. Overriding a leading the file states is a much larger claim
+  than declining to invent one, and it needs its own measurement — is
+  Publisher capping line spacing inside a cell, or is libmspub reading
+  the wrong field? Not worth guessing at.
+- **10.2pt on the 7 x 3 rota**, in the one cell of it that holds three
+  paragraphs against rows built for two. Note that this table's frame is
+  11.01pt taller than its rows add up to, which is about what the row
+  needs: Publisher may have grown this row itself and stated the grown
+  frame. If so the output is already right and there is nothing to fix —
+  which is exactly what `research/probe_table_placement.py` can be
+  pointed at to settle.
 
 Separately, and found while measuring the above: **a cell's bottom inset
 is zero in almost every cell of the corpus** — which was written up here
