@@ -219,11 +219,19 @@ _CELL_ARRAY = 0x02
 # entry from anything else the array happens to hold.
 _ARRAY_ENTRY = 0x00
 _CELL_FIRST_ROW, _CELL_FIRST_COLUMN = 0x01, 0x03
-# Left, top, right, bottom -- the order the same file format uses for a
-# text frame's own margins, where Escher numbers them 0x81 to 0x84. Only
-# one table in the corpus sets two sides differently, so the corpus cannot
-# tell this apart from left/right/top/bottom on its own.
-_CELL_INSETS = (0x0A, 0x0B, 0x0C, 0x0D)
+# Left, top, right, bottom -- but the fields themselves run 0x0A left,
+# 0x0B right, 0x0C top, 0x0D bottom, which is *not* the order Escher uses
+# for a text frame's own margins (0x81 to 0x84 are left, top, right,
+# bottom). Only one table in the corpus sets two sides differently, so the
+# corpus cannot tell the two orders apart on its own -- but Publisher's own
+# PDF can, and it was read rather than inferred. In `1336 kerkbode`'s 3 x 7
+# table, whose grid tracks the PDF to 0.16pt throughout, the cells carrying
+# 0x0B = 3.501pt set their first line flush with the row top (0.16pt below
+# it, where a top inset would put it 3.5pt below), and their centred
+# neighbour reports a region inset by that much on the right: its axis
+# lands 0.12pt from where a 3.501pt right inset puts it and 1.87pt from
+# where no right inset does.
+_CELL_INSETS = (0x0A, 0x0C, 0x0B, 0x0D)
 # Vertical alignment, left out where it is top -- the way every field in
 # this format is left out when it has nothing to say. Read in Publisher
 # from a table set top down column 1, centre down column 2 and bottom down

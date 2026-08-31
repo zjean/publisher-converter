@@ -551,21 +551,29 @@ class CellInsetReadingTest(unittest.TestCase):
             [round(v, 4) for v in table.insets[(0, 0)]], [2.88, 2.88, 2.88, 2.88]
         )
 
-    def test_the_sides_are_read_as_left_top_right_bottom(self):
+    def test_the_fields_run_left_right_top_bottom(self):
+        # Measured off Publisher's own PDF rather than inferred from the
+        # order Escher uses for a text frame: 0x0B is the right inset, so
+        # it lands third in a left/top/right/bottom tuple, not second.
         table = self.one_table((0, 0, {0x0A: 12700, 0x0B: 25400, 0x0C: 38100, 0x0D: 50800}))
-        self.assertEqual(table.insets[(0, 0)], (1.0, 2.0, 3.0, 4.0))
+        self.assertEqual(table.insets[(0, 0)], (1.0, 3.0, 2.0, 4.0))
 
     def test_a_side_left_out_is_zero_not_a_default(self):
+        # Zero rather than Publisher's own 0.04in: the writer emits no
+        # explicit zero anywhere in the corpus (0 of 3397 inset fields),
+        # writes all four out when they *are* the default, and in
+        # Publisher's PDF a cell stating no inset at all sets its text
+        # 0.02pt from the column edge where the default would be 2.88pt in.
         table = self.one_table((0, 0, {0x0A: 9525, 0x0B: 9525, 0x0C: 9525}))
         self.assertEqual([round(v, 4) for v in table.insets[(0, 0)]], [0.75, 0.75, 0.75, 0.0])
 
     def test_a_side_left_out_of_the_middle_is_zero_too(self):
         # The reading only holds because omission is per-side rather than a
-        # truncation of the trailing fields: a cell states the top inset and
-        # leaves the left one out. The corpus says Publisher writes cells
-        # this way; this says the reader believes it, on any machine.
+        # truncation of the trailing fields: a cell states the right inset
+        # and leaves the left one out. The corpus says Publisher writes
+        # cells this way; this says the reader believes it, on any machine.
         table = self.one_table((0, 0, {0x0B: 44450}))
-        self.assertEqual([round(v, 4) for v in table.insets[(0, 0)]], [0.0, 3.5, 0.0, 0.0])
+        self.assertEqual([round(v, 4) for v in table.insets[(0, 0)]], [0.0, 0.0, 3.5, 0.0])
 
     def test_a_cell_stating_no_side_at_all_is_four_zeros(self):
         table = self.one_table((0, 0, {}))

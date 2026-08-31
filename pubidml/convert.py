@@ -603,10 +603,11 @@ def _apply_cell_insets(
 
     Reading a cell's record settles its *rules* as well, which is why they
     are set here rather than in a pass of their own: the records state
-    padding, alignment and nothing else -- no rule, no shade, in all 1,260
-    of them across the corpus -- and a field this format leaves out is
-    absent rather than defaulted. So a cell whose record we have read is a
-    cell Publisher recorded no lines for *in that record*, and saying
+    padding, alignment, the cell's own span and two cached text extents,
+    and no rule and no shade in any of the 1,260 across the corpus -- and
+    a field this format leaves out is absent rather than defaulted. So a
+    cell whose record we have read is a cell Publisher recorded no lines
+    for *in that record*, and saying
     nothing about its edges is the one answer that is certainly wrong: the
     reader then draws its own line around every cell, in a colour and a
     weight the .pub never states, across the layout grids these documents
@@ -644,8 +645,9 @@ def _apply_cell_insets(
         log.info("cell insets read for %d table(s), %d cell(s)", tables, cells)
         document.warnings.append(
             f"{tables} table(s) written with every cell rule off: their "
-            f"{cells} cell record(s) state padding and alignment and nothing "
-            f"else, and a cell edge left unstated is one the reader rules "
+            f"{cells} cell record(s) state padding, alignment and cached "
+            f"extents but no rule anywhere in the corpus, and a cell edge "
+            f"left unstated is one the reader rules "
             f"itself. Publisher keeps cell rules and shading outside those "
             f"records, in the Escher stream (actions.md §11), and they are "
             f"not read yet — re-add any lines and fills by hand"

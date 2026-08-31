@@ -38,10 +38,15 @@ conversion becomes faithful rather than plausible.
 
 Established here, so don't re-derive it:
 
-- **Shapes are not stored in Escher.** All five sample files contain
-  **zero `Sp` records** in `Escher/EscherStm`; that stream holds only the
-  drawing-group defaults and an image store, and `EscherDelayStm` holds
-  only image blips. Shapes live in Publisher's own **`Contents`** stream.
+- **The page's shapes live in Publisher's own `Contents` stream**, which
+  is where libmspub reads them and where the wrap field is still expected.
+  ⚠️ An earlier note here went further and said `Escher/EscherStm` holds
+  **zero `Sp` records**; that was wrong, and anything reasoned from it
+  should be re-checked. `1336 kerkbode` has **509** of them, and
+  `table-styled.pub` has exactly seven more than `table-plain.pub` — the
+  per-cell rules and shades of §11. So that stream holds the drawing-group
+  defaults, an image store *and* a shape per ruled or shaded table cell;
+  only `EscherDelayStm` is just image blips.
 - The Escher wrap distances (`dxWrapDistLeft` `0x0384` … `dyWrapDistBottom`
   `0x0387`) *are* present but appear **once each** — they are document
   defaults, not per-shape values.
