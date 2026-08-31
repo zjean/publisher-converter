@@ -995,14 +995,15 @@ class TabStopApplicationTest(unittest.TestCase):
         convert._apply_tab_stops(document, self.structure(("c\td\r", ((9.0, "left"),))))
         self.assertEqual(self.paragraphs(document)[0].tab_stops, [])
 
-    def test_tabs_with_no_stop_in_a_file_stating_no_interval_are_left_alone(self):
-        # No interval means Publisher's own default of half an inch, which
-        # is the grid InDesign falls back to, so there is nothing to write
-        # and nothing to warn about.
+    def test_tabs_with_no_stop_in_a_file_stating_no_interval_are_reported(self):
+        # Nothing can be written: the file states no interval and half an
+        # inch is the reader's default rather than Publisher's, so these
+        # tabs keep the reader's grid and the report says so.
         document = self.document("a\tb", "c\td")
         convert._apply_tab_stops(document, self.structure(("a\tb\r", ()), ("c\td\r", ())))
         self.assertEqual([p.tab_stops for p in self.paragraphs(document)], [[], []])
-        self.assertEqual(document.warnings, [])
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("2 tabbed paragraph(s)", document.warnings[0])
 
     def test_a_document_whose_tabs_are_all_placed_is_not_warned_about(self):
         document = self.document("a\tb")
@@ -1094,9 +1095,22 @@ class DefaultTabGridTest(unittest.TestCase):
              model.TabStop(150.0), model.TabStop(200.0)],
         )
 
-    def test_the_ruler_runs_no_further_than_the_frame(self):
+    def test_the_ruler_covers_the_frame_rather_than_fitting_inside_it(self):
+        # 200pt of width holds two 80pt stops and 40pt of remainder. The
+        # third stop is past the edge, where Publisher's endless grid has
+        # one too; without it a tab in that last 40pt falls back on the
+        # reader's own grid, which is the error being fixed.
         _document, paragraph = self.apply(80.0, width=200.0)
-        self.assertEqual([stop.position for stop in paragraph.tab_stops], [80.0, 160.0])
+        self.assertEqual(
+            [stop.position for stop in paragraph.tab_stops], [80.0, 160.0, 240.0]
+        )
+
+    def test_a_frame_narrower_than_one_stop_still_gets_the_first(self):
+        # Both the frame and the page are narrower than the interval, so
+        # there is no multiple inside either. Publisher would send the tab
+        # to the next one regardless, off the frame and onto the next line.
+        _document, paragraph = self.apply(50.0, width=20.0, page_width=30.0)
+        self.assertEqual([stop.position for stop in paragraph.tab_stops], [50.0])
 
     def test_an_indent_neither_moves_nor_shortens_the_ruler(self):
         # A stop is measured from the frame's text edge, so every paragraph
@@ -1108,16 +1122,23 @@ class DefaultTabGridTest(unittest.TestCase):
             [50.0, 100.0, 150.0, 200.0],
         )
 
-    def test_publishers_own_default_needs_no_ruler(self):
-        # Half an inch is what InDesign falls back to anyway.
-        document, paragraph = self.apply(36.0)
+    def test_the_readers_own_grid_needs_no_ruler_and_no_warning(self):
+        # A document stating half an inch is already where InDesign puts
+        # it, so there is nothing to write and nothing to check.
+        document, paragraph = self.apply(pubfile.READER_DEFAULT_TAB_STOP)
         self.assertEqual(paragraph.tab_stops, [])
         self.assertEqual(document.warnings, [])
 
-    def test_a_file_stating_no_interval_gets_no_ruler(self):
+    def test_a_file_stating_no_interval_gets_no_ruler_but_is_reported(self):
+        # Half an inch is the reader's default, not Publisher's: all
+        # thirteen files written from scratch on the metric install state
+        # an interval of their own, so a file stating none leaves its
+        # grid unknown.
         document, paragraph = self.apply(None)
         self.assertEqual(paragraph.tab_stops, [])
-        self.assertEqual(document.warnings, [])
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("1 tabbed paragraph(s)", document.warnings[0])
+        self.assertIn("36pt", document.warnings[0])
 
     def test_a_stop_the_file_states_wins_over_the_grid(self):
         _document, paragraph = self.apply(50.0, stops=[("a\tb\r", ((17.0, "right"),))])

@@ -715,22 +715,50 @@ that meant "`SGP ` is the field", and it is what came back.
 
 Quill stream, **`SGP ` chunk**: a bare U32 length and then at most one
 block — id `0x00`, type `0x22`, a U32 of EMU. Length 4 means the block is
-absent and the document is on Publisher's own half-inch default, which is
-also InDesign's, so nothing needs writing for it. `research/default_tab.py`
-prints it beside `0x15` for every file in a folder.
+absent, and that is a document whose interval the file does not carry, not
+one known to be on half an inch: **all thirteen files created from scratch
+during the session state an interval of their own**, 28.3pt.
+Half an inch is the *reader's* default. Such a file still gets no ruler —
+there is nothing to write — but its tabbed paragraphs are now counted in
+the report instead of passed over as already correct.
+`research/default_tab.py` prints the chunk beside `0x15` for every file in
+a folder.
 
-Nothing needed building: `pubfile.read_structure` already carried the
+Little needed building: `pubfile.read_structure` already carried the
 interval as `default_tab_stop`, `convert._apply_tab_stops` already ruled
 every tabbed paragraph at that spacing, and `idml` already wrote it out.
-What changed is the warning, which no longer says the field is unconfirmed.
+What changed is the warning, which no longer says the field is
+unconfirmed; the half-inch assumption above; and the end of the ruler,
+which now covers the frame rather than fitting inside it — 8.08pt across
+a 168pt `kerkbode` column fitted 20 stops and left the last 6pt of the
+column falling back on the reader's grid, where Publisher's own grid runs
+on past the edge.
 
-### One oddity, still unexplained
+### One oddity, explained by the margins
 
 Neither number is one a person could have typed. 8.0787pt is 2.85mm
 exactly and 28.2898pt is 9.98mm — not values anybody enters in the
 Format → Tabs box. Publisher reads them back as the setting, so they
-*are* the setting; how they got there is a separate question, and not one
-that changes what the converter should do.
+*are* the setting; the question was how they got there.
+
+**The field holds hundredths of a millimetre.** 28.3pt — what all
+thirteen files written from scratch on that install state — is 9.9836mm;
+rounded to
+9.98mm and taken back to points it is 28.28976pt, which is `Lisa
+Hoogendijk` to all five digits Publisher reads back. So the interval
+survives a 0.01mm round trip somewhere on the way in, and no value in
+this field can look typed. 8.0787pt is the same shape: 2.85mm exactly.
+
+The margin reading (§2) is what makes this safe to say rather than
+guess. Both fields are EMU under the same 12700-per-point divisor, and
+that divisor is now proven on values we set ourselves: `margins-a` reads
+back 1 / 1.5 / 2 / 2.5cm exactly, and `1336 kerkbode`'s own margins come
+out at exactly 14, 15, 16 and 17mm. A file whose metric geometry decodes
+that cleanly is not a file whose tab interval is a unit error.
+
+Confirming it costs one reading: set `DefaultTabStop` to 28.3pt in
+Publisher, save, and see whether the block comes back 359280 EMU
+(9.98mm) rather than 359410. Nothing depends on it.
 
 ### Still open, and cheap
 

@@ -841,8 +841,9 @@ def _apply_tab_stops(
     file (`pubfile._default_tab_stop`) and is written out as an explicit
     ruler of left stops, because InDesign has a default grid of its own at
     half an inch and would otherwise put every one of those tabs somewhere
-    else. A document that leaves the interval unstated is already on half
-    an inch and gets no ruler.
+    else. A document that states the same half inch needs no ruler; one
+    that states no interval at all gets none either, because the file does
+    not say what grid it was on, and that is said in the report.
     """
     if structure is None:
         return
@@ -877,11 +878,23 @@ def _apply_tab_stops(
     if placed:
         log.info("tab stops read for %d paragraph(s)", placed)
     if unplaced:
-        # Only reachable while the document is already on the grid the
-        # reader would use, so there is nothing for a reader to check.
         log.info(
-            "%d paragraph(s) left on the reader's own tab grid", unplaced
+            "%d paragraph(s) left on the reader's own tab grid of %.0fpt",
+            unplaced, pubfile.READER_DEFAULT_TAB_STOP,
         )
+        # A document stating the reader's own interval is already where it
+        # wants to be and there is nothing to check. One stating no
+        # interval is a different case: half an inch is InDesign's default,
+        # not Publisher's, so the grid these tabs were on is unknown.
+        if structure.default_tab_stop is None:
+            document.warnings.append(
+                f"{unplaced} tabbed paragraph(s) left on the reader's own "
+                f"grid of {pubfile.READER_DEFAULT_TAB_STOP:.0f}pt: the file "
+                f"states no default interval of its own, and half an inch is "
+                f"the reader's default rather than Publisher's, so the grid "
+                f"they were set on is unknown — anything tabbed into "
+                f"columns is worth a look"
+            )
     if ruled:
         interval = structure.default_tab_stop
         log.info(
@@ -915,6 +928,10 @@ def _default_ruler(
     frame and an indent does not move it. An indent only makes the stops
     behind it unreachable, which costs nothing.
 
+    The ruler covers the width rather than fitting inside it: where the
+    interval does not divide the width, one more stop is written past the
+    edge, so no tab in the last part of a frame is left behind.
+
     One frame in the corpus reports a width of 5.5pt while holding 34
     paragraphs of text, so a frame too narrow to hold a single stop is
     taken as a width not worth believing and the page's width is used
@@ -926,10 +943,21 @@ def _default_ruler(
         return []
     # Nothing to carry when the document is already on the grid InDesign
     # would use: writing the ruler out anyway would only add noise.
-    if abs(interval - pubfile.PUBLISHER_DEFAULT_TAB_STOP) < 0.01:
+    if abs(interval - pubfile.READER_DEFAULT_TAB_STOP) < 0.01:
         return []
     room = width if width >= interval else fallback_width
-    count = min(int(room // interval), _MAX_RULER_STOPS)
+    count = int(room // interval)
+    # Publisher's grid has no end: a tab past the last multiple that fits
+    # goes to the next one, off the frame's edge and onto the following
+    # line. A ruler that stops at the last multiple *inside* the frame
+    # instead leaves that tab to the reader's grid, which is the error
+    # being fixed -- 8.08pt across a 168pt column of `1336 kerkbode` fits
+    # 20 stops and leaves the last 6pt of the column short. So the grid is
+    # covered rather than fitted, and the stop past the edge is one no
+    # text can reach anyway.
+    if count * interval < room - 0.001:
+        count += 1
+    count = min(count, _MAX_RULER_STOPS)
     return [
         model.TabStop(position=interval * step)
         for step in range(1, count + 1)

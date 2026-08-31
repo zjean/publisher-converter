@@ -354,8 +354,9 @@ _TAB_ALIGNMENTS = {1: "right", 2: "center"}
 # `Document.DefaultTabStop`, a per-publication value it documents as
 # points in the range 1 to 1584. The Quill stream's SGP chunk is a bare
 # U32 length and then at most one block, id 0x00 and type 0x22, holding
-# the interval in EMU; a chunk stating no block leaves the document on
-# Publisher's default of half an inch.
+# the interval in EMU; a chunk stating no block is a document whose
+# interval this file does not carry, which is not the same as one known
+# to be on the reader's own grid -- see READER_DEFAULT_TAB_STOP.
 #
 # Confirmed against Publisher itself. `? ActiveDocument.DefaultTabStop`
 # read back 8.07874 on `1336 kerkbode.pub` and 28.28976 on
@@ -367,10 +368,16 @@ _TAB_ALIGNMENTS = {1: "right", 2: "center"}
 # research/default_tab.py, which prints both side by side.
 _SECTION_CHUNK = "SGP "
 _DEFAULT_TAB_STOP, _DEFAULT_TAB_STOP_TYPE = 0x00, 0x22
-# What Publisher uses when the file states nothing, and what InDesign
-# falls back to as well -- so a document reading this needs no ruler
-# written for it.
-PUBLISHER_DEFAULT_TAB_STOP = 36.0
+# What InDesign falls back to: half an inch, its own default grid. A
+# document stating this interval needs no ruler written for it, because a
+# ruler would put every tab exactly where the reader already puts it.
+#
+# It is not Publisher's default. All thirteen files created from scratch
+# on a metric install during the Windows session state an interval of
+# their own -- 28.3pt, near enough a centimetre -- so a file stating
+# none is one whose grid we do not know rather than one known to be
+# here. `convert._apply_tab_stops` says so in the report.
+READER_DEFAULT_TAB_STOP = 36.0
 
 
 @dataclass
@@ -571,9 +578,9 @@ class FileStructure:
     #: event stream the same way WordArt is: by where the shape sits.
     gradients: List[ShapeGradient] = field(default_factory=list)
     #: The document's "Default tab stops" interval in points, where the file
-    #: states one. None means it does not, which is Publisher's own default
-    #: of half an inch -- the same grid InDesign falls back to, so there is
-    #: then nothing to carry.
+    #: states one. None means it does not, and Publisher's default is not
+    #: knowable from the file, so those tabs are left on the reader's own
+    #: grid and counted in the report.
     default_tab_stop: Optional[float] = None
     #: The document's layout guides, where the file states a readable set.
     #: Publisher keeps one set per publication, not one per page.

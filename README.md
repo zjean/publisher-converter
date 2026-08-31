@@ -721,14 +721,20 @@ These are real and deliberate, not bugs to be surprised by later.
   — "Default tab stops" in Publisher's Format → Tabs dialog, and
   `Document.DefaultTabStop` in its VBA, a per-publication value. The
   Quill stream's `SGP ` chunk states it, and each of those paragraphs is
-  written out with an explicit ruler of left stops at that spacing, out
-  to the width its tabs have to cross. Without it they would land on
-  InDesign's own default grid of half an inch, which three of the nine
-  corpus files put four and a half times too far apart.
+  written out with an explicit ruler of left stops at that spacing,
+  covering the width its tabs have to cross — one stop past the edge
+  where the interval does not divide it, because Publisher's grid has no
+  end and a ruler that stopped inside the frame would drop the last tabs
+  back on the reader's. Without it they would land on InDesign's own
+  default grid of half an inch, which three of the nine corpus files put
+  four and a half times too far apart.
 
-  A file stating no interval is on Publisher's default of half an inch
-  already, which is the grid InDesign falls back to, so nothing is
-  written for it. What the `SGP ` block means is **confirmed against
+  A file stating **no** interval gets no ruler, because there is nothing
+  to write: half an inch is the reader's default and not Publisher's —
+  all thirteen files created from scratch on the metric install state
+  an interval of their own, 28.3pt — so such a document's grid is unknown
+  rather than known to match, and its tabbed paragraphs are counted in
+  the report. What the `SGP ` block means is **confirmed against
   Publisher itself**: `? ActiveDocument.DefaultTabStop` reads back
   8.07874 on `1336 kerkbode.pub` and 28.28976 on `Lisa Hoogendijk.pub`,
   against 8.0787 and 28.2898 from the block — and 28.2898 is a value no
