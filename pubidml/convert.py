@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import os
 import re
 import tempfile
@@ -1044,6 +1045,91 @@ def _restore_gradient_ramps(
 
     if restored:
         log.info("gradient ramps read from the file for %d shape(s)", restored)
+
+
+#: A turn stated in whole degrees has no fraction to put back, and most
+#: of the corpus states whole degrees. This leaves room around that zero
+#: for the arithmetic: at 0.005 degrees the widest band in the corpus
+#: moves four hundredths of a point, end to end.
+_TURN_EPSILON = 0.005
+
+
+def _restore_floored_turns(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> None:
+    """Put back the fraction of a turn libmspub floors off a shape.
+
+    Publisher states a shape's turn in 16.16 fixed point, and libmspub
+    keeps only the whole degrees of it -- by flooring, which is what
+    reading the top half of the word amounts to. A band stating
+    -540.042145 is drawn as though the file had said -541; a shape is
+    drawn at the turn it states the other way about, so that is 181
+    degrees on the page where the file asks for 180.042. One degree out
+    is 6.5pt of drop across an A5 page, and every section-heading band in
+    the kerkbode corpus states that turn, eight to an issue.
+
+    The file settles it and Publisher's own PDF export agrees with the
+    file: in `1336 kerkbode.pdf` the band is drawn at 0.042 degrees off
+    square, not one degree, and turning libmspub's own points back by
+    `floor - stated` lands within 0.009pt of all four of Publisher's
+    corners. So the points are turned by that much and nothing else --
+    libmspub has the shape's centre and its side lengths right, only its
+    bearing wrong, and its centre is what a shape is turned about.
+
+    Only shapes the file states a gradient for can be reached: that is
+    the one record carrying both a turn and a box to match an item by.
+    It is also the whole of the damage the corpus shows, because the only
+    other fractional turns it states are on WordArt, which `_recover_wordart`
+    already takes from the file rather than from libmspub.
+    """
+    if structure is None or not structure.gradients:
+        return
+
+    turned = 0
+
+    def visit(items: List[model.Item], width: float, height: float) -> None:
+        nonlocal turned
+        for item in items:
+            if isinstance(item, model.Group):
+                visit(item.children, width, height)
+                continue
+            if not isinstance(item, model.Polygon) or len(item.points) < 3:
+                continue
+            found = structure.gradient_for(
+                item.x + item.width / 2.0 - width / 2.0,
+                item.y + item.height / 2.0 - height / 2.0,
+                item.width,
+                item.height,
+            )
+            if found is None:
+                continue
+            correction = math.floor(found.rotation) - found.rotation
+            if abs(correction) < _TURN_EPSILON:
+                continue
+            radians = math.radians(correction)
+            cos, sin = math.cos(radians), math.sin(radians)
+            centre_x = item.x + item.width / 2.0
+            centre_y = item.y + item.height / 2.0
+            item.points = [
+                (
+                    centre_x + (px - centre_x) * cos - (py - centre_y) * sin,
+                    centre_y + (px - centre_x) * sin + (py - centre_y) * cos,
+                )
+                for px, py in item.points
+            ]
+            xs = [px for px, _ in item.points]
+            ys = [py for _, py in item.points]
+            item.x, item.y = min(xs), min(ys)
+            item.width, item.height = max(xs) - item.x, max(ys) - item.y
+            turned += 1
+
+    for page in document.pages:
+        visit(page.items, page.width, page.height)
+    for master in document.masters:
+        visit(master.items, master.width, master.height)
+
+    if turned:
+        log.info("turn read from the file for %d shape(s)", turned)
 
 
 def _text_width(frame: model.TextFrame) -> float:
@@ -2230,6 +2316,9 @@ def _convert(
     _apply_page_margins(document, structure)
     # Before the WordArt pass, which takes a shape's paint as it finds it.
     _restore_gradient_ramps(document, structure)
+    # After it, so that the ramps are matched against the box libmspub
+    # drew rather than the narrower one a straightened band leaves.
+    _restore_floored_turns(document, structure)
     _recover_wordart(document, structure)
     _rasterise_metafiles(document)
     # After the master pass: threading empties the continuation frames, and

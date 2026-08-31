@@ -8,6 +8,7 @@ cannot.
 
 from __future__ import annotations
 
+import math
 import struct
 import threading
 import unittest
@@ -3050,6 +3051,114 @@ class GradientRestorationTest(unittest.TestCase):
         )
         convert._restore_gradient_ramps(document, None)
         self.assertIsNone(shape.style.gradient)
+
+
+def turned_band(turn: float, width: float = 100.0, height: float = 20.0,
+                centre=(300.0, 400.0)) -> list:
+    """A rectangle's four corners, turned about its own centre.
+
+    Clockwise, because the page measures y downwards -- the frame both
+    libmspub's points and Publisher's stated turn are in.
+    """
+    radians = math.radians(turn)
+    cos, sin = math.cos(radians), math.sin(radians)
+    return [
+        (centre[0] + x * cos - y * sin, centre[1] + x * sin + y * cos)
+        for x, y in (
+            (-width / 2, -height / 2), (width / 2, -height / 2),
+            (width / 2, height / 2), (-width / 2, height / 2),
+        )
+    ]
+
+
+def bearing(points) -> float:
+    """The turn a band is drawn at, read off its first edge."""
+    (x0, y0), (x1, y1) = points[0], points[1]
+    return math.degrees(math.atan2(y1 - y0, x1 - x0)) % 360.0
+
+
+class FlooredTurnTest(unittest.TestCase):
+    """A turn stated in fractions of a degree, drawn a whole degree out.
+
+    libmspub keeps only the whole degrees of the turn a shape states, and
+    it keeps them by flooring: a band stated at -540.042145 is drawn as
+    though it were stated at -541, which is 1.042 degrees away and shows
+    as 6.5pt of drop across an A5 page. Publisher's own PDF export of
+    `1336 kerkbode.pub` draws that band at the fraction the file states,
+    so the file is right and the shape has to be laid back on it.
+    """
+
+    #: The turn every section band in the kerkbode corpus states, and the
+    #: 181 degrees libmspub draws it at.
+    STATED = -35392202 / 65536.0
+    DRAWN = 181.0
+
+    def document(self, turn: float = DRAWN):
+        shape = model.Polygon(points=turned_band(turn), closed=True)
+        shape.x = min(p[0] for p in shape.points)
+        shape.y = min(p[1] for p in shape.points)
+        shape.width = max(p[0] for p in shape.points) - shape.x
+        shape.height = max(p[1] for p in shape.points) - shape.y
+        return model.Document(pages=[page_with(shape)]), shape
+
+    def structure(self, rotation: float = STATED):
+        # page_with makes a 612x792 page, so this centre is the band's.
+        return pubfile.FileStructure(gradients=[
+            pubfile.ShapeGradient(
+                stops=[(0.0, (102, 51, 0)), (1.0, (255, 255, 255))],
+                rotation=rotation,
+                centre_x=300.0 - 306.0, centre_y=400.0 - 396.0,
+                width=100.0, height=20.0,
+            )
+        ])
+
+    def test_the_fraction_libmspub_floors_away_is_put_back(self):
+        document, shape = self.document()
+        convert._restore_floored_turns(document, self.structure())
+        self.assertAlmostEqual(bearing(shape.points), 180.042145, places=4)
+
+    def test_the_band_keeps_the_centre_and_the_size_it_was_drawn_at(self):
+        document, shape = self.document()
+        convert._restore_floored_turns(document, self.structure())
+        centre_x = sum(p[0] for p in shape.points) / 4
+        centre_y = sum(p[1] for p in shape.points) / 4
+        self.assertAlmostEqual(centre_x, 300.0)
+        self.assertAlmostEqual(centre_y, 400.0)
+        edge = math.dist(shape.points[0], shape.points[1])
+        self.assertAlmostEqual(edge, 100.0)
+
+    def test_the_box_is_measured_again_around_the_points_it_moved(self):
+        # The IDML writer places a polygon's points about the centre of
+        # its box, so a box left describing the old corners moves the
+        # whole shape off the page position libmspub gave it.
+        document, shape = self.document()
+        convert._restore_floored_turns(document, self.structure())
+        # A 100 x 20 band laid almost flat barely leans out of its box;
+        # the 21.7pt-tall box it arrived in was a degree of lean.
+        self.assertAlmostEqual(shape.width, 100.0147, places=3)
+        self.assertAlmostEqual(shape.height, 20.0736, places=3)
+        self.assertAlmostEqual(shape.x, min(p[0] for p in shape.points))
+        self.assertAlmostEqual(shape.y, min(p[1] for p in shape.points))
+
+    def test_a_turn_stated_in_whole_degrees_is_left_alone(self):
+        # Nothing was floored away, so there is nothing to put back --
+        # and the corpus states far more of these than fractional ones.
+        document, shape = self.document(turn=180.0)
+        before = list(shape.points)
+        convert._restore_floored_turns(document, self.structure(rotation=180.0))
+        self.assertEqual(shape.points, before)
+
+    def test_a_shape_the_file_says_nothing_about_is_left_alone(self):
+        document, shape = self.document()
+        before = list(shape.points)
+        convert._restore_floored_turns(document, pubfile.FileStructure())
+        self.assertEqual(shape.points, before)
+
+    def test_no_structure_at_all_changes_nothing(self):
+        document, shape = self.document()
+        before = list(shape.points)
+        convert._restore_floored_turns(document, None)
+        self.assertEqual(shape.points, before)
 
 
 class RampDirectionTest(unittest.TestCase):
