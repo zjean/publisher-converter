@@ -639,6 +639,25 @@ def _restore_blank_pages(
     return len(structure.blank_pages)
 
 
+def _master_name(index: int) -> str:
+    """A, B, ... Z, AA, AB, ... -- the name of the nth master.
+
+    The name is the master's identity all the way out to the package: it
+    becomes the MasterSpread's `Self`, the part's filename and what every
+    page applying it names. Wrapping back onto 'A' after the 26th would
+    have two masters claim one part, and the second one written would
+    silently take the first one's pages with it.
+    """
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    name = ""
+    while True:
+        index, remainder = divmod(index, len(letters))
+        name = letters[remainder] + name
+        if not index:
+            return name
+        index -= 1
+
+
 def _apply_master_pages(
     document: model.Document, structure: Optional["pubfile.FileStructure"]
 ) -> None:
@@ -663,7 +682,6 @@ def _apply_master_pages(
         return
 
     masters: dict = {}
-    names = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     lifted = numbered = flattened = 0
 
     for index, (items, key) in enumerate(attributed):
@@ -704,7 +722,7 @@ def _apply_master_pages(
         # looks the same either way; only the editing structure differs.
         if key not in masters:
             master = model.Master(
-                name=names[len(masters) % len(names)],
+                name=_master_name(len(masters)),
                 width=page.width,
                 height=page.height,
                 items=list(move),
@@ -2040,11 +2058,11 @@ def _check_unrenderable_paths(document: model.Document) -> None:
     draw a filled bowtie across the page, so they are kept apart and the
     loss is named.
     """
-    unrenderable = 0
-    for page in document.pages:
-        for item in model._walk(page.items):
-            if _is_edge_only_fill(item):
-                unrenderable += 1
+    # Masters included: a path lifted onto one draws nothing just the same,
+    # and there it draws nothing on every page that applies it.
+    unrenderable = sum(
+        1 for item in document.all_items() if _is_edge_only_fill(item)
+    )
 
     if unrenderable:
         document.warnings.append(
@@ -2074,34 +2092,38 @@ def _check_overset_text(document: model.Document) -> None:
     A threaded story is measured against the whole chain, since that is
     what has to hold it. Checking each link on its own reported a normal
     linked article as a degenerate frame.
+
+    Master frames are measured too. Nothing is ever threaded onto a master
+    -- lifting runs before threading does -- so a master frame is always a
+    frame on its own, and a collapsed one there costs more than a collapsed
+    one on a page: it shows empty on every page applying the master.
     """
-    for page in document.pages:
-        for item in model._walk(page.items):
-            if not isinstance(item, model.TextFrame):
-                continue
-            characters = len(_frame_text(item))
-            if characters < 20:
-                continue
+    for item in document.all_items():
+        if not isinstance(item, model.TextFrame):
+            continue
+        characters = len(_frame_text(item))
+        if characters < 20:
+            continue
 
-            if item.chain_id:
-                # Only the head of a chain holds text, so this runs once per
-                # chain — measured against every link's room, at the head's
-                # type size since the others have no text left to measure.
-                size = _point_size(item)
-                capacity = sum(
-                    _frame_capacity(frame, size)
-                    for frame in document.text_chains[item.chain_id]
-                )
-            else:
-                capacity = _frame_capacity(item)
+        if item.chain_id:
+            # Only the head of a chain holds text, so this runs once per
+            # chain — measured against every link's room, at the head's
+            # type size since the others have no text left to measure.
+            size = _point_size(item)
+            capacity = sum(
+                _frame_capacity(frame, size)
+                for frame in document.text_chains[item.chain_id]
+            )
+        else:
+            capacity = _frame_capacity(item)
 
-            if characters > 10 * max(capacity, 1.0):
-                document.warnings.append(
-                    f"text frame too small for its content: {characters} characters "
-                    f"in a {item.width:.1f}x{item.height:.1f}pt frame "
-                    f"(the .pub states that size itself, so Publisher showed "
-                    f"it empty too; resize it in Affinity to read the copy)"
-                )
+        if characters > 10 * max(capacity, 1.0):
+            document.warnings.append(
+                f"text frame too small for its content: {characters} characters "
+                f"in a {item.width:.1f}x{item.height:.1f}pt frame "
+                f"(the .pub states that size itself, so Publisher showed "
+                f"it empty too; resize it in Affinity to read the copy)"
+            )
 
 
 def convert(

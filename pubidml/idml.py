@@ -615,17 +615,45 @@ class IdmlWriter:
         )
         return _serialise(root)
 
+    def _master_sides(self, master: model.Master) -> List[float]:
+        """Where this master's page or pages sit in its own spread.
+
+        A master's items are carried onto a page by `MasterPageTransform`,
+        which InDesign writes as the identity -- and only the identity is
+        right, because a master page in a real IDML sits at exactly the
+        offset of the pages applying it. So the master has to be laid out
+        the way those pages are: centred on the spread origin where the
+        document is single-page, and on the side of the spine the pages
+        using it are on where it is facing.
+
+        A master applied to both sides gets a page on each, which is what
+        InDesign's own two-page master spread is. Its content is written
+        twice, once per side, since a running head on a facing master
+        really is two frames.
+        """
+        if not self.facing_pages:
+            return [-master.width / 2.0]
+        sides = {
+            self._page_offset_x(index + 1, master.width)
+            for index, page in enumerate(self.doc.pages)
+            if page.master == master.name
+        }
+        # A master no page applies has no side to take: it is written
+        # centred so the part is still well-formed and openable.
+        return sorted(sides) or [-master.width / 2.0]
+
     def _master_spread_part(self, master: model.Master, story_parts: List[str]) -> bytes:
         """A MasterSpread holding content Publisher kept once, not per page.
 
-        Same shape as a Spread, and its items keep the page coordinates
-        they already had: a master serves only pages of its own size, so
-        the centred origin is identical and nothing needs moving.
+        Same shape as a Spread, and its items keep their page coordinates:
+        a master serves only pages of its own size, so the offset of the
+        page it is laid out on (`_master_sides`) is all they need.
         """
         root = ET.Element(
             "idPkg:MasterSpread", {"xmlns:idPkg": IDPKG, "DOMVersion": DOM_VERSION}
         )
         identifier = self.master_id(master.name)
+        sides = self._master_sides(master)
         spread = ET.SubElement(
             root,
             "MasterSpread",
@@ -635,32 +663,39 @@ class IdmlWriter:
                 "NamePrefix": master.name,
                 "BaseName": "Master",
                 "ShowMasterItems": "true",
-                "PageCount": "1",
+                "PageCount": str(len(sides)),
                 "OverriddenPageItemProps": "",
                 "ItemTransform": "1 0 0 1 0 0",
             },
         )
-        half_w, half_h = master.width / 2.0, master.height / 2.0
-        page_element = ET.SubElement(
-            spread,
-            "Page",
-            {
-                "Self": f"{identifier}_page",
-                "Name": master.name,
-                "AppliedMaster": "n",
-                "OverrideList": "",
-                "GeometricBounds": f"0 0 {fmt(master.height)} {fmt(master.width)}",
-                "ItemTransform": f"1 0 0 1 {fmt(-half_w)} {fmt(-half_h)}",
-                "AppliedTrapPreset": "TrapPreset/$ID/kDefaultTrapStyleName",
-                "GridStartingPoint": "TopOutside",
-                "UseMasterGrid": "true",
-            },
-        )
-        if master.margins is not None:
-            _emit_margins(page_element, master.margins, master.width)
+        half_h = master.height / 2.0
+        for position, offset_x in enumerate(sides, start=1):
+            page_element = ET.SubElement(
+                spread,
+                "Page",
+                {
+                    "Self": f"{identifier}_page{position}",
+                    "Name": master.name,
+                    "AppliedMaster": "n",
+                    "OverrideList": "",
+                    # Identity, and identity is only true because the page
+                    # above is on the same side of the spine as every page
+                    # applying it. Left out, a reader has no statement of
+                    # where master content lands at all.
+                    "MasterPageTransform": "1 0 0 1 0 0",
+                    "GeometricBounds": f"0 0 {fmt(master.height)} {fmt(master.width)}",
+                    "ItemTransform": f"1 0 0 1 {fmt(offset_x)} {fmt(-half_h)}",
+                    "AppliedTrapPreset": "TrapPreset/$ID/kDefaultTrapStyleName",
+                    "GridStartingPoint": "TopOutside",
+                    "UseMasterGrid": "true",
+                },
+            )
+            if master.margins is not None:
+                _emit_margins(page_element, master.margins, master.width)
         page = model.Page(width=master.width, height=master.height)
-        for item in _flatten(master.items):
-            self._emit_item(spread, item, page, story_parts)
+        for offset_x in sides:
+            for item in _flatten(master.items):
+                self._emit_item(spread, item, page, story_parts, offset_x)
         return _serialise(root)
 
     def _designmap_part(
@@ -982,6 +1017,11 @@ class IdmlWriter:
                     "Name": str(number),
                     "AppliedMaster": self.master_id(page.master) if page.master else "n",
                     "OverrideList": "",
+                    # The matrix that carries the master's items onto this
+                    # page. Every Page in an InDesign-written package states
+                    # it, and the master spread is laid out so that the
+                    # identity is the true one (`_master_sides`).
+                    "MasterPageTransform": "1 0 0 1 0 0",
                     "GeometricBounds": f"0 0 {fmt(page.height)} {fmt(page.width)}",
                     "ItemTransform": (
                         f"1 0 0 1 {fmt(offset_x)} {fmt(-page.height / 2.0)}"

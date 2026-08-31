@@ -843,6 +843,64 @@ would have inherited the bug.
 
 ---
 
+## 15. Where master content lands, which was never stated — **done**
+
+§14 fixed *which* master a page applies. This is the other half: what the
+package says about where that master's content goes once a page applies it.
+It said nothing.
+
+**`MasterPageTransform` was missing entirely.** It is the matrix that
+carries a master page's items onto a page applying it, and an
+InDesign-written package states it on *every* `Page`, in `Spreads/` and
+`MasterSpreads/` alike — checked against a real InDesign 17.0 export, where
+it reads `1 0 0 1 0 0` throughout. We wrote no such attribute anywhere, so
+a reader had nothing to resolve master placement against and whatever it
+defaults to was the answer.
+
+**And the identity would not have been the true matrix anyway.** The master
+page was written centred on the spread origin, `1 0 0 1 -w/2 -h/2`. That is
+right for a single-page document, where every page is centred too. Laid out
+facing it is wrong: a recto sits at `0` and a verso at `-w`, so the master
+sat a **half page** from the pages taking their content from it — 210.5pt
+on A5, and in opposite directions on the two sides of a spread. In the
+reference export the two pages of a facing master spread are at
+`-566.93` and `0`, byte-identical to the verso and recto offsets of the
+pages applying them, which is *why* the identity is correct there.
+
+**Landed.** `idml.IdmlWriter._master_sides` reads the offsets of the pages
+that actually apply a master and lays the master spread out on those:
+centred where the document is single-page, one page on the side of the
+spine its pages are on where it is facing, and — where pages of both sides
+apply it — a page on each, which is InDesign's own two-page master spread.
+The content is written once per side, since a running head on a facing
+master really is two frames. `MasterPageTransform` is now written as the
+identity on every `Page`, and the identity is true because of the above.
+
+Two smaller things went with it:
+
+- **A 27th master silently ate the first.** The name came from
+  `names[len(masters) % 26]`, and the name is the master's identity out to
+  the `Self` id and the part filename, so masters 1 and 27 claimed one part
+  — 27 masters in, 26 parts out, and the pages naming it got the other's
+  content. `convert._master_name` now counts A…Z, AA, AB.
+- **Two warning passes could not see a master.** `_check_unrenderable_paths`
+  and `_check_overset_text` walked `document.pages` only, so a path that
+  draws nothing or a frame collapsed to nothing went unreported the moment
+  the master pass moved it — and on a master it is wrong on every page
+  applying it. Both walk `document.all_items()` now, which is what the
+  rest of the checks already did.
+
+**What it changes on the corpus: nothing, and that is expected.** Every
+master in every sample holds exactly one shape, a page-number footer, and
+those deliberately stay on their page — so no file here emits a
+`MasterSpread` at all (0 in all 32 packages in `converted/`). Reconverting
+`1338 kerkbode.pub` gives a package byte-identical to the old one apart
+from the added `MasterPageTransform`. The path is still exercised only by
+`research/probe_masterspread.py`, which now builds the facing case too and
+says what to read off it in Affinity.
+
+---
+
 ## Not worth doing
 
 Recorded so they don't get re-investigated:

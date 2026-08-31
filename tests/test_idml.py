@@ -2307,3 +2307,132 @@ class CellLeadingAboveSingleTest(unittest.TestCase):
         # 95 paragraphs of MISSAL MARIANA E PEDRO are set at 1.5, 2 and 2.5
         # spaces and run to many lines, where the spacing is the layout.
         self.assertEqual(self._leading(1.5, in_cell=False), "18")
+
+
+class MasterSpreadGeometryTest(unittest.TestCase):
+    """Where master content lands, which is a statement or it is a guess.
+
+    `MasterPageTransform` is the matrix that carries a master's items onto
+    a page applying it, and InDesign writes it on every Page in a package.
+    It was missing here entirely, which left a reader nothing to resolve
+    master placement against, and the master page was centred on the
+    spread origin while the pages applying it -- laid out facing -- sat a
+    half page either side of the spine. The two go together: the identity
+    matrix is the right one only when the master page is on the same side
+    of the spine as the pages taking their content from it.
+    """
+
+    def _package(self, pages: int, facing: bool, master_of=lambda n: "A"):
+        document = model.Document(title="masters")
+        master = model.Master(name="A", width=421.0, height=595.0)
+        master.items.append(
+            model.Rectangle(
+                x=40.0, y=560.0, width=340.0, height=2.0,
+                style=model.GraphicStyle(fill=(0, 0, 0)),
+            )
+        )
+        document.masters.append(master)
+        for number in range(1, pages + 1):
+            page = model.Page(width=421.0, height=595.0)
+            page.master = master_of(number)
+            document.pages.append(page)
+
+        destination = Path(tempfile.mkdtemp()) / "doc.idml"
+        idml.IdmlWriter(
+            document, image_dir_name="doc_images", facing_pages=facing
+        ).write(destination)
+        with zipfile.ZipFile(destination) as archive:
+            spread = ET.fromstring(
+                archive.read("MasterSpreads/MasterSpread_masterA.xml")
+            ).find("MasterSpread")
+            pages_by_spread = [
+                ET.fromstring(archive.read(name)).find("Spread")
+                for name in sorted(
+                    n for n in archive.namelist() if n.startswith("Spreads/")
+                )
+            ]
+        return spread, [p for s in pages_by_spread for p in s.iter("Page")]
+
+    @staticmethod
+    def _offsets(elements):
+        return [element.get("ItemTransform").split()[4] for element in elements]
+
+    def test_every_page_states_the_transform_that_carries_master_content(self):
+        master, pages = self._package(2, facing=False)
+        for element in list(master.iter("Page")) + pages:
+            self.assertEqual(element.get("MasterPageTransform"), "1 0 0 1 0 0")
+
+    def test_a_single_page_master_stays_centred_on_the_spread_origin(self):
+        master, pages = self._package(2, facing=False)
+        self.assertEqual(master.get("PageCount"), "1")
+        self.assertEqual(self._offsets(master.iter("Page")), ["-210.5"])
+        self.assertEqual(self._offsets(pages), ["-210.5", "-210.5"])
+
+    def test_a_master_only_versos_apply_sits_where_a_verso_sits(self):
+        master, _ = self._package(
+            4, facing=True, master_of=lambda n: "A" if n % 2 == 0 else None
+        )
+        self.assertEqual(master.get("PageCount"), "1")
+        self.assertEqual(self._offsets(master.iter("Page")), ["-421"])
+
+    def test_a_master_only_rectos_apply_sits_where_a_recto_sits(self):
+        master, _ = self._package(
+            4, facing=True, master_of=lambda n: "A" if n % 2 else None
+        )
+        self.assertEqual(master.get("PageCount"), "1")
+        self.assertEqual(self._offsets(master.iter("Page")), ["0"])
+
+    def test_a_master_both_sides_apply_gets_a_page_on_each(self):
+        # What InDesign's own facing master spread is: verso first, recto
+        # second, each at the offset of the pages taking content from it.
+        master, pages = self._package(4, facing=True)
+        self.assertEqual(master.get("PageCount"), "2")
+        self.assertEqual(self._offsets(master.iter("Page")), ["-421", "0"])
+        self.assertEqual(set(self._offsets(pages)), {"-421", "0"})
+
+    def test_content_a_facing_master_carries_is_written_once_per_side(self):
+        # A running head on a facing master really is two frames, and each
+        # has to sit on its own page: one copy centred on the spine would
+        # be a half page out on every page applying it.
+        master, _ = self._package(4, facing=True)
+        self.assertEqual(
+            self._offsets(master.iter("Rectangle")), ["-211", "210"]
+        )
+
+    def test_a_master_no_page_applies_is_still_written_openable(self):
+        master, _ = self._package(2, facing=True, master_of=lambda n: None)
+        self.assertEqual(master.get("PageCount"), "1")
+        self.assertEqual(self._offsets(master.iter("Page")), ["-210.5"])
+
+
+class MasterNameTest(unittest.TestCase):
+    """A master's name is its identity out to the part filename."""
+
+    def test_the_first_twenty_six_are_the_alphabet(self):
+        self.assertEqual(
+            [convert._master_name(n) for n in (0, 1, 25)], ["A", "B", "Z"]
+        )
+
+    def test_the_twenty_seventh_does_not_wrap_back_onto_the_first(self):
+        # It used to, through `% 26`, and two masters then claimed one
+        # `Self`, one part name and one set of pages: the second written
+        # silently took the first's pages with it.
+        self.assertEqual(
+            [convert._master_name(n) for n in (26, 27, 51, 52)],
+            ["AA", "AB", "AZ", "BA"],
+        )
+
+    def test_no_two_masters_in_a_document_share_a_part(self):
+        document = model.Document(title="many masters")
+        for index in range(30):
+            document.masters.append(
+                model.Master(
+                    name=convert._master_name(index), width=612.0, height=792.0,
+                    items=[model.Rectangle(x=float(index), y=10.0,
+                                           width=50.0, height=50.0)],
+                )
+            )
+        document.pages.append(model.Page(width=612.0, height=792.0))
+        with zipfile.ZipFile(write_package(document)) as archive:
+            parts = [n for n in archive.namelist() if n.startswith("MasterSpreads/")]
+        self.assertEqual(len(parts), 30)

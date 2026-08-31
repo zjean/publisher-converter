@@ -670,9 +670,17 @@ These are real and deliberate, not bugs to be surprised by later.
   lead, not a reading; `actions.md` §12 has the controlled pair that would
   settle it.
 
-  Master spreads stay one page wide either way; whether Affinity applies a
-  single-page master to a facing spread is worth a look the first time you
-  use this on a document with a running header.
+  A master spread follows the layout: one page wide where the document is
+  single-page, and where it is facing, a page on each side of the spine
+  that pages apply it from — which is what InDesign's own facing master
+  spread is. That matters because master content is carried onto a page by
+  `MasterPageTransform`, written as the identity, and the identity is only
+  the true matrix when the master page sits at the same offset as the
+  pages taking their content from it. Content on a facing master is
+  therefore written once per side, since a running head on one really is
+  two frames. `research/probe_masterspread.py` builds both cases and says
+  what to read off each; it is still the only thing that exercises the
+  path, because no `.pub` in the corpus does.
 
   What the newsletters' own sheet size confirms is what this is *for*.
   `1336` and `1338` export from Publisher as fourteen sheets of

@@ -360,6 +360,18 @@ class DegeneratePathTest(unittest.TestCase):
         convert._check_unrenderable_paths(document)
         self.assertEqual(document.warnings, [])
 
+    def test_a_path_lifted_onto_a_master_is_reported_too(self):
+        # The pass walked pages only, so a path the master pass had moved
+        # went quiet -- and on a master it draws nothing on every page
+        # applying it, which is the loss most worth naming.
+        document = self._document(self.TWO_RULES, fill=(0, 0, 0))
+        document.masters.append(
+            model.Master(name="A", items=list(document.pages[0].items))
+        )
+        document.pages[0].items.clear()
+        convert._check_unrenderable_paths(document)
+        self.assertEqual(len(document.warnings), 1, document.warnings)
+
 
 class GradientLossTest(unittest.TestCase):
     """A ramp that could not be written as one has to be said out loud.
@@ -532,6 +544,21 @@ class ThreadDuplicateStoriesTest(unittest.TestCase):
             *support.text_frame(self.LONG, width="0.08in", height="0.08in")
         )
         convert._thread_duplicate_stories(document)
+        convert._check_overset_text(document)
+
+        self.assertEqual(len([w for w in document.warnings if "too small" in w]), 1)
+
+    def test_a_collapsed_frame_on_a_master_is_reported(self):
+        # Nothing is ever threaded onto a master, so a frame there is
+        # always measured on its own -- and it shows empty on every page
+        # applying the master rather than on one.
+        document = support.document(
+            *support.text_frame(self.LONG, width="0.08in", height="0.08in")
+        )
+        document.masters.append(
+            model.Master(name="A", items=list(document.pages[0].items))
+        )
+        document.pages[0].items.clear()
         convert._check_overset_text(document)
 
         self.assertEqual(len([w for w in document.warnings if "too small" in w]), 1)
