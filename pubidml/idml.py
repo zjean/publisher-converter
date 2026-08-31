@@ -274,7 +274,11 @@ def _content_matrix(rotation_deg: float, width: float, height: float) -> str:
     return f"{fmt(cos)} {fmt(sin)} {fmt(-sin)} {fmt(cos)} {fmt(tx)} {fmt(ty)}"
 
 
-def _ramp_angle(angle_deg: float) -> float:
+def _ramp_angle(
+    angle_deg: float,
+    width: float = 0.0,
+    height: float = 0.0,
+) -> float:
     """One ramp's angle, turned from Publisher's convention into IDML's.
 
     The two sit a quarter turn apart. Publisher's unturned ramp runs up the
@@ -285,12 +289,51 @@ def _ramp_angle(angle_deg: float) -> float:
     to read as a colour mistake rather than a rotation: the panel Publisher
     shades cream at the top down to white came out cream at the left.
 
-    Only the quarter turn is verified. Every angle the corpus states is a
-    half turn or none, so which way a ramp between those turns is not
-    something these files can settle, and the sign is left as libmspub
-    reports it rather than guessed at.
+    A quarter turn is the whole of it only while the ramp lies along an
+    edge. **A diagonal one lies along the shape's own corner-to-corner
+    line**, so its angle on the page follows the box's proportions and is
+    45 degrees only on a square. Publisher's own PDF export settles it:
+    across the 82.3 by 62.0 panel on page 11 of `1336 kerkbode.pub` it
+    draws the ramp at 53.0 degrees, which is that box's diagonal exactly,
+    where a plain quarter turn puts it 82 degrees away.
+
+    So the stated angle is read in the shape's *square* and then stretched
+    to the box, which is what laying the bands along the diagonal amounts
+    to: a direction stretched by (w, h) has its bands' normal stretched by
+    the inverse, leaving `atan2(w sin, h cos)`. On an upright ramp the
+    stretch cancels and the answer is the plain quarter turn to the last
+    decimal, which is what keeps the corpus's other 22 ramps where they
+    were.
+
+    Two things here are measured and one is not. Measured: the diagonal
+    follows the box, and which way round the ramp then runs -- the WordArt
+    banner on that page states its ramp as a sampled table, dark navy at
+    the low end, and the direction below reproduces it. Not measured: a
+    ramp's *sense* comes from the angle's magnitude, because the corpus's
+    two diagonals lie on one line. The file states them as 135 and -45,
+    which is one line half a turn apart, and `_FILL_ANGLE_FIXUPS` splits
+    that line in two on the way through libmspub -- so the mirrored
+    diagonal, the one no file here states, is still a guess.
+
+    `research/gradient_angle.py` is the measurement, and rerunning it
+    against a .pub with the other diagonal in it is what would settle the
+    rest.
     """
-    return model._fold_angle(angle_deg + 90.0)
+    # The quarter turn on its own: the right line for an upright ramp, and
+    # the right way along it for either.
+    plain = model._fold_angle(angle_deg + 90.0)
+    if not width or not height:
+        # A text run has no box of its own to lay a diagonal across.
+        return plain
+    square = math.radians(abs(angle_deg) - 90.0)
+    turned = math.degrees(
+        math.atan2(width * math.sin(square), height * math.cos(square))
+    )
+    # The stretch settles the line, not which end of it the ramp starts
+    # from; that stays as the quarter turn states it.
+    if abs(model._fold_angle(turned - plain)) > 90.0:
+        turned += 180.0
+    return model._fold_angle(turned)
 
 
 def _ramp_geometry(angle_deg: float, width: float, height: float):
@@ -1094,7 +1137,7 @@ class IdmlWriter:
         }
         gradient = item.style.gradient
         if gradient is not None and gradient in self.gradient_ids:
-            angle = _ramp_angle(gradient.angle)
+            angle = _ramp_angle(gradient.angle, item.width, item.height)
             attributes["GradientFillAngle"] = fmt(angle)
             # An angle says which way the ramp runs, not how far, and a
             # ramp with no distance to run is not a ramp: everything before
@@ -1708,7 +1751,7 @@ class IdmlWriter:
             self.gradient_ids.get(span.gradient) if span.gradient is not None else None
         )
         if reference:
-            angle = _ramp_angle(span.gradient.angle)
+            angle = _ramp_angle(span.gradient.angle, *(box or ()))
             attributes["FillColor"] = reference
             attributes["GradientFillAngle"] = fmt(angle)
             # A shape gets its ramp geometry from its own bounds; a run has

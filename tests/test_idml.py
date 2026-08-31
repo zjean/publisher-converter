@@ -992,6 +992,60 @@ class GradientFillTest(unittest.TestCase):
         self.assertEqual(rectangle.get("GradientFillAngle"), "-90")
         self.assertEqual(rectangle.get("GradientFillStart"), "0 -25")
 
+    @staticmethod
+    def _box(gradient, width, height) -> model.Document:
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        document.pages[0].items.append(
+            model.Rectangle(
+                x=10.0, y=10.0, width=width, height=height,
+                style=model.GraphicStyle(
+                    fill=gradient.stops[0].color, gradient=gradient
+                ),
+            )
+        )
+        return document
+
+    def _angle_of(self, gradient, width, height) -> str:
+        _, spread = self._parts(self._box(gradient, width, height))
+        return next(spread.iter("Rectangle")).get("GradientFillAngle")
+
+    def test_a_diagonal_ramp_lies_along_the_shapes_own_diagonal(self):
+        # Publisher's diagonal shade is not a fixed 45 degrees on the page.
+        # It lays the bands of colour along the shape's own corner-to-corner
+        # line, so the angle follows the box's proportions, and only on a
+        # square do the two agree. Publisher's own PDF of the corpus settles
+        # it: on the 82.3 by 62.0 panel of page 11 it draws the ramp at
+        # 53.0 degrees, which is that box's diagonal and not 45.
+        # `research/gradient_angle.py` is the measurement.
+        ramp = self._ramp((0, 0, 0), (255, 255, 255), angle=-135.0)
+        # On a box twice as wide as it is tall the diagonal is at
+        # atan2(100, 50) = 63.434949, and the ramp runs along it -- stated
+        # from the far end, which is the same line half a turn round.
+        self.assertEqual(self._angle_of(ramp, 100.0, 50.0), "-116.565051")
+
+    def test_a_diagonal_ramp_turns_with_the_shapes_proportions(self):
+        # The same ramp on a box of different proportions is a different
+        # angle, which is the whole of the bug: every ramp in the corpus
+        # bar two is a half turn or none, where the box makes no
+        # difference, so the two diagonals were the only ones out.
+        ramp = self._ramp((0, 0, 0), (255, 255, 255), angle=-135.0)
+        self.assertEqual(self._angle_of(ramp, 50.0, 100.0), "26.565051")
+
+    def test_a_square_shape_keeps_the_plain_diagonal(self):
+        # The correction has to vanish where there is nothing to correct.
+        ramp = self._ramp((0, 0, 0), (255, 255, 255), angle=-135.0)
+        self.assertEqual(self._angle_of(ramp, 60.0, 60.0), "45")
+
+    def test_an_upright_ramp_ignores_the_shapes_proportions(self):
+        # The guard on the change: a ramp that runs up or across a shape
+        # lies along an edge, not a diagonal, so no proportion can turn it
+        # and all 22 of the corpus's upright ramps have to come out exactly
+        # as they did before.
+        ramp = self._ramp((0, 0, 0), (255, 255, 255))
+        for width, height in ((100.0, 50.0), (50.0, 100.0), (60.0, 60.0)):
+            with self.subTest(width=width, height=height):
+                self.assertEqual(self._angle_of(ramp, width, height), "90")
+
     def test_the_ramp_is_given_the_distance_to_run_over(self):
         # An angle on its own leaves the ramp no distance, and a ramp with
         # no distance is not a ramp: everything before the start point
@@ -1219,10 +1273,14 @@ class TextGradientTest(unittest.TestCase):
         )
         run = next(story.iter("CharacterStyleRange"))
         self.assertEqual(run.get("FillColor"), "Gradient/G_1")
-        # A run's ramp turns through the same quarter as a shape's: the two
-        # conventions differ by where nothing points, not by what carries
-        # the ramp.
-        self.assertEqual(run.get("GradientFillAngle"), "135")
+        # A run's ramp turns exactly as a shape's does, this one included:
+        # a diagonal lies along the diagonal of the band the headline sits
+        # in, so the frame's 200 by 40 turns it well past the 135 a plain
+        # quarter turn would give. That is the WordArt case the corpus
+        # measures -- Publisher draws the banner on page 11 of `1336
+        # kerkbode.pub` at 81.1 degrees where a quarter turn puts it 36
+        # degrees away.
+        self.assertEqual(run.get("GradientFillAngle"), "101.309932")
 
     def test_every_stop_colour_reaches_the_swatches(self):
         graphic, _ = self._parts(
