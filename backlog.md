@@ -513,26 +513,50 @@ guard as well as the fix: an ordinary text frame keeps the spacing it
 states, and a table that states no size or no leading anywhere still
 leaves the reader its own.
 
-### What is left, and why it is not the same thing
+### The two `1338` tables this left — **both answered, from the PDF**
 
-Two tables in `1338`, both a stated value the file's own geometry
-contradicts rather than a value we invented:
+They were written up here as needing their own measurement. The
+measurement turned out to be sitting in `files/experiments`: Publisher's
+own PDF export of `1338`, which is a **booklet imposition** — 14 sheets of
+914 x 681pt, sheet *n* holding two non-consecutive pages, so page 7 is the
+right half of sheet 7. Reading a table off it is reading what Publisher
+laid out.
 
-- **150% line spacing in 9.16pt rows** — `1338`'s 3 x 4 schedule, 26.5pt.
-  libmspub reports `fo:line-height: 150.0000%` on 6 paragraphs of the
-  file, all of them in two columns of this one table, and 1.5 × 1.2 ×
-  10.0008 is 18pt of leading in a 9.16pt row. Publisher plainly did not
-  render it. Overriding a leading the file states is a much larger claim
-  than declining to invent one, and it needs its own measurement — is
-  Publisher capping line spacing inside a cell, or is libmspub reading
-  the wrong field? Not worth guessing at.
-- **10.2pt on the 7 x 3 rota**, in the one cell of it that holds three
-  paragraphs against rows built for two. Note that this table's frame is
-  11.01pt taller than its rows add up to, which is about what the row
-  needs: Publisher may have grown this row itself and stated the grown
-  frame. If so the output is already right and there is nothing to fix —
-  which is exactly what `research/probe_table_placement.py` can be
-  pointed at to settle.
+**Spacing above single does not raise the first line.** `1338`'s page-7
+agenda states `fo:line-height: 150.0000%` on its date and time cells — 6
+paragraphs, the only ones in the file — and 1.5 x 1.2 x 10.0008 is 18pt of
+leading in a row the grid gives 9.16pt. Publisher's PDF puts the three
+rows **12.12 and 12.24pt** apart: Calibri's natural line, neither the
+150% nor the 9.16. So Publisher opens spacing above single *between*
+lines and not above the first one, and a cell holding one line is as tall
+as that line however wide the spacing is set. IDML cannot say that — its
+leading is every line — so a cell paragraph led above single is now
+written at the natural line instead, and the table renders 36.0pt in the
+35.81pt frame Publisher gives it, where it rendered 54pt before and ran
+into the block beneath. Spacing *below* single is left alone: Publisher
+does compress a single line, and that is exactly what `1336`'s 9.7pt rows
+on 75% cells are. `CellLeadingAboveSingleTest` pins all three cases.
+
+The 101 paragraphs in the corpus that are led above single **outside** a
+cell — 95 of them in `MISSAL MARIANA E PEDRO`, at 1.5, 2 and 2.5 spaces —
+are untouched. They run to many lines, where the spacing is the layout,
+and nothing measures their box the way a row measures a cell's.
+
+**And the 7 x 3 rota was never wrong.** It was recorded here as 10.2pt of
+growth in the one cell holding three paragraphs against rows built for
+two. Its frame is 155.4pt against a grid of 144.4, and it renders 154.6 —
+Publisher grew that row itself and stated the grown frame, so the output
+was already right and the 10.2 was **the yardstick being wrong, not the
+table**. Growth is only a defect measured against the *frame*; measured
+against the grid it also counts the growth Publisher did on purpose.
+`research/probe_table_placement.py` no longer has to settle it.
+
+Still short of its frame, and the opposite complaint: `1338`'s two
+41-row and 39-row lists render 21.9 and 21.8pt **less** than the frames
+they are given, about 0.53pt a row. Nothing overflows and nothing moves,
+so it reads as slightly tight text rather than a misplacement — but it is
+the same question from the other side, and the PDF can answer it the same
+way when it is worth the time.
 
 Separately, and found while measuring the above: **a cell's bottom inset
 is zero in almost every cell of the corpus** — which was written up here

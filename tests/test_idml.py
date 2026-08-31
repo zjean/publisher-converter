@@ -2204,3 +2204,54 @@ class EmptyCellLeadingTest(unittest.TestCase):
 
     def test_a_table_led_automatically_leaves_the_empty_cell_automatic(self):
         self.assertEqual(self._leadings(None, 9.0, None), [None, None])
+
+
+class CellLeadingAboveSingleTest(unittest.TestCase):
+    """Spacing above single does not raise the first line of a cell.
+
+    Publisher opens the extra space *between* lines, so a cell holding one
+    line is as tall as that line however wide the spacing is set. Measured
+    on 1338's page-7 agenda, whose date and time cells state 150% at 10pt:
+    Publisher's own PDF puts the three rows 12.12 and 12.24pt apart -- the
+    natural line for Calibri -- against the 18pt a reader gives 150% of
+    1.2 x 10, which is what turns a 36pt table into a 54pt one and pushes
+    everything under it down the page. backlog.md 11.
+    """
+
+    def _leading(self, multiple, in_cell):
+        paragraph = model.Paragraph(line_spacing_multiple=multiple)
+        paragraph.spans.append(model.Span(text="25-7-2026", size_pt=10.0))
+        document = support.document()
+        if in_cell:
+            table = model.Table(
+                x=0.0, y=0.0, width=72.0, height=12.0,
+                column_widths=[72.0], row_heights=[12.0],
+            )
+            cell = model.TableCell(row=0, column=0)
+            cell.story.paragraphs.append(paragraph)
+            table.cells.append(cell)
+            document.pages[0].items.append(table)
+        else:
+            frame = model.TextFrame(x=0.0, y=0.0, width=200.0, height=50.0)
+            frame.story.paragraphs.append(paragraph)
+            document.pages[0].items.append(frame)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        found = next(story.iter("Leading"), None)
+        return None if found is None else found.text
+
+    def test_a_cell_led_above_single_takes_the_natural_line(self):
+        # 1.5 x 1.2 x 10 is 18pt, and Publisher lays out 12.
+        self.assertEqual(self._leading(1.5, in_cell=True), "12")
+
+    def test_a_cell_led_below_single_keeps_the_spacing_it_states(self):
+        # Compression *is* applied to a single line: 1336's agenda rows are
+        # 9.7pt on cells stating 75% of 10pt type, which is 9pt and its
+        # insets. Only spacing above single is the special case.
+        self.assertEqual(self._leading(0.75, in_cell=True), "9")
+
+    def test_a_text_frame_keeps_the_spacing_it_states(self):
+        # 95 paragraphs of MISSAL MARIANA E PEDRO are set at 1.5, 2 and 2.5
+        # spaces and run to many lines, where the spacing is the layout.
+        self.assertEqual(self._leading(1.5, in_cell=False), "18")

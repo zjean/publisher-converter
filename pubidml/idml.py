@@ -1416,14 +1416,8 @@ class IdmlWriter:
                     node,
                     block,
                     last=last,
-                    # A cell's own edge has nothing to space away from, and
-                    # Publisher lays out none of it there: the rows of the
-                    # tables that state it measure the leading and no more.
-                    # Written out, the reader grows every row that carries
-                    # it -- downwards, out of the frame the table was placed
-                    # in. backlog.md 11.
-                    drop_space_before=(position == 0),
-                    drop_space_after=last,
+                    first=(position == 0),
+                    in_cell=True,
                     fill_size=setting.size,
                 )
         return _serialise(root)
@@ -1599,17 +1593,22 @@ class IdmlWriter:
         paragraph: model.Paragraph,
         last: bool,
         box: Optional[tuple] = None,
-        drop_space_before: bool = False,
-        drop_space_after: bool = False,
+        first: bool = False,
+        in_cell: bool = False,
         fill_size: Optional[float] = None,
     ) -> None:
         attributes = {
             "AppliedParagraphStyle": NO_PARAGRAPH_STYLE,
             "Justification": _JUSTIFICATION.get(paragraph.align, "LeftAlign"),
         }
-        if paragraph.space_before and not drop_space_before:
+        # A cell's own edge has nothing to space away from, and Publisher
+        # lays out none of it there: the rows of the tables that state it
+        # measure the leading and no more. Written out, the reader grows
+        # every row that carries it -- downwards, out of the frame the
+        # table was placed in. backlog.md 11.
+        if paragraph.space_before and not (in_cell and first):
             attributes["SpaceBefore"] = fmt(paragraph.space_before)
-        if paragraph.space_after and not drop_space_after:
+        if paragraph.space_after and not (in_cell and last):
             attributes["SpaceAfter"] = fmt(paragraph.space_after)
         if paragraph.margin_left:
             attributes["LeftIndent"] = fmt(paragraph.margin_left)
@@ -1629,7 +1628,10 @@ class IdmlWriter:
 
         spans = paragraph.spans or [model.Span(size_pt=fill_size)]
         for span in spans:
-            self._emit_span(range_element, span, _leading_for(paragraph, span), box)
+            leading = _leading_for(paragraph, span)
+            if in_cell:
+                leading = _first_line_leading(paragraph, span, leading)
+            self._emit_span(range_element, span, leading, box)
 
         # IDML marks the end of a paragraph with an explicit break.
         if not last:
@@ -1834,6 +1836,31 @@ def _setting_leading(setting: _TableSetting) -> float:
     size = setting.size or DEFAULT_POINT_SIZE
     multiple = setting.line_spacing_multiple
     return (multiple if multiple is not None else 1.0) * SINGLE_LINE_SPACING * size
+
+
+def _first_line_leading(
+    paragraph: model.Paragraph, span: model.Span, leading: Optional[float]
+) -> Optional[float]:
+    """What one line of a cell paragraph measures where the reader sizes it.
+
+    Publisher opens spacing above single *between* lines rather than above
+    the first one, so a cell holding a single line is as tall as that line
+    however wide the spacing is set. IDML has no way to say that -- its
+    leading is every line -- and a reader given 150% of a 10pt line makes
+    the row 18pt where Publisher makes it 12. A row only grows, so that
+    lands as the whole table sitting low and running over what follows.
+
+    Measured, not argued: 1338's page-7 agenda states 150% on its date and
+    time cells, and Publisher's own PDF export puts the three rows 12.12
+    and 12.24pt apart -- Calibri's natural line -- in a table its frame
+    gives 35.81pt for. Spacing *below* single is left alone: Publisher
+    does compress a single line, which is what 1336's 9.7pt rows on 75%
+    cells are, and that already lands right.
+    """
+    multiple = paragraph.line_spacing_multiple
+    if multiple is None or multiple <= 1.0:
+        return leading
+    return SINGLE_LINE_SPACING * (span.size_pt or DEFAULT_POINT_SIZE)
 
 
 def _leading_for(paragraph: model.Paragraph, span: model.Span) -> Optional[float]:

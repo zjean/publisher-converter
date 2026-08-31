@@ -991,11 +991,17 @@ These are real and deliberate, not bugs to be surprised by later.
   have nothing to space away from — while space between two paragraphs of
   one cell is left alone. And a cell Publisher left empty, which it records
   with no run and often no paragraph at all, is set the way the body of its
-  own table is set instead of in the reader's own 12pt on Auto. That took
-  the worst table in the corpus from 621pt of drift to none, and 16 of the
-  18 land exactly; the two that do not are a stated 150% line spacing in
-  9.16pt rows and one cell holding three paragraphs where its rows were
-  built for two, both in `1338` and both written up in `backlog.md` §11.
+  own table is set instead of in the reader's own 12pt on Auto. A third followed from
+  the same rule: Publisher opens line spacing above single *between* lines
+  rather than above the first one, so a cell holding one line is as tall
+  as that line however wide the spacing is set, and a cell led above
+  single is written at its natural line rather than at 150% of it.
+  Measured against the frame Publisher gives each table — which is the
+  right yardstick, since a frame taller than its own grid is Publisher
+  having grown the rows itself — all 18 tables in the corpus now render
+  within a point of it, where the worst was 621pt out. `backlog.md` §11
+  carries the numbers and the one case that still renders *short* of its
+  frame.
 
   **Cell insets are carried**, read out of the .pub rather than from
   libmspub, which stops at a cell's row and column and marks the rest of
