@@ -8,8 +8,10 @@ Ordered by deadline, then value.
 > **A Publisher session has happened** (28 August 2026), and it settled
 > §2, §9 and §10 — page margins, cell vertical alignment and the default
 > tab interval are all read from the file now. §1 and §3 came back
-> partially and are still open, and §11 is new: the table ruling that
-> session found, which needs no Publisher at all.
+> partially and are still open, §11 is new: the table ruling that
+> session found, which needs no Publisher at all — and so is §12, the
+> booklet flag, which does need Publisher and is the last thing standing
+> between a newsletter and a correct spread layout.
 >
 > [`windows-session.md`](windows-session.md) is the running order for a
 > sitting at a Windows machine, with what came back and what did not.
@@ -844,3 +846,98 @@ Established here, so don't re-derive it:
 
 **Not urgent, and not blocked.** Everything needed is already on this
 Mac.
+
+---
+
+## 12. Confirm the booklet flag  ⏰ needs Publisher, before 1 Oct 2026
+
+### Why this matters
+
+A booklet is now laid out facing without being asked, but on the *shape* of
+one rather than on Publisher's own layout type: a stated print sheet that
+reaches two pages side by side, plus a page count that is a multiple of
+four (README, *Facing pages are read from the file*). That fires on exactly
+the three newsletters across the corpus and on nothing else, and it is
+still a heuristic with one real hole — **the sheet lives in a printer
+devmode blob, absent from every file nobody has printed**, so a booklet
+that was never sent to a printer is not detected and still needs the flag.
+
+Reading the layout type would close the hole and replace the heuristic with
+a reading. It would also settle the cases the shape cannot tell apart: a
+folded card and a flyer printed two-up look the same from outside.
+
+### What is already known
+
+- **libmspub reports nothing, and has no concept of it.** `startDocument`
+  arrives with an *empty* property list. `parseDocumentChunk` reads
+  `DOCUMENT_SIZE` and `DOCUMENT_PAGE_LIST` and `skipBlock`s every other
+  block, and a search of the whole 0.1.5 source for fold, facing, booklet,
+  spread, imposition or pages-per-sheet turns up nothing but a shape type
+  called `FOLDED_CORNER` and an unrelated `foldedTransform`. So this cannot
+  come through the event stream at any price; it has to be read from the
+  `.pub`.
+- **Two other places it is not.** The document chunk `0x44`'s remaining
+  fields do not carry it — `0x2D` is the master count (2 for the
+  newsletters, Cantico and MISSAL, 1 for the single-master files) and
+  `0x01` is the length of the page list. And a two-page master is not a
+  usable proxy either: `1336` and `1338` are confirmed booklets and present
+  only *one* layout per master, while `1337` presents two, so it depends on
+  whether the master art happens to be mirrored.
+- **The document chunk `0x4C` does not hold it.** Its fields are the
+  guides, and all of them are now accounted for: `0x01` is the total guide
+  count, `0x06` the number of vertical guides and `0x07` the number of
+  horizontal ones — verified across all eight occurrences in `1336`, where
+  the counts run 5/3/2 for the four margins plus the column guide down the
+  middle and 1/1/– or 2/–/2 for the single-axis sets. Nothing there
+  separates a booklet from a flyer.
+- **Chunk `0x8F` is the candidate.** It is a print-setup chunk — `0x0B`
+  and `0x0C` are the sheet, and in the newsletters they read 11608200 ×
+  8653320 EMU, which is 913.87 × 681.36pt, the sheet Publisher's own PDF
+  is imposed onto to a fifth of a point. `0x11`–`0x14` are its margins and
+  `0x15`/`0x16` a further 18pt each.
+
+  `0x0A = 4` is present in `1336`, `1337` and `1338` and in nothing else.
+  `Lisa Hoogendijk.pub` has the chunk (A3 sheet) and no `0x0A` at all — and
+  its own exported PDF is a single 280 × 350mm page on A3, so it is a
+  confirmed negative *with* the chunk. The chunk is absent entirely from
+  every other file in the corpus. That is three files from one monthly
+  template against one counter-example, in a chunk that is otherwise
+  printer settings — a lead, not a reading.
+
+  Note also that the corpus cannot label itself here. The only files with
+  independent ground truth are two booklets and one *single-page*
+  document, so every field that merely separates multi-page from
+  single-page correlates spuriously; `Cantico_dei_Cantici` (4 pages) and
+  `MISSAL` (16 with its restored blank) are unlabelled and could easily be
+  booklets themselves. A sweep of all 798 block paths in the corpus returns
+  304 fields that "separate" the newsletters, which is what that looks
+  like. Only Publisher can break the tie.
+
+### Steps
+
+1. In Publisher, take one document and save it twice: once with **Page
+   Setup → One page per sheet**, once with **Booklet** (book fold).
+   Change nothing else. `research/probe_masterspread.py` is the pattern
+   for a controlled pair.
+2. Diff chunk `0x8F` between the two — `research/diff_blocks.py` does
+   this by block id. If `0x0A` appears, or changes value, that is the
+   flag; note what it reads for each layout, since Publisher offers more
+   than two (side-fold and top-fold cards, tent cards, *n* pages per
+   sheet), and the converter only wants facing versus not.
+3. Save a third time as **Multiple pages per sheet** to check the value is
+   about the fold and not about how many pages share a sheet. A booklet
+   and a 2-up flyer are both two pages to a sheet and only one of them is
+   facing.
+4. Then `pubfile.read_structure` reads it onto `FileStructure` beside
+   `print_sheet`, and `convert._detect_facing_pages` prefers the stated
+   layout type over the two-up-sheet heuristic, falling back to it only
+   where the file states no layout type. `--facing-pages` and
+   `--no-facing-pages` stay as overrides either way.
+
+**One caveat to carry into it.** A booklet's page count is a multiple of
+four, and the count libmspub reports is not: `MSPUBCollector::writePage`
+skips any page with no shapes of its own. That is fixed separately — the
+file's own page order in chunk `0x44` says where those pages belong and
+they are put back there (README, *Blank pages are put back*) — but if you
+check a page count against Publisher during this sitting, check it after
+that pass and not against the raw event stream.

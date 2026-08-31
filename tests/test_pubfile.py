@@ -3125,3 +3125,415 @@ class PageMarginApplicationTest(unittest.TestCase):
         document = self.document((612.0, 792.0))
         convert._apply_page_margins(document, None)
         self.assertIsNone(document.pages[0].margins)
+
+
+def page_list_chunk(*seqnums: int) -> bytes:
+    """A PAGE LIST chunk: every page chunk in the order Publisher pages it."""
+    return _chunk([
+        _u32(0x01, len(seqnums)),
+        _container(0x02, 0xA0, [
+            _block(0x00, 0x70, struct.pack("<I", seq)) for seq in seqnums
+        ]),
+    ])
+
+
+def page_chunk(*, master: bool = False, applied: int = 263, shapes=()) -> bytes:
+    """A PAGE chunk stating what the file says is on it."""
+    children = [_block(0x0E, 0xC0, struct.pack("<I", 8) + b"M\x00")] if master else [
+        _u32(0x0D, applied)
+    ]
+    children.append(
+        _container(0x02, 0x90, [_block(0x70, 0x70, struct.pack("<I", s)) for s in shapes])
+    )
+    return _chunk(children)
+
+
+class PageOrderReadingTest(unittest.TestCase):
+    """The list that says which page of the document each chunk is.
+
+    libmspub calls `startPage` only for a page carrying shapes of its own,
+    so a page whose content comes only from its master never reaches the
+    event stream. The loss is silent and usually not at the end, which
+    shifts every page after it one place early -- fatal for a booklet,
+    where it flips recto and verso for the rest of the document.
+    """
+
+    def contents(self, *chunks):
+        buffer, refs = b"\x00" * 8, []
+        for seq, (kind, payload) in enumerate(chunks):
+            refs.append((seq, kind, len(buffer)))
+            buffer += payload
+        return buffer, refs
+
+    def test_the_page_order_list_is_read_in_the_order_it_states(self):
+        buffer, refs = self.contents(
+            (pubfile._PAGE_LIST_CHUNK, page_list_chunk(500, 400, 300)),
+        )
+        self.assertEqual(pubfile._read_page_order(buffer, refs), [500, 400, 300])
+
+    def test_a_file_stating_no_page_order_reads_as_none_stated(self):
+        buffer, refs = self.contents((pubfile._PAGE_CHUNK, page_chunk(shapes=(1,))))
+        self.assertEqual(pubfile._read_page_order(buffer, refs), [])
+
+    def test_a_shapeless_page_between_two_others_is_found_at_its_position(self):
+        # The chunks are deliberately out of page order: the list is the
+        # only statement of which page is which, and indexing would put the
+        # blank in the wrong place.
+        chunks = {
+            263: pubfile.PageStructure(seq=263, is_master=True, shape_count=1),
+            310: pubfile.PageStructure(seq=310, applied_master=263, shape_count=4),
+            320: pubfile.PageStructure(seq=320, applied_master=263, shape_count=0),
+            330: pubfile.PageStructure(seq=330, applied_master=263, shape_count=7),
+        }
+        blanks = pubfile._blank_pages([263, 330, 320, 310], chunks)
+        self.assertEqual([position for position, _chunk in blanks], [2])
+        self.assertEqual([chunk.seq for _position, chunk in blanks], [320])
+
+    def test_a_trailing_shapeless_run_is_publishers_scratch_band_not_a_page(self):
+        # Publisher keeps unused page chunks at the tail of the list. A
+        # blank page at the very end of the document cannot be told from
+        # them, and inserting one wrongly would renumber the whole document.
+        chunks = {
+            310: pubfile.PageStructure(seq=310, applied_master=263, shape_count=4),
+            320: pubfile.PageStructure(seq=320, applied_master=263, shape_count=0),
+            330: pubfile.PageStructure(seq=330, applied_master=263, shape_count=0),
+        }
+        self.assertEqual(pubfile._blank_pages([310, 320, 330], chunks), [])
+
+    def test_the_known_dummy_chunks_are_never_pages(self):
+        dummy = sorted(pubfile._DUMMY_PAGE_SEQNUMS)[0]
+        chunks = {
+            310: pubfile.PageStructure(seq=310, applied_master=263, shape_count=4),
+            dummy: pubfile.PageStructure(seq=dummy, applied_master=263, shape_count=0),
+            330: pubfile.PageStructure(seq=330, applied_master=263, shape_count=7),
+        }
+        self.assertEqual(pubfile._blank_pages([310, dummy, 330], chunks), [])
+
+
+class BlankPageRestorationTest(unittest.TestCase):
+    """Putting back the pages libmspub never reported."""
+
+    def document(self, pages: int) -> model.Document:
+        document = model.Document()
+        for index in range(pages):
+            document.pages.append(
+                model.Page(width=421.0, height=595.0, items=[frame_saying(f"p{index}")])
+            )
+        return document
+
+    def structure(self, shaped: int, *blanks: int):
+        s = structure_for(shaped, fields=False)
+        s.blank_pages = [
+            (position, pubfile.PageStructure(seq=900 + position, applied_master=263))
+            for position in blanks
+        ]
+        return s
+
+    def test_a_blank_page_is_put_back_where_the_file_places_it(self):
+        document, structure = self.document(3), self.structure(3, 2)
+        self.assertEqual(convert._restore_blank_pages(document, structure), 1)
+        self.assertEqual(len(document.pages), 4)
+        self.assertEqual([bool(p.items) for p in document.pages],
+                         [True, False, True, True])
+        # The page keeps the sheet its neighbours are on, or it would print
+        # at the reader's default size in the middle of the document.
+        self.assertEqual(document.pages[1].width, 421.0)
+        self.assertEqual(document.pages[1].height, 595.0)
+
+    def test_several_blanks_all_land_on_their_own_positions(self):
+        document, structure = self.document(4), self.structure(4, 2, 5)
+        self.assertEqual(convert._restore_blank_pages(document, structure), 2)
+        self.assertEqual([bool(p.items) for p in document.pages],
+                         [True, False, True, True, False, True])
+
+    def test_the_two_halves_stay_the_same_length(self):
+        # `_attribute_masters` reads a page's master off the chunks left
+        # over only when both halves hold the same number of pages, so a
+        # restored page has to reach the structure as well as the document.
+        document, structure = self.document(3), self.structure(3, 2)
+        convert._restore_blank_pages(document, structure)
+        self.assertEqual(len(structure.pages), len(document.pages))
+
+    def test_a_document_the_structure_does_not_describe_is_left_alone(self):
+        # The positions are offsets into the whole document. If the pages
+        # that did arrive are not the ones the file says arrived, every one
+        # of them is a guess -- so nothing moves.
+        document, structure = self.document(5), self.structure(3, 2)
+        self.assertEqual(convert._restore_blank_pages(document, structure), 0)
+        self.assertEqual(len(document.pages), 5)
+
+    def test_a_position_off_the_end_of_the_document_moves_nothing(self):
+        document, structure = self.document(3), self.structure(3, 9)
+        self.assertEqual(convert._restore_blank_pages(document, structure), 0)
+        self.assertEqual(len(document.pages), 3)
+
+    def test_no_structure_and_no_blanks_are_both_no_ops(self):
+        document = self.document(3)
+        self.assertEqual(convert._restore_blank_pages(document, None), 0)
+        self.assertEqual(convert._restore_blank_pages(document, self.structure(3)), 0)
+        self.assertEqual(len(document.pages), 3)
+
+    def test_the_restored_page_takes_its_number_from_its_place(self):
+        # The point of putting it back: a '#' on page 3 of a document that
+        # lost page 2 read '2' before, and every page after it was wrong.
+        document, structure = self.document(3), self.structure(3, 2)
+        structure.has_fields = True
+        for page in document.pages:
+            page.items[0].story.paragraphs[0].spans[0].text = "#"
+        convert._restore_blank_pages(document, structure)
+        convert._apply_master_pages(document, structure)
+        numbers = [
+            page.items[0].story.paragraphs[0].spans[0].text
+            for page in document.pages if page.items
+        ]
+        self.assertEqual(numbers, ["1", "3", "4"])
+
+
+class RealBlankPageTest(unittest.TestCase):
+    """The reading, against the files it was taken from.
+
+    Publisher's own exported PDFs of `1336` and `1338` are the ground
+    truth: both impose 14 sheets two pages up, so both documents are 28
+    pages, where libmspub reports 27 and 28. The one it is short is the
+    blank leaf this finds.
+    """
+
+    @needs_samples
+    def test_the_tracked_samples_state_no_blank_pages(self):
+        # None of them is short a page, so the reading must not invent one.
+        for name in (
+            "MISSAL MARIANA E PEDRO.pub",
+            "Cantico_dei_Cantici.pub",
+            "Bus Meeting Zones & Luggage JLW.pub",
+            "Blank Note Card (100_1502 Snail) (2 up).pub",
+            "rotated_text.pub",
+        ):
+            with self.subTest(name=name):
+                structure = pubfile.read_structure(SAMPLES / name)
+                self.assertEqual(structure.blank_pages, [])
+
+    @needs_newsletter
+    def test_the_newsletters_page_count_matches_publishers_own_pdf(self):
+        expected = {
+            # name: (pages libmspub reports, blank page positions)
+            "1336 kerkbode.pub": (27, [23]),
+            "1337 kerkbode.pub": (31, [17]),
+            "1338 kerkbode.pub": (28, []),
+        }
+        for name, (reported, blanks) in expected.items():
+            source = SAMPLES / "cgk" / name
+            if not source.exists():
+                continue
+            with self.subTest(name=name):
+                structure = pubfile.read_structure(source)
+                self.assertEqual(len(structure.pages), reported)
+                self.assertEqual(
+                    [position for position, _chunk in structure.blank_pages], blanks
+                )
+                # 28 and 32 -- a saddle-stitched booklet's page count is a
+                # multiple of four, and reported alone neither of them is.
+                self.assertEqual((reported + len(blanks)) % 4, 0)
+
+    @needs_newsletter
+    def test_the_page_order_list_accounts_for_libmspubs_own_order(self):
+        # The whole placement rests on this: the entries of the list that
+        # carry shapes are libmspub's pages, in libmspub's order. Measured
+        # by the shapes both halves state the position of.
+        source = NEWSLETTER
+        document = convert.parse_document(source)
+        structure = pubfile.read_structure(source)
+        shaped = {page.seq for page in structure.pages}
+        contents = pubfile._read_stream(
+            source.read_bytes(), *pubfile._CONTENTS_STREAM
+        )
+        order = pubfile._read_page_order(
+            contents, pubfile._chunk_references(contents)
+        )
+        placed = {seq: index for index, seq in
+                  enumerate(seq for seq in order if seq in shaped)}
+        measured = convert._page_by_chunk(document, structure)
+        self.assertGreater(len(measured), 20)
+        for chunk, index in measured.items():
+            self.assertEqual(placed[chunk], index, f"chunk {chunk}")
+
+    @needs_newsletter
+    def test_the_restored_page_lands_between_the_pages_it_separates(self):
+        source = NEWSLETTER
+        document = convert.parse_document(source)
+        structure = pubfile.read_structure(source)
+        before = [len(page.items) for page in document.pages]
+        self.assertEqual(convert._restore_blank_pages(document, structure), 1)
+        self.assertEqual(len(document.pages), 28)
+        self.assertEqual(document.pages[22].items, [])
+        # Nothing else moved: the pages either side are the ones that were
+        # either side of the gap.
+        self.assertEqual(
+            [len(page.items) for page in document.pages],
+            before[:22] + [0] + before[22:],
+        )
+
+
+def print_setup_chunk(sheet_width: float, sheet_height: float) -> bytes:
+    """A PRINT SETUP chunk, stating the sheet in EMU as the file does."""
+    return _chunk([
+        _u32(0x06, 600), _u32(0x07, 600),          # printer resolutions
+        _u32(0x0B, round(sheet_width * EMU_PER_POINT)),
+        _u32(0x0C, round(sheet_height * EMU_PER_POINT)),
+    ])
+
+
+class PrintSheetReadingTest(unittest.TestCase):
+    """The sheet the publication is imposed onto, where the file states one.
+
+    Not an enum and not a guess: two stated lengths. In the newsletters they
+    read 914.0 x 681.4pt against a 421.0 x 595.0pt page, which is Publisher's
+    own exported PDF to a fifth of a point.
+    """
+
+    def read(self, *chunks):
+        buffer, refs = b"\x00" * 8, []
+        for seq, (kind, payload) in enumerate(chunks):
+            refs.append((seq, kind, len(buffer)))
+            buffer += payload
+        return pubfile._read_print_sheet(buffer, refs)
+
+    def test_the_sheet_arrives_in_points(self):
+        sheet = self.read((pubfile._PRINT_SETUP_CHUNK, print_setup_chunk(914.04, 681.36)))
+        self.assertEqual([round(v, 2) for v in sheet], [914.04, 681.36])
+
+    def test_a_file_stating_no_print_setup_reads_as_none(self):
+        # Every file in the corpus that was never printed is one of these,
+        # which is the whole limit of the reading.
+        self.assertIsNone(self.read((pubfile._PAGE_CHUNK, page_chunk(shapes=(1,)))))
+
+    def test_a_chunk_missing_either_dimension_reads_as_none(self):
+        half = _chunk([_u32(0x0B, 11608200)])
+        self.assertIsNone(self.read((pubfile._PRINT_SETUP_CHUNK, half)))
+
+    @needs_newsletter
+    def test_the_newsletters_state_the_sheet_publisher_exported(self):
+        for name in ("1336 kerkbode.pub", "1337 kerkbode.pub", "1338 kerkbode.pub"):
+            source = SAMPLES / "cgk" / name
+            if not source.exists():
+                continue
+            with self.subTest(name=name):
+                sheet = pubfile.read_structure(source).print_sheet
+                self.assertIsNotNone(sheet)
+                self.assertAlmostEqual(sheet[0], 914.04, delta=0.5)
+                self.assertAlmostEqual(sheet[1], 681.36, delta=0.5)
+
+    @needs_samples
+    def test_a_file_never_printed_states_no_sheet(self):
+        structure = pubfile.read_structure(SAMPLES / "rotated_text.pub")
+        self.assertIsNone(structure.print_sheet)
+
+
+class FacingDetectionTest(unittest.TestCase):
+    """Deciding from the file whether the document is a booklet.
+
+    The evidence is arithmetic on two stated lengths plus a page count: a
+    sheet that fits two of these pages side by side, and a count that a
+    saddle stitch could fold. Publisher's own layout type is not readable
+    (actions.md 12), so this is the shape of a booklet rather than the
+    file's word for one, and the caller can always override it.
+    """
+
+    def document(self, pages: int, width=421.02, height=594.9576):
+        document = model.Document()
+        for _ in range(pages):
+            document.pages.append(model.Page(width=width, height=height))
+        return document
+
+    def structure(self, sheet):
+        s = pubfile.FileStructure()
+        s.print_sheet = sheet
+        return s
+
+    def test_a_two_up_sheet_and_a_foldable_count_reads_as_facing(self):
+        self.assertTrue(convert._detect_facing_pages(
+            self.document(28), self.structure((914.04, 681.36))))
+
+    def test_a_count_a_saddle_stitch_cannot_fold_does_not(self):
+        # 27 pages cannot be folded into sheets of four, so whatever the
+        # sheet says, this is not a booklet the converter can lay out.
+        for pages in (25, 26, 27, 29):
+            with self.subTest(pages=pages):
+                self.assertFalse(convert._detect_facing_pages(
+                    self.document(pages), self.structure((914.04, 681.36))))
+
+    def test_a_sheet_holding_one_page_does_not(self):
+        # Lisa Hoogendijk: a 280 x 350mm page centred on A3, one page, and
+        # Publisher's own PDF of it is a single page.
+        self.assertFalse(convert._detect_facing_pages(
+            self.document(4, width=793.7, height=992.1),
+            self.structure((841.89, 1190.55))))
+
+    def test_a_sheet_holding_three_or_more_pages_does_not(self):
+        # Three up is an imposition this cannot describe as reader's
+        # spreads, so it is left alone rather than guessed at.
+        self.assertFalse(convert._detect_facing_pages(
+            self.document(28), self.structure((1400.0, 681.36))))
+
+    def test_no_sheet_and_no_structure_read_as_not_facing(self):
+        self.assertFalse(convert._detect_facing_pages(self.document(28), None))
+        self.assertFalse(convert._detect_facing_pages(
+            self.document(28), self.structure(None)))
+
+    def test_pages_of_differing_size_are_never_guessed_at(self):
+        document = self.document(28)
+        document.pages[5].width = 300.0
+        self.assertFalse(convert._detect_facing_pages(
+            document, self.structure((914.04, 681.36))))
+
+    def test_an_empty_document_reads_as_not_facing(self):
+        self.assertFalse(convert._detect_facing_pages(
+            self.document(0), self.structure((914.04, 681.36))))
+
+
+class RealFacingDetectionTest(unittest.TestCase):
+    """Detection against the corpus, both ways round.
+
+    The three newsletters are booklets -- Publisher's own exported PDFs of
+    `1336` and `1338` impose fourteen two-up sheets each -- and nothing
+    else in the corpus is known to be one. A detector that fired on a
+    flyer would be worse than the flag it replaces, so the negatives
+    matter more than the positives here.
+    """
+
+    def decide(self, source: Path) -> bool:
+        document = convert.parse_document(source)
+        structure = pubfile.read_structure(source)
+        convert._restore_blank_pages(document, structure)
+        return convert._detect_facing_pages(document, structure)
+
+    @needs_newsletter
+    def test_every_newsletter_is_read_as_a_booklet(self):
+        for name in ("1336 kerkbode.pub", "1337 kerkbode.pub", "1338 kerkbode.pub"):
+            source = SAMPLES / "cgk" / name
+            if not source.exists():
+                continue
+            with self.subTest(name=name):
+                self.assertTrue(self.decide(source))
+
+    @needs_samples
+    def test_nothing_else_in_the_corpus_is(self):
+        for name in (
+            "MISSAL MARIANA E PEDRO.pub",
+            "Cantico_dei_Cantici.pub",
+            "Bus Meeting Zones & Luggage JLW.pub",
+            "Blank Note Card (100_1502 Snail) (2 up).pub",
+            "rotated_text.pub",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(self.decide(SAMPLES / name))
+
+    @needs_newsletter
+    def test_a_single_page_on_an_oversized_sheet_is_not_a_booklet(self):
+        # Lisa Hoogendijk states a print sheet -- A3 -- and Publisher's own
+        # PDF of it is one 280 x 350mm page. The negative that has the
+        # chunk, which is the one that matters.
+        source = SAMPLES / "cgk" / "Lisa Hoogendijk.pub"
+        if not source.exists():
+            self.skipTest(f"{source.name} absent")
+        self.assertIsNotNone(pubfile.read_structure(source).print_sheet)
+        self.assertFalse(self.decide(source))

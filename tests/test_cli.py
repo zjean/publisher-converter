@@ -343,3 +343,80 @@ class DetailLineTest(unittest.TestCase):
 
     def test_the_count_reaches_the_csv(self):
         self.assertIn("wordart", cli.REPORT_COLUMNS)
+
+
+class FacingPagesFlagTest(unittest.TestCase):
+    """Three states, not two: force on, force off, and read the file.
+
+    The flag used to be the only way a booklet could be laid out facing.
+    It is now the override, so it has to be able to say *no* as well as
+    yes -- a document the file describes as a booklet and the operator
+    knows is not one has to have a way out.
+    """
+
+    def setUp(self):
+        self.work = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (self.work / "a.pub").write_bytes(b"not a real .pub")
+        self.seen = []
+        original = convert.convert
+
+        def spy(source, destination, **kw):
+            self.seen.append(kw.get("facing_pages"))
+            return convert.Result(source=Path(source), output=Path(destination), pages=1)
+
+        cli.convert.convert = spy
+        self.addCleanup(setattr, cli.convert, "convert", original)
+
+    def _run(self, *extra):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            cli.run([str(self.work), "-o", str(self.work / "out"), "--no-log", *extra])
+        return self.seen[-1]
+
+    def test_neither_flag_leaves_the_decision_to_the_file(self):
+        self.assertIsNone(self._run())
+
+    def test_facing_pages_forces_it_on(self):
+        self.assertIs(self._run("--facing-pages"), True)
+
+    def test_no_facing_pages_forces_it_off(self):
+        self.assertIs(self._run("--no-facing-pages"), False)
+
+    def test_the_two_flags_together_are_refused(self):
+        with self.assertRaises(SystemExit) as raised:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                cli.run([
+                    str(self.work), "-o", str(self.work / "out"), "--no-log",
+                    "--facing-pages", "--no-facing-pages",
+                ])
+        self.assertEqual(int(raised.exception.code), 2)
+
+
+class FacingDetailLineTest(unittest.TestCase):
+    """Saying so when the layout was decided from the file rather than asked
+    for. A silent change of spread layout is the thing to avoid."""
+
+    @staticmethod
+    def printed(result: convert.Result) -> str:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli._print_result(result)
+        return out.getvalue()
+
+    def test_a_detected_booklet_says_so(self):
+        result = convert.Result(
+            source=Path("x.pub"), pages=28, facing_pages=True, facing_detected=True
+        )
+        self.assertIn("facing, detected", self.printed(result))
+
+    def test_a_booklet_that_was_asked_for_does_not(self):
+        result = convert.Result(
+            source=Path("x.pub"), pages=28, facing_pages=True, facing_detected=False
+        )
+        self.assertNotIn("detected", self.printed(result))
+
+    def test_a_single_page_document_says_nothing(self):
+        result = convert.Result(source=Path("x.pub"), pages=1)
+        self.assertNotIn("facing", self.printed(result))
+
+    def test_the_flag_reaches_the_csv(self):
+        self.assertIn("facing_pages", cli.REPORT_COLUMNS)

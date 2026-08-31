@@ -288,6 +288,34 @@ chain that actually delivers this tool to where the `.pub` files live.
 
 ---
 
+## I. The booklet flag · 10 min · [W]
+
+`--facing-pages` has to be typed on the command line, because nothing
+libmspub passes on says whether the publication was set up as a booklet.
+Without it a newsletter converts as single pages and no print order
+Affinity produces can be right.
+
+**One document, saved three ways, changing only the page setup.**
+
+1. New blank document, A5 portrait. Add a text box on the page and
+   **insert four pages** so there is a fold to describe.
+2. Page Design → Page Setup → **One page per sheet**.
+   Save as `layout-single.pub`.
+3. Page Setup → **Booklet** (book fold). Save As `layout-booklet.pub`.
+4. Page Setup → **Multiple pages per sheet**, two up. Save As
+   `layout-2up.pub`.
+
+Three files. The third one matters as much as the second: a booklet and a
+2-up flyer both put two pages on a sheet and only one of them is facing,
+so a field that only counts pages per sheet is not the flag.
+
+While you are here, note what Publisher says the **page count** of `1336
+kerkbode.pub` is, on screen. It should read 28.
+
+*(actions.md §12)*
+
+---
+
 ## Coming home · [M]
 
 Copy back:
@@ -298,6 +326,7 @@ Copy back:
 | the two margin files | `files/margin-samples/` |
 | the four field files | `files/field-samples/` |
 | the three table files | `files/table-samples/` |
+| the three layout files | `files/layout-samples/` |
 | every PDF | `files/reference-pdfs/` |
 | the fonts | `~/Library/Fonts` |
 
@@ -330,6 +359,12 @@ python3 research/quill_tokens.py files/field-samples/*.pub
 
 # E
 python3 research/table_cells.py files/table-samples/*.pub
+
+# I — chunk 0x8F block 0x0A is the one to watch (actions.md §12)
+python3 research/diff_blocks.py \
+  single=files/layout-samples/layout-single.pub \
+  booklet=files/layout-samples/layout-booklet.pub \
+  twoup=files/layout-samples/layout-2up.pub
 
 # G — confirm the fonts took
 python3 -m research.font_metrics "Maiandra GD"

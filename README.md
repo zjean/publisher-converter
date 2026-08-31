@@ -204,7 +204,8 @@ The same flags apply on macOS; only the default paths differ.
 | `--report PATH` | where to write the CSV. Default `conversion-report.csv` inside the output folder |
 | `--codepage MODE` | `auto` (default) detects and repairs non-Latin text, `none` disables repair, or force a codec such as `cp1251`, `cp932` |
 | `--no-image-wrap` | keep the source's exact stacking instead of flowing text around images and around the headlines the file says it flowed around. Both will then cover text |
-| `--facing-pages` | lay the pages out as reader's spreads — `1 \| 2-3 \| 4-5` — instead of singly. Use it for a booklet; libmspub never reports whether the publication was set up facing, so it has to be asked for |
+| `--facing-pages` | lay the pages out as reader's spreads — `1 \| 2-3 \| 4-5` — instead of singly. Only needed where the file does not describe a booklet itself: a print sheet that reaches two pages side by side and a page count that is a multiple of four are read as one, and a document nobody has printed states no sheet |
+| `--no-facing-pages` | lay every page out singly, overriding what the file says. For a document read as a booklet that is not one |
 | `--log-file PATH` | write the log here instead of the per-user log folder (`%LOCALAPPDATA%\pub2idml\logs` on Windows, `~/Library/Logs/pub2idml` on macOS) |
 | `--no-log` | do not write a log file |
 | `-v`, `--verbose` | debug-level detail in the log (not the console) |
@@ -626,21 +627,101 @@ These are real and deliberate, not bugs to be surprised by later.
   fit inside keeps the reader's default: a margin that cannot be true is
   worse than none, because the reader would draw it. No baseline grid is
   carried; the file may state one, but nothing here has looked.
-- **Facing pages have to be asked for.** `--facing-pages` lays the document
-  out as reader's spreads — the cover alone as a recto, then `2-3`, `4-5`,
-  so odd numbers stay right of the spine — and declares `FacingPages` so
-  the reader agrees. Without it every page is its own spread, exactly as
-  before.
+- **Facing pages are read from the file, and can be overridden.** A
+  booklet is laid out as reader's spreads — the cover alone as a recto,
+  then `2-3`, `4-5`, so odd numbers stay right of the spine — with
+  `FacingPages` declared so the reader agrees. `--facing-pages` forces it
+  on where the file does not say so, `--no-facing-pages` forces it off.
 
-  It cannot be detected: `parseDocumentChunk` in libmspub reads
-  `DOCUMENT_WIDTH` and `DOCUMENT_HEIGHT` and nothing else, so no
-  publication type, book fold or pages-per-sheet reaches the event stream.
-  The setting is presumably in the `.pub`, and could be found the same way
-  the margins are being pursued in `actions.md` — with a controlled pair of
-  files from Publisher — at which point the flag becomes a default rather
-  than a question. Master spreads stay one page wide either way; whether
-  Affinity applies a single-page master to a facing spread is worth a look
-  the first time you use this on a document with a running header.
+  What is read is the *shape* of a booklet, not Publisher's layout type,
+  and it takes two things that have to agree. The file states the print
+  sheet it is imposed onto, and that sheet has to reach two of these pages
+  side by side without reaching three; and the page count has to be a
+  multiple of four, which is what a saddle stitch folds. In the three
+  newsletters the sheet reads 914.0 × 681.4pt against a 421.0 × 595.0pt
+  page, which is the sheet Publisher's own exported PDF of them is imposed
+  onto to a fifth of a point. Across the 22-file corpus this fires on
+  exactly those three and on nothing else.
+
+  Neither half is enough alone: a count of four describes any four-page
+  document and a two-up sheet describes a flyer printed two to a page.
+  Pages that differ in size are never guessed at, since reader's spreads
+  assume one sheet throughout. A folded card has this shape too and would
+  be laid out facing — which is what a folded card wants. Every document
+  read this way says so in its report and is flagged `review`, because a
+  spread layout is the most visible thing about a converted file and one
+  decided rather than asked for should not be silent.
+
+  **The limit worth knowing.** The sheet lives in a printer devmode blob —
+  `0x06`/`0x07` are resolutions, `0x11`–`0x16` printer margins — not in the
+  document, and it is absent from every file in the corpus nobody has
+  printed. So a booklet that was never printed carries nothing to read and
+  needs `--facing-pages` after all. Reading Publisher's own layout type
+  instead would remove that limit, and is `actions.md` §12.
+
+  Publisher's layout type itself is **not** readable, which is why the
+  shape is read instead. libmspub has no fold or facing concept anywhere in
+  it: `parseDocumentChunk` reads `DOCUMENT_SIZE` and `DOCUMENT_PAGE_LIST`
+  and `skipBlock`s every other block, and `startDocument` arrives with an
+  empty property list. In the file, the candidate is chunk `0x8F` block
+  `0x0A`, which reads 4 in all three newsletters and in nothing else that
+  has the chunk — but that is three files from one monthly template against
+  one counter-example, in a chunk that is otherwise printer settings. A
+  lead, not a reading; `actions.md` §12 has the controlled pair that would
+  settle it.
+
+  Master spreads stay one page wide either way; whether Affinity applies a
+  single-page master to a facing spread is worth a look the first time you
+  use this on a document with a running header.
+
+  What the newsletters' own sheet size confirms is what this is *for*.
+  `1336` and `1338` export from Publisher as fourteen sheets of
+  914 × 681pt, two A5 pages up, imposed `28|1`, `2|27`, `26|3` … `14|15` —
+  a saddle-stitched booklet. Affinity's PDF export writes pages in document
+  order and never imposes; the imposition lives in Print, and it needs a
+  facing document with a page count that is a multiple of four to find the
+  spine. Converted singly, neither condition holds and no print order it
+  produces can be the right one.
+- **Blank pages are put back.** libmspub calls `startPage` only for a page
+  carrying shapes of its own, so a page whose content comes from its master
+  alone — a numbered, otherwise empty leaf — never reaches the event stream
+  at all. The loss is silent and it is not at the end: `1336 kerkbode.pub`
+  drops its page 23 of 28 and `1337 kerkbode.pub` its page 17 of 32.
+  Everything after arrives one place early, which puts the wrong number on
+  every later page and, laid out facing, moves each of them to the wrong
+  side of the spine.
+
+  It is libmspub's own doing, and its source says so plainly.
+  `MSPUBCollector::writePage` opens with
+  `if (!shapeGroupsOrdered.empty())` — where `shapeGroupsOrdered` is the
+  page's *own* shapes, before any master is written — so a page with none
+  emits no `startPage`, no master replay, nothing.
+
+  Chunk `0x44` holds the fix, and libmspub names it: `DOCUMENT` is `0x44`
+  and its block `0x02` is `DOCUMENT_PAGE_LIST`, which
+  `parseDocumentChunk` walks straight into `setNextPage` — so that array is
+  precisely the order libmspub itself pages the document in, and not the
+  chunk order, which is a permutation of it (§14). Across all 22 files in
+  the corpus the entries of that list which do carry shapes are exactly
+  libmspub's pages in exactly libmspub's order, measured independently by
+  the shapes both halves state the position of. So an entry without shapes
+  standing between two of them is a page whose position is stated rather
+  than guessed, and it is inserted there, empty.
+
+  Confirmed against Publisher rather than inferred: its own exported PDFs
+  of `1336` and `1338` impose fourteen two-up sheets each, so both
+  documents are 28 pages where libmspub reports 27 and 28. After the pass
+  both read 28, `1337` reads 32, and the pages either side of each gap are
+  the ones that were either side of it.
+
+  Two limits. Publisher keeps a scratch band of unused page chunks at the
+  tail of the list, and a blank page at the very end of a document cannot
+  be told from it, so the trailing run is dropped rather than guessed at —
+  a missing final leaf is a sheet you add in a second, one inserted
+  wrongly renumbers everything after it. And the restored page arrives
+  bare: the master is applied per page from the items libmspub drew, of
+  which a blank page has none, so Publisher's number and running head are
+  not on it. Files where this fires are flagged `review`.
 - **Text frame columns are carried.** Publisher offers a column count and
   one uniform spacing, which is exactly what IDML calls `TextColumnCount`
   and `TextColumnGutter`, so the mapping is direct. Affinity honours both

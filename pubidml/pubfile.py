@@ -199,6 +199,24 @@ _THIS_MASTER_NAME, _APPLIED_MASTER_NAME, _PAGE_SHAPES = 0x0E, 0x0D, 0x02
 _SHAPE_SEQNUM = 0x70
 _PAGE_CHUNK = 0x43
 
+# The document chunk holding one array entry per page chunk, in the order
+# Publisher pages the document. It is the file's own statement of page
+# order, and the only one: the chunk order is a permutation of it, so
+# nothing can be learned by counting chunks (§14).
+_PAGE_LIST_CHUNK, _PAGE_LIST_ENTRIES = 0x44, 0x02
+_PAGE_LIST_ENTRY_TYPE = 0x70
+
+# Publisher's print setup. A printer devmode blob rather than a document
+# property -- 0x06 and 0x07 are resolutions, 0x11 to 0x16 printer margins --
+# and it is absent from every file in the corpus that was never printed. The
+# sheet is the one field in it worth reading, because it is a stated length
+# and not an enum: in the newsletters it is the sheet Publisher's own
+# exported PDF is imposed onto, to a fifth of a point. 0x0A reads 4 in all
+# three of them and in nothing else that has the chunk, which looks like the
+# layout type and is not confirmed as one (actions.md 12).
+_PRINT_SETUP_CHUNK = 0x8F
+_PRINT_SHEET_WIDTH, _PRINT_SHEET_HEIGHT = 0x0B, 0x0C
+
 _GUIDES_CHUNK = 0x4C
 _GUIDE_ARRAY, _GUIDE_ARRAY_TYPE = 0x02, 0xA0
 _GUIDE_POSITION, _GUIDE_IS_MARGIN = 0x01, 0x04
@@ -589,6 +607,13 @@ class FileStructure:
     #: story flows through them. libmspub says nothing about a link, so
     #: without this the order is whatever order the frames turned up in.
     story_chains: List[List[int]] = field(default_factory=list)
+    #: The pages libmspub never reports, as (reading position, chunk) with
+    #: the position 1-based in the finished document. See `_blank_pages`.
+    blank_pages: List[Tuple[int, PageStructure]] = field(default_factory=list)
+    #: The sheet the publication is imposed onto, in points, where the
+    #: file states a print setup at all. None where it does not, which is
+    #: every document nobody has printed.
+    print_sheet: Optional[Tuple[float, float]] = None
 
     def gradient_for(
         self,
@@ -1030,6 +1055,97 @@ def _read_story_chains(contents: bytes, refs) -> List[List[int]]:
     # sorting by it is a total order -- worth having, since the caller
     # reports what it threaded.
     return sorted(chains)
+
+
+def _read_page_order(contents: bytes, refs) -> List[int]:
+    """Every page chunk in the order Publisher pages the document.
+
+    The one statement of page order the file makes. The chunk order is not
+    it -- in `1336 kerkbode.pub` chunk 266 is page 3 and chunk 335 page 1 --
+    and neither is anything libmspub passes on.
+
+    Masters are listed too, and so is the scratch band of unused page
+    chunks Publisher keeps at the tail, so the list is longer than the
+    document. Callers resolve the entries against the chunks themselves.
+    """
+    for _seq, kind, offset in refs:
+        if kind != _PAGE_LIST_CHUNK:
+            continue
+        for block in _chunk_blocks(contents, offset):
+            if block.id != _PAGE_LIST_ENTRIES or block.type != _GUIDE_ARRAY_TYPE:
+                continue
+            return [
+                entry.data
+                for entry in _blocks(contents, block.data_offset + 4, block.end)
+                if entry.id == _ARRAY_ENTRY and entry.type == _PAGE_LIST_ENTRY_TYPE
+            ]
+    return []
+
+
+def _read_print_sheet(contents: bytes, refs) -> Optional[Tuple[float, float]]:
+    """The sheet the publication is imposed onto, in points.
+
+    Two stated lengths, which is why this is read and the layout enum
+    beside it is not. A file stating only one of them states nothing
+    usable, and a file with no print setup at all -- anything nobody has
+    printed -- states nothing either.
+    """
+    for _seq, kind, offset in refs:
+        if kind != _PRINT_SETUP_CHUNK:
+            continue
+        found: Dict[int, int] = {}
+        for block in _chunk_blocks(contents, offset):
+            if block.type not in _VARIABLE:
+                found.setdefault(block.id, block.data)
+        width = found.get(_PRINT_SHEET_WIDTH)
+        height = found.get(_PRINT_SHEET_HEIGHT)
+        if width and height:
+            return width / _EMU_PER_POINT, height / _EMU_PER_POINT
+        return None
+    return None
+
+
+def _blank_pages(
+    order: List[int], chunks: Dict[int, PageStructure]
+) -> List[Tuple[int, PageStructure]]:
+    """Where the pages libmspub does not report belong, 1-based.
+
+    libmspub calls `startPage` only for a page carrying shapes of its own,
+    so a page whose content comes from its master alone -- a blank leaf,
+    numbered and otherwise empty -- never reaches the event stream at all.
+    The loss is silent, and it is not at the end: `1336 kerkbode.pub` loses
+    its page 23 of 28 and `1337 kerkbode.pub` its page 17 of 32. Everything
+    after arrives one place early, which renumbers the rest of the document
+    and, laid out facing, moves every later page to the wrong side of the
+    spine.
+
+    The page order list is the handle. Across the whole corpus its entries
+    that do carry shapes are exactly libmspub's pages in exactly libmspub's
+    order, so an entry without shapes standing between two of them is a
+    page whose position is stated rather than guessed -- confirmed against
+    Publisher's own imposed PDFs of `1336` and `1338`, which are 28 pages
+    where libmspub reports 27 and 28.
+
+    Two kinds of entry are not pages: the masters, and Publisher's scratch
+    band. The band sits at the tail, and a blank page at the very end of a
+    document cannot be told from it, so the trailing run is dropped rather
+    than guessed at. Missing a blank final leaf costs the reader a sheet it
+    can add in a second; inserting one that was never there renumbers
+    everything after it.
+    """
+    listed = [
+        chunks[seq] for seq in order
+        if seq in chunks
+        and not chunks[seq].is_master
+        and seq not in _DUMMY_PAGE_SEQNUMS
+    ]
+    while listed and not listed[-1].shape_count:
+        listed.pop()
+    return [
+        (position, page)
+        for position, page in enumerate(listed, start=1)
+        if not page.shape_count
+    ]
 
 
 def _read_guides(contents: bytes, refs) -> Optional[PageGuides]:
@@ -1685,10 +1801,12 @@ def read_structure(source: Path) -> Optional[FileStructure]:
             story_chains=_read_story_chains(contents, refs),
             guides=_read_guides(contents, refs),
         )
+        chunks: Dict[int, PageStructure] = {}
         for seq, kind, offset in refs:
             if kind != _PAGE_CHUNK:
                 continue
             page = _page_structure(contents, seq, offset)
+            chunks[seq] = page
             # Masters list shapes the same way, and a shape belongs to one
             # page either way, so both go in the one index.
             for shape_seq in page.shape_seqnums:
@@ -1700,6 +1818,11 @@ def read_structure(source: Path) -> Optional[FileStructure]:
                 # so this filter is what keeps the list aligned with the
                 # event stream.
                 structure.pages.append(page)
+        # The pages that filter just dropped, where the file places them.
+        structure.blank_pages = _blank_pages(
+            _read_page_order(contents, refs), chunks
+        )
+        structure.print_sheet = _read_print_sheet(contents, refs)
         return structure
     except Exception as exc:  # a damaged file must not fail the conversion
         log.info("could not read structure from %s: %s", source, exc)

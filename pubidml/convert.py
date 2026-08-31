@@ -67,6 +67,11 @@ class Result:
     shapes: int = 0
     characters: int = 0
     wordart: int = 0
+    #: Whether the document was laid out as reader's spreads, and whether
+    #: that was read from the file rather than asked for on the command
+    #: line. A layout decided rather than requested has to be visible.
+    facing_pages: bool = False
+    facing_detected: bool = False
     fonts: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -483,6 +488,155 @@ def _attribute_masters(
             )
             return None
     return attributed
+
+
+def _note_restored_blanks(document: model.Document, restored: int) -> None:
+    """Say which pages were put back, since they are put back empty.
+
+    Publisher prints such a page with whatever its master carries -- a
+    number, a running head -- and the master is applied per page from the
+    items libmspub drew, of which a blank page has none. So the page is the
+    right page in the right place, and bare. Worth a look, and worth
+    knowing about before the document is imposed.
+    """
+    if not restored:
+        return
+    document.warnings.append(
+        f"{restored} blank page(s) restored: libmspub reports only pages "
+        "carrying shapes of their own, so a page whose content comes from "
+        "its master alone never arrives. The file's page order says where "
+        "they belong and they were put back there, empty -- without them "
+        "every later page carries the wrong number, and a booklet imposes "
+        "with the wrong pages facing. Check they are blank in Publisher too"
+    )
+
+
+#: A sheet carrying bleed and crop marks is bigger than the pages on it,
+#: so the sheet only has to *reach* two pages, not match them. It must not
+#: reach three: that is an imposition reader's spreads cannot describe.
+_TWO_UP_SLACK = 1.0
+
+
+def _note_detected_facing(
+    document: model.Document,
+    facing: bool,
+    structure: Optional["pubfile.FileStructure"],
+) -> None:
+    """Say that the spread layout was decided rather than asked for.
+
+    The layout is the most visible thing about a converted document, so a
+    reading that changes it has to name the evidence it changed it on --
+    and it is evidence rather than the file's word (`_detect_facing_pages`).
+    """
+    if not facing or structure is None or structure.print_sheet is None:
+        return
+    sheet_width, sheet_height = structure.print_sheet
+    page = document.pages[0]
+    document.warnings.append(
+        f"laid out as facing spreads, read from the file rather than asked "
+        f"for: it states a {sheet_width:.1f} x {sheet_height:.1f}pt print "
+        f"sheet, which reaches two {page.width:.1f}pt pages side by side, "
+        f"and {len(document.pages)} pages is a count a saddle stitch folds. "
+        f"Publisher's own layout type is not readable (actions.md 12), so "
+        f"this is the shape of a booklet and not the file's word for one -- "
+        f"pass --no-facing-pages if it is not one"
+    )
+
+
+def _detect_facing_pages(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> bool:
+    """Does the file describe a booklet?
+
+    Publisher's own layout type is not readable. libmspub has no fold or
+    facing concept anywhere -- `parseDocumentChunk` reads the document size
+    and the page list and skips every other block -- and the one field that
+    separates the corpus's booklets from the rest sits in a printer devmode
+    blob rather than in the document (actions.md 12).
+
+    So this reads the shape of a booklet rather than the file's word for
+    one, from the two things the file does state plainly: a print sheet
+    that reaches two of these pages side by side, and a page count a saddle
+    stitch could fold. In the newsletters the sheet is 914.0 x 681.4pt
+    against a 421.0 x 595.0pt page, which is what Publisher's own exported
+    PDF of them is imposed onto.
+
+    Both halves are needed and neither is enough. A count of four alone
+    describes any four-page document; a two-up sheet alone describes a flyer
+    printed two to a page. Pages that differ in size are never guessed at:
+    reader's spreads assume one sheet throughout.
+
+    A folded card has this shape too, and would be laid out facing -- which
+    is what a folded card wants. `--no-facing-pages` is the way out.
+    """
+    if structure is None or structure.print_sheet is None:
+        return False
+    if not document.pages:
+        return False
+    width = document.pages[0].width
+    height = document.pages[0].height
+    if any(page.width != width or page.height != height for page in document.pages):
+        return False
+    # Only a multiple of four folds into sheets of four pages, and the
+    # blank pages have already been put back by the time this is asked, so
+    # the count is the document's rather than libmspub's.
+    if len(document.pages) % 4 or not len(document.pages):
+        return False
+    sheet_width, sheet_height = structure.print_sheet
+    return (
+        sheet_width >= 2 * width - _TWO_UP_SLACK
+        and sheet_width < 3 * width - _TWO_UP_SLACK
+        and sheet_height >= height - _TWO_UP_SLACK
+    )
+
+
+def _restore_blank_pages(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> int:
+    """Put back the pages libmspub dropped for carrying no shapes.
+
+    A page whose content comes from its master alone never reaches the
+    event stream (`pubfile._blank_pages`), and the gap is usually in the
+    middle of the document rather than at its end. Left alone it costs
+    every later page its number, and -- laid out facing -- its side of the
+    spine, which is what makes a booklet come out imposed wrong.
+
+    The positions are offsets into the finished document, so they are only
+    meaningful if the pages that did arrive are the ones the file says
+    arrived. Where the two halves disagree on that, nothing moves: a page
+    inserted in the wrong place is worse than one missing, because the
+    missing one is visible and the misplaced one is not.
+
+    A restored page is added to the structure as well as to the document.
+    The two are read side by side -- `_attribute_masters` falls back to the
+    chunks going spare only while they hold the same number of pages -- and
+    growing one without the other would cost the document its masters.
+    """
+    if structure is None or not structure.blank_pages:
+        return 0
+    if len(structure.pages) != len(document.pages):
+        log.info(
+            "%d page(s) reported against %d in the file; leaving the blanks out",
+            len(document.pages), len(structure.pages),
+        )
+        return 0
+
+    total = len(document.pages) + len(structure.blank_pages)
+    if any(not 1 <= position <= total for position, _page in structure.blank_pages):
+        return 0
+
+    for position, chunk in sorted(structure.blank_pages):
+        index = position - 1
+        # The sheet the document is already on, taken from the page the
+        # blank is being pushed down or, at the very end, the one before it.
+        neighbour = document.pages[min(index, len(document.pages) - 1)]
+        document.pages.insert(
+            index, model.Page(width=neighbour.width, height=neighbour.height)
+        )
+        structure.pages.append(chunk)
+    log.info("restored %d blank page(s) libmspub did not report",
+             len(structure.blank_pages))
+    return len(structure.blank_pages)
 
 
 def _apply_master_pages(
@@ -1866,12 +2020,16 @@ def convert(
     pubdump: Path = PUBDUMP,
     codepage: Optional[str] = "auto",
     wrap_images: bool = True,
-    facing_pages: bool = False,
+    facing_pages: Optional[bool] = None,
 ) -> Result:
     """Convert one .pub file to an .idml package.
 
     Linked images are written to a sibling folder named after the output
     file, so `report.idml` is accompanied by `report_images/`.
+
+    `facing_pages` None reads the layout off the file, which is what the
+    command line does when neither flag is given; True and False are the
+    operator overriding that either way.
     """
     source = Path(source)
     result = Result(source=source)
@@ -1929,7 +2087,7 @@ def _convert(
     pubdump: Path,
     codepage: Optional[str],
     wrap_images: bool,
-    facing_pages: bool,
+    facing_pages: Optional[bool],
 ) -> None:
     started = time.monotonic()
     log.info("converting %s -> %s", source, destination)
@@ -1942,6 +2100,16 @@ def _convert(
     textrepair.repair_document(document, codepage)
     structure = pubfile.read_structure(source)
     _note_unreadable_structure(document, structure)
+    # Before every pass that reads a page by its index, and before the
+    # page-number substitution in particular: a page put back afterwards
+    # would leave the numbering it was restored to fix untouched.
+    _note_restored_blanks(document, _restore_blank_pages(document, structure))
+    # After the blanks: the page count is half the evidence, and libmspub's
+    # count is not the document's.
+    detected = facing_pages is None
+    if detected:
+        facing_pages = _detect_facing_pages(document, structure)
+        _note_detected_facing(document, facing_pages, structure)
     _apply_master_pages(document, structure)
     _apply_cell_insets(document, structure)
     _apply_page_margins(document, structure)
@@ -1975,6 +2143,8 @@ def _convert(
         raise ConversionError(f"IDML write failed: {exc}") from exc
 
     result.output = destination
+    result.facing_pages = bool(facing_pages)
+    result.facing_detected = detected and bool(facing_pages)
     result.pages = len(document.pages)
     result.fonts = document.fonts
     result.warnings = list(document.warnings)

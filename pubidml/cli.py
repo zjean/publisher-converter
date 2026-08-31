@@ -28,6 +28,7 @@ REPORT_COLUMNS = [
     "shapes",
     "characters",
     "wordart",
+    "facing_pages",
     "fonts",
     "warnings",
     "error",
@@ -124,12 +125,23 @@ def run(argv=None) -> int:
             "text, but placement matches the source exactly"
         ),
     )
+    # Three states, so neither flag can be a plain store_true: the default
+    # is to read the layout off the file, and both answers have to be
+    # sayable over that.
     parser.add_argument(
         "--facing-pages", action="store_true",
         help=(
             "lay the pages out as reader's spreads (1 | 2-3 | 4-5) rather "
-            "than singly; libmspub does not report whether the publication "
-            "was set up facing, so a booklet has to say so here"
+            "than singly. Without either flag this is read from the file, "
+            "which describes a booklet by the print sheet it states and its "
+            "page count; pass this where the file does not say so"
+        ),
+    )
+    parser.add_argument(
+        "--no-facing-pages", action="store_true",
+        help=(
+            "lay every page out singly, overriding what the file says. Use "
+            "it for a document read as a booklet that is not one"
         ),
     )
     parser.add_argument(
@@ -161,6 +173,13 @@ def run(argv=None) -> int:
             codecs.lookup(codepage)
         except LookupError:
             parser.error(f"unknown codec for --codepage: {args.codepage}")
+
+    # None means read the layout off the file. Asking for both answers at
+    # once is a mistake worth refusing rather than resolving: whichever one
+    # won, half of what was typed would be silently ignored.
+    if args.facing_pages and args.no_facing_pages:
+        parser.error("--facing-pages and --no-facing-pages contradict each other")
+    facing_pages = True if args.facing_pages else False if args.no_facing_pages else None
 
     log_path = None
     if args.no_log:
@@ -208,7 +227,7 @@ def run(argv=None) -> int:
                     pool.submit(
                         convert.convert, source, destination,
                         codepage=codepage, wrap_images=not args.no_image_wrap,
-                        facing_pages=args.facing_pages,
+                        facing_pages=facing_pages,
                     ): source
                     for source, destination in jobs
                 }
@@ -290,6 +309,8 @@ def _print_result(result: convert.Result) -> None:
     )
     if result.wordart:
         detail += f" {result.wordart} wordart"
+    if result.facing_pages:
+        detail += " (facing, detected)" if result.facing_detected else " (facing)"
     print(f"[{marker}] {name}: {detail}")
     for warning in result.warnings:
         print(f"           ! {warning}")
@@ -326,6 +347,8 @@ def _write_report(path: Path, results: List[convert.Result]) -> None:
                     result.shapes,
                     result.characters,
                     result.wordart,
+                    ("detected" if result.facing_detected
+                     else "yes" if result.facing_pages else "no"),
                     _csv_safe("; ".join(result.fonts)),
                     _csv_safe("; ".join(result.warnings)),
                     _csv_safe(result.error or ""),
