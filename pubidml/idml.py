@@ -1373,6 +1373,20 @@ class IdmlWriter:
                 "VerticalJustification": "TopAlign",
                 "InsetSpacing": "0 0 0 0",
                 "AutoSizingType": "Off",
+                # A table cannot flow around anything. Ordinary copy meets a
+                # wrapping picture by narrowing its lines; a row has no way
+                # to do that, so a reader clears the whole table past the
+                # obstruction instead -- and a table pushed off Publisher's
+                # coordinates is worse than one a picture overlaps, which is
+                # what Publisher itself draws. The corpus has 83 of these
+                # overlaps, including the agenda on page 7 of both `1337`
+                # and `1338`, where a bin standing 18pt into the right edge
+                # of the frame is enough to move the whole grid.
+                #
+                # Only the table frame ignores wraps. The switch that turns
+                # image wraps on stays exactly as it was for text, where
+                # reflowing is the right answer and the reason it exists.
+                "IgnoreWrap": "true",
                 # No FirstBaselineOffset here, deliberately. Pinning it to
                 # the top of the frame reads like the right thing -- a
                 # table has no baseline to offset -- but Affinity answers

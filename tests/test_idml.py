@@ -1440,6 +1440,16 @@ class TablePlacementTest(unittest.TestCase):
         preference = next(self._frame().iter("TextFramePreference"))
         self.assertEqual(preference.get("InsetSpacing"), "0 0 0 0")
 
+    def test_the_frame_ignores_text_wrap(self):
+        # A table cannot flow around anything: copy meets a wrapping
+        # picture by narrowing its lines, and a row has no way to do that,
+        # so a reader clears the whole grid past the obstruction and the
+        # table leaves the coordinates Publisher gave it. Publisher just
+        # draws the two overlapping. The corpus has 83 such overlaps,
+        # including page 7 of 1337 and 1338.
+        preference = next(self._frame().iter("TextFramePreference"))
+        self.assertEqual(preference.get("IgnoreWrap"), "true")
+
 
 class TableOutputTest(unittest.TestCase):
     """A model.Table has to become a real IDML Table inside its story."""

@@ -541,6 +541,33 @@ cell — 95 of them in `MISSAL MARIANA E PEDRO`, at 1.5, 2 and 2.5 spaces —
 are untouched. They run to many lines, where the spacing is the layout,
 and nothing measures their box the way a row measures a cell's.
 
+### A table cannot flow around a picture — **fixed**
+
+Reported from Affinity: the agenda on page 7 of `1337` sits at the wrong
+height. Its numbers were not the problem, and this time neither were the
+rows. Every item on the page lands within a point of Publisher's own PDF
+— the six-row table's frame at 67.34pt against ink at 66.96, the nine-row
+table at 122.13 against 122.96 — and the rows sum to 55.008pt in a
+55.17pt frame with leading that fits every one of them.
+
+What moves it is the **recycling bin**. Images carry a bounding-box text
+wrap (`idml._emit_image`, on a size heuristic, because libmspub reports
+no wrap and an image drawn after the copy would otherwise hide it), and
+the bin stands 18.4pt into the right edge of that table's frame, over its
+whole 55.2pt height. Ordinary copy answers a wrap by narrowing its lines.
+**A row has no way to narrow**, so a reader clears the entire table past
+the obstruction, and a table pushed off Publisher's coordinates is far
+worse than one a picture overlaps — which is exactly what Publisher
+itself draws.
+
+`TextFramePreference IgnoreWrap="true"`, on the table frame only. The
+switch that turns image wraps on is untouched for text, where reflowing
+is the right answer and the reason it exists. The corpus has **83 such
+overlaps** across the three newsletters, including page 7 of both `1337`
+and `1338` — the same 1338 table the leading fix above was chasing, which
+had a second reason to sit low all along. Pinned by
+`TablePlacementTest.test_the_frame_ignores_text_wrap`.
+
 **And the 7 x 3 rota was never wrong.** It was recorded here as 10.2pt of
 growth in the one cell holding three paragraphs against rows built for
 two. Its frame is 155.4pt against a grid of 144.4, and it renders 154.6 —
