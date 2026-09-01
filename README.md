@@ -959,6 +959,46 @@ These are real and deliberate, not bugs to be surprised by later.
   libmspub did deliver keep its reading, junk and all, because they are
   its reading and not ours. Files where this fires are flagged `review`,
   and the warning says how much went back into how many stories.
+- **A story libmspub never delivers at all is found by its id.** The
+  same failure has a limit case the rule above cannot touch. For five
+  frames of `1337 kerkbode.pub` libmspub emits `startTextObject` and then
+  `endTextObject` with not one paragraph between them — pages 24 and 25,
+  a two-page Open Monumentendag letter, reach the page as a photograph
+  and a page number. Matching on the text cannot help here, and not by
+  accident: **every story in the file begins with nothing**, so a prefix
+  rule asked about an empty frame is ambiguous by construction.
+
+  The file answers without going through the words. A shape names the
+  story it holds by *id* (`_SHAPE_STORY_ID`, the field the linked-frame
+  chains are already read from), and `SYID` lists those ids in the same
+  order `STRS` cuts the text — a word nothing reads, the story count,
+  then one id per story. Compose the two and a shape has a position in
+  `story_texts`. That is an identity the file states, not an inference
+  from what happens to be on the page, and it holds on all 22 files in
+  the corpus: `SYID` names exactly as many stories as `STRS` cuts, always
+  ascending, always unique, and every id a shape carries is in it.
+
+  Two guards. The shape-to-frame match must be **injective** — in
+  `Lisa Hoogendijk.pub` a decorative shape sits 0.2pt from a text frame,
+  inside the half-point the match allows, so both claim that frame and
+  the decoration's story is not the one that belongs there; where two
+  shapes claim one frame, neither speaks for it. And only frames
+  libmspub left *entirely* empty are filled, so a frame that received
+  text keeps it and a story that is itself empty stays empty.
+
+  **The type is nobody's.** Text merely cut short continues the run that
+  did arrive, so its format came from Publisher. Here nothing arrived,
+  so there is no run to take a format from and the words land in the
+  document's default face at its default size. The words are the file's;
+  the type has to be put back by hand. Files where this fires are
+  flagged `review`, and the warning says so in those terms.
+
+  One consequence reaches `model`: an empty frame is no longer dropped
+  as it is parsed, because at that point a frame Publisher left blank
+  and a frame libmspub failed to fill look identical. Both are placed,
+  and `convert._drop_blank_frames` decides between them once the file
+  has had its say — the same deferral `_drop_blank_tables` already makes
+  for a grid whose rules have not been read yet.
 - **Groups are flattened.** Children keep their absolute positions;
   nothing moves, but the grouping is gone.
 - **Gradients are carried, with every stop.** They become real IDML

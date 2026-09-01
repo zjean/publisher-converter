@@ -4188,3 +4188,243 @@ class RestoredTextWarningTest(unittest.TestCase):
 
     def test_says_nothing_when_nothing_was_short(self):
         self.assertEqual(self.note([]), [])
+
+
+def story_ids_chunk(*ids: int) -> bytes:
+    """A SYID chunk: a word nothing reads, the count, then an id each."""
+    return struct.pack("<2I", 0, len(ids)) + struct.pack("<%dI" % len(ids), *ids)
+
+
+class StoryIdReadingTest(unittest.TestCase):
+    """The name the file gives each story, in the order STRS cuts them.
+
+    A shape says which story it holds by id, not by position, so without
+    this table the id says nothing. With it, a frame can be tied to its
+    words without reading either -- which is the whole point, because the
+    frames this exists for arrived with no words in them.
+    """
+
+    def test_reads_one_id_per_story(self):
+        stream = quill_stream(("SYID", story_ids_chunk(2, 3, 13, 40992)))
+        self.assertEqual(pubfile._story_ids(stream), [2, 3, 13, 40992])
+
+    def test_refuses_a_count_the_chunk_has_no_room_for(self):
+        # Truncation must not be read as a shorter table: the positions are
+        # what carry the meaning, so a table missing its tail is not a
+        # table missing nothing.
+        stream = quill_stream(("SYID", struct.pack("<2I", 0, 40) + b"\x02\x00\x00\x00"))
+        self.assertEqual(pubfile._story_ids(stream), [])
+
+    def test_a_stream_without_the_chunk_states_no_ids(self):
+        stream = quill_stream(("TEXT", "Ziekenzorg\r".encode("utf-16-le")))
+        self.assertEqual(pubfile._story_ids(stream), [])
+
+
+class StoryOfShapeTest(unittest.TestCase):
+    """A shape's story id taken through SYID to a position in STRS."""
+
+    def structure(self, **kwargs) -> pubfile.FileStructure:
+        defaults = dict(
+            story_texts=["Datum\r", "Beste gemeenteleden,\r", "Lieve gemeente,\r"],
+            story_ids=[4, 62, 70],
+            shape_stories={295: 4, 313: 62, 347: 70},
+        )
+        defaults.update(kwargs)
+        return pubfile.FileStructure(**defaults)
+
+    def test_composes_the_id_into_a_position(self):
+        structure = self.structure()
+        self.assertEqual(structure.story_of_shape(313), 1)
+        self.assertEqual(structure.story_of_shape(347), 2)
+
+    def test_two_tables_describing_different_documents_answer_nothing(self):
+        # Neither table can be trusted about the other unless they agree on
+        # how many stories there are to name.
+        structure = self.structure(story_ids=[4, 62])
+        self.assertIsNone(structure.story_of_shape(313))
+
+    def test_a_shape_naming_no_story_has_none(self):
+        self.assertIsNone(self.structure().story_of_shape(999))
+
+    def test_an_id_the_table_does_not_list_has_none(self):
+        structure = self.structure(shape_stories={295: 12345})
+        self.assertIsNone(structure.story_of_shape(295))
+
+    def test_a_file_stating_no_ids_answers_nothing(self):
+        self.assertIsNone(self.structure(story_ids=[]).story_of_shape(313))
+
+
+class RealStoryIdTest(unittest.TestCase):
+    """SYID and STRS, read off the file that needs them."""
+
+    @needs_truncated
+    def test_every_story_the_ruler_cuts_is_named_once(self):
+        structure = pubfile.read_structure(TRUNCATED)
+        self.assertEqual(len(structure.story_ids), len(structure.story_texts))
+        self.assertEqual(len(set(structure.story_ids)), len(structure.story_ids))
+
+    @needs_truncated
+    def test_the_letter_libmspub_delivers_empty_is_found_by_id(self):
+        # Two frames, pages 24 and 25, one story: libmspub opens both and
+        # closes them again without a paragraph, so the id is the only way
+        # back to the words.
+        structure = pubfile.read_structure(TRUNCATED)
+        shapes = [
+            seq for seq in structure.shape_stories
+            if (index := structure.story_of_shape(seq)) is not None
+            and structure.story_texts[index].startswith("Beste gemeenteleden,\rHet duurt")
+        ]
+        self.assertEqual(len(shapes), 2, "the letter is held by a pair of frames")
+
+
+class UndeliveredStoryTest(unittest.TestCase):
+    """Frames libmspub opened and left completely empty.
+
+    Not the same failure as text cut short, and not reachable the same way.
+    A frame holding a prefix can be matched against the file's stories by
+    that prefix; a frame holding nothing cannot, because every story starts
+    with nothing. The file names the story each shape holds, and that name
+    still answers when the text does not.
+    """
+
+    def frame_at(self, x, y, w=100.0, h=50.0) -> model.TextFrame:
+        return model.TextFrame(x=x, y=y, width=w, height=h)
+
+    def anchor(self, shape_seq, frame, page) -> pubfile.ShapeAnchor:
+        """Where the file puts a shape, given where libmspub drew it."""
+        return pubfile.ShapeAnchor(
+            shape_seq=shape_seq,
+            centre_x=frame.x + frame.width / 2.0 - page.width / 2.0,
+            centre_y=frame.y + frame.height / 2.0 - page.height / 2.0,
+        )
+
+    def fill(self, frames, shape_stories, story_texts, extra_anchors=()):
+        page = model.Page(width=612.0, height=792.0)
+        for frame in frames.values():
+            page.items.append(frame)
+        document = model.Document(pages=[page])
+        anchors = [
+            self.anchor(seq, frame, page) for seq, frame in frames.items()
+        ]
+        anchors += [self.anchor(seq, frames[on], page) for seq, on in extra_anchors]
+        structure = pubfile.FileStructure(
+            story_texts=list(story_texts),
+            story_ids=[10 * (i + 1) for i in range(len(story_texts))],
+            shape_stories=dict(shape_stories),
+            anchors=anchors,
+            shape_pages={a.shape_seq: 266 for a in anchors},
+        )
+        filled = convert._fill_undelivered_stories(document, structure)
+        return document, filled
+
+    def test_an_empty_frame_gets_the_story_the_file_names(self):
+        frame = self.frame_at(100.0, 100.0)
+        _document, filled = self.fill(
+            {313: frame}, {313: 20},
+            ["Datum\r", "Beste gemeenteleden,\rHet duurt nog een poosje\r"],
+        )
+        self.assertEqual(
+            [p.text() for p in frame.story.paragraphs],
+            ["Beste gemeenteleden,", "Het duurt nog een poosje"],
+        )
+        self.assertEqual(filled, [len("Beste gemeenteleden,Het duurt nog een poosje")])
+
+    def test_a_frame_holding_text_is_left_alone(self):
+        # Cut-short text is `_restore_truncated_stories`' business, and it
+        # keeps libmspub's reading of the runs that did arrive.
+        frame = frame_saying("Datum")
+        frame.x, frame.y, frame.width, frame.height = 100.0, 100.0, 100.0, 50.0
+        self.fill({313: frame}, {313: 20}, ["Datum\r", "Beste gemeenteleden,\r"])
+        self.assertEqual([p.text() for p in frame.story.paragraphs], ["Datum"])
+
+    def test_a_frame_two_shapes_claim_is_left_alone(self):
+        # `Lisa Hoogendijk.pub` sits a decorative shape 0.2pt from a text
+        # frame, inside the half-point the match allows, so both resolve to
+        # it -- and the decoration's story is not the one that belongs
+        # there. Where two shapes claim one frame, neither speaks for it.
+        frame = self.frame_at(100.0, 100.0)
+        self.fill(
+            {313: frame}, {313: 20, 347: 10},
+            ["Datum\r", "Beste gemeenteleden,\r"],
+            extra_anchors=[(347, 313)],
+        )
+        self.assertTrue(frame.story.is_empty())
+
+    def test_a_story_that_is_itself_empty_leaves_the_frame_empty(self):
+        # Publisher's own blank frames are blank, and the file agreeing
+        # that there is nothing there is the answer, not a failure to look.
+        frame = self.frame_at(100.0, 100.0)
+        _document, filled = self.fill({313: frame}, {313: 10}, [" \r", "Datum\r"])
+        self.assertTrue(frame.story.is_empty())
+        self.assertEqual(filled, [])
+
+    def test_a_shape_the_file_does_not_name_a_story_for_is_passed_over(self):
+        frame = self.frame_at(100.0, 100.0)
+        self.fill({313: frame}, {}, ["Datum\r"])
+        self.assertTrue(frame.story.is_empty())
+
+    def test_a_file_that_states_no_stories_changes_nothing(self):
+        frame = self.frame_at(100.0, 100.0)
+        document = model.Document(pages=[page_with(frame)])
+        self.assertEqual(
+            convert._fill_undelivered_stories(document, pubfile.FileStructure()), []
+        )
+        self.assertTrue(frame.story.is_empty())
+
+
+class BlankFrameDropTest(unittest.TestCase):
+    """An empty frame draws nothing -- asked once the file has had its say.
+
+    libmspub's own rule, moved to where the answer is knowable. `model`
+    cannot tell a frame Publisher left blank from one libmspub failed to
+    fill, so it places both and this decides between them afterwards.
+    """
+
+    def drop(self, *items) -> List[model.Item]:
+        document = model.Document(pages=[page_with(*items)])
+        convert._drop_blank_frames(document)
+        return document.pages[0].items
+
+    def test_an_empty_frame_with_no_paint_goes(self):
+        self.assertEqual(self.drop(model.TextFrame()), [])
+
+    def test_a_frame_holding_words_stays(self):
+        frame = frame_saying("Beste gemeenteleden,")
+        self.assertEqual(self.drop(frame), [frame])
+
+    def test_an_empty_frame_that_is_painted_stays(self):
+        # It draws its fill even with nothing in it, which is the whole of
+        # why the rule asks about paint at all.
+        frame = model.TextFrame()
+        frame.style.fill = (255, 0, 0)
+        self.assertEqual(self.drop(frame), [frame])
+
+    def test_an_empty_frame_inside_a_group_goes(self):
+        group = model.Group(children=[model.TextFrame(), frame_saying("Datum")])
+        self.drop(group)
+        self.assertEqual(len(group.children), 1)
+
+    def test_nothing_else_is_touched(self):
+        rectangle = model.Rectangle(x=1.0, y=2.0, width=3.0, height=4.0)
+        self.assertEqual(self.drop(rectangle), [rectangle])
+
+
+class FilledTextWarningTest(unittest.TestCase):
+    """Words with no formatting behind them have to be flagged as such."""
+
+    def note(self, filled):
+        document = model.Document()
+        convert._note_filled_text(document, filled)
+        return document.warnings
+
+    def test_says_how_much_went_in_and_into_how_many_frames(self):
+        warnings = self.note([2187, 2106])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("4293", warnings[0])
+        self.assertIn("2 frame(s)", warnings[0])
+
+    def test_says_the_type_is_not_publishers(self):
+        self.assertIn("default face", self.note([2187])[0])
+
+    def test_says_nothing_when_every_frame_arrived_filled(self):
+        self.assertEqual(self.note([]), [])

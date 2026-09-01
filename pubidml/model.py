@@ -893,9 +893,13 @@ class ModelBuilder:
         self._span = None
         if frame is None:
             return
-        # An empty frame with no fill or stroke contributes nothing.
-        if frame.story.is_empty() and not frame.style.fill and not frame.style.stroke:
-            return
+        # An empty frame with no fill or stroke contributes nothing -- but
+        # not here, and for the same reason the empty grids below wait. At
+        # this point an empty frame and a frame libmspub *failed* to fill
+        # look identical: the file names the story a frame holds, and where
+        # that story has words the emptiness is libmspub's and not
+        # Publisher's. `convert._drop_blank_frames` asks once the file has
+        # had its say.
         self._place(frame)
 
     # Tables keep their structure. libmspub describes them completely --

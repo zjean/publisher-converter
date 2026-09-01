@@ -369,6 +369,10 @@ _TOKEN_CHUNK, _TEXT_CHUNK, _PARAGRAPHS_CHUNK = "TOKN", "TEXT", "FDPP"
 # STRS states how the TEXT chunk divides into stories -- one length per
 # story, in characters, in text order. libmspub never reads it.
 _STRINGS_CHUNK = "STRS"
+# SYID names those same stories: one id each, in the same order, and it is
+# the id a shape carries in _SHAPE_STORY_ID. It is the only thing in the
+# file that ties a frame to its words without going through the text.
+_STORY_IDS_CHUNK = "SYID"
 
 # Tab stops, which libmspub reads into ParagraphStyle::m_tabStopsInEmu and
 # its collector then never looks at, so they are dropped before librevenge
@@ -663,6 +667,13 @@ class FileStructure:
     #: truncated story is measured and completed against. Empty where the
     #: Quill stream does not state a readable set (`_story_texts`).
     story_texts: List[str] = field(default_factory=list)
+    #: The id of each story in `story_texts`, in the same order, as SYID
+    #: states them. Empty where SYID is absent or does not describe the
+    #: same set of stories STRS does (`_story_ids`).
+    story_ids: List[int] = field(default_factory=list)
+    #: The story id each shape holds, by shape seqnum. A shape drawing no
+    #: text names none and is absent (`_read_shape_stories`).
+    shape_stories: Dict[int, int] = field(default_factory=dict)
     #: The pages libmspub never reports, as (reading position, chunk) with
     #: the position 1-based in the finished document. See `_blank_pages`.
     blank_pages: List[Tuple[int, PageStructure]] = field(default_factory=list)
@@ -710,6 +721,29 @@ class FileStructure:
         if shape_seq is None:
             return None
         return self.shape_pages.get(shape_seq)
+
+    def story_of_shape(self, shape_seq: Optional[int]) -> Optional[int]:
+        """Which of `story_texts` this shape holds, where the file says.
+
+        A shape names its story by id and SYID lists those ids in the order
+        STRS cuts the text, so the two compose into a position. This is the
+        only route to a frame's words that does not go through the words:
+        it still answers where libmspub delivered none of them, which is
+        what a prefix match cannot do -- every story begins with nothing.
+
+        The two tables must describe the same set of stories before either
+        can be trusted about the other, so a SYID that does not match STRS
+        story for story answers nothing at all.
+        """
+        if not self.story_ids or len(self.story_ids) != len(self.story_texts):
+            return None
+        story_id = self.shape_stories.get(shape_seq)
+        if story_id is None:
+            return None
+        try:
+            return self.story_ids.index(story_id)
+        except ValueError:
+            return None
 
     def wordart_near(
         self, centre_x: float, centre_y: float, tolerance: float = 0.5
@@ -1963,6 +1997,52 @@ def _story_texts(quill: bytes) -> List[str]:
     return stories
 
 
+def _story_ids(quill: bytes) -> List[int]:
+    """The id of every story, in the order STRS cuts them out of TEXT.
+
+    SYID is a word nothing here reads, the story count, then one id per
+    story. Those ids are what a shape carries in `_SHAPE_STORY_ID`, so this
+    table is the hinge between a frame and its words -- and unlike matching
+    on the text, it holds where libmspub delivered no text at all.
+
+    The count is checked against the room the chunk actually has, and the
+    caller checks the answer against STRS before using it: a list of ids
+    that names a different number of stories than the ruler cuts is not
+    describing the same document and settles nothing.
+    """
+    chunks = _quill_chunks(quill)
+    ids = next((c for c in chunks if c[0] == _STORY_IDS_CHUNK), None)
+    if ids is None:
+        return []
+    _name, offset, length = ids
+    if length < 8 or offset + 8 > len(quill):
+        return []
+    count = struct.unpack_from("<I", quill, offset + 4)[0]
+    table = offset + 8
+    if 8 + count * 4 > length or table + count * 4 > len(quill):
+        log.info("SYID states %d story/stories with room for fewer", count)
+        return []
+    return list(struct.unpack_from("<%dI" % count, quill, table))
+
+
+def _read_shape_stories(contents: bytes, refs) -> Dict[int, int]:
+    """The story id each shape holds, by shape seqnum.
+
+    The same field the chains are read from, kept whole rather than grouped:
+    a chain needs two shapes to exist, but a story delivered empty has to be
+    findable from one.
+    """
+    stories: Dict[int, int] = {}
+    for seq, kind, offset in refs:
+        if kind != _SHAPE_CHUNK:
+            continue
+        fields = {block.id: block.data for block in _chunk_blocks(contents, offset)}
+        story = fields.get(_SHAPE_STORY_ID)
+        if story is not None:
+            stories[seq] = story
+    return stories
+
+
 def _default_tab_stop(quill: bytes) -> Optional[float]:
     """The document's default tab interval in points, where it states one.
 
@@ -2015,6 +2095,8 @@ def read_structure(source: Path) -> Optional[FileStructure]:
             anchors=_read_shape_anchors(data),
             story_chains=_read_story_chains(contents, refs),
             story_texts=_story_texts(quill),
+            story_ids=_story_ids(quill),
+            shape_stories=_read_shape_stories(contents, refs),
             guides=_read_guides(contents, refs),
         )
         chunks: Dict[int, PageStructure] = {}

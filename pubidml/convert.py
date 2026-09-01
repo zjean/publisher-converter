@@ -12,6 +12,7 @@ import threading
 import time
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -1566,6 +1567,103 @@ def _restore_truncated_stories(
     return list(restored.values())
 
 
+def _fill_undelivered_stories(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> List[int]:
+    """Put the words in the frames libmspub opened and never filled.
+
+    The failure `_restore_truncated_stories` repairs has a limit case that
+    it cannot touch: for five frames of `1337 kerkbode.pub` libmspub emits
+    `startTextObject` and then `endTextObject` with not one paragraph in
+    between, so two pages of an Open Monumentendag letter reach the page as
+    a photograph and a page number. Matching on the text cannot help here,
+    because there is no text -- and every story in the file begins with
+    nothing, so a prefix rule asked about an empty frame is ambiguous by
+    construction rather than by accident.
+
+    The file settles it without going through the words at all. A shape
+    names its story by id, SYID lists those ids in the order STRS cuts the
+    text, and `story_of_shape` composes the two. That is an identity the
+    file states, not an inference from what happens to be on the page.
+
+    Two guards. The shape-to-frame mapping must be *injective*: in
+    `Lisa Hoogendijk.pub` a decorative shape sits 0.2pt from a text frame
+    -- inside the half-point the match allows -- so both it and the frame's
+    own shape claim that frame, and the decoration's story is not the one
+    there. Where two shapes claim one frame, neither speaks for it. And
+    only frames libmspub left *entirely* empty are filled, so a frame that
+    received text keeps it, and a story that is itself empty stays empty.
+    """
+    if structure is None or not structure.story_texts:
+        return []
+
+    frames = _frames_by_shape(document, structure)
+    claimed = Counter(id(frame) for frame in frames.values())
+    filled: Dict[int, int] = {}
+    for shape_seq, frame in frames.items():
+        if claimed[id(frame)] != 1 or _frame_text(frame).strip():
+            continue
+        index = structure.story_of_shape(shape_seq)
+        if index is None:
+            continue
+        paragraphs = _file_paragraphs(structure.story_texts[index])
+        if not any(text.strip() for text in paragraphs):
+            continue
+        frame.story.paragraphs[:] = [
+            model.Paragraph(spans=[model.Span(text=text)]) for text in paragraphs
+        ]
+        filled[index] = sum(len(text) for text in paragraphs)
+        log.info(
+            "filled a frame libmspub left empty with %d character(s) from the file",
+            filled[index],
+        )
+    return list(filled.values())
+
+
+def _note_filled_text(document: model.Document, filled: List[int]) -> None:
+    """Say which frames hold words libmspub never delivered at all.
+
+    A heavier caveat than the restored text above carries, and it is worth
+    saying separately. There the tail continued a run that had arrived, so
+    the type came from Publisher. Here nothing arrived, so nothing in the
+    event stream says what this text should look like and it lands in the
+    document's default face at its default size. The words are the file's;
+    the type is nobody's.
+    """
+    if not filled:
+        return
+    document.warnings.append(
+        f"{sum(filled)} character(s) put into {len(filled)} frame(s) that "
+        "libmspub opened and left completely empty: it delivered no text for "
+        "them at all, so unlike text merely cut short there is no run to take "
+        "the formatting from. The words come from the file, which names the "
+        "story each frame holds; the type does not, and every one of these "
+        "frames is in the default face at the default size -- restyle them in "
+        "Affinity against the original"
+    )
+
+
+def _drop_blank_frames(document: model.Document) -> None:
+    """Drop the frames that are still empty once the file has had its say.
+
+    libmspub's own reason for dropping them, asked at the point where the
+    answer is knowable: an empty frame with no fill and no stroke draws
+    nothing. What moved is only *when* -- `model` cannot tell a frame
+    Publisher left blank from one libmspub failed to fill, and the file
+    can, so the question waits for it.
+    """
+    def keep(item: model.Item) -> bool:
+        if not isinstance(item, model.TextFrame):
+            return True
+        return not item.story.is_empty() or bool(item.style.fill or item.style.stroke)
+
+    for page in document.pages:
+        page.items[:] = [item for item in page.items if keep(item)]
+        for item in model._walk(page.items):
+            if isinstance(item, model.Group):
+                item.children[:] = [c for c in item.children if keep(c)]
+
+
 def _note_restored_text(document: model.Document, restored: List[int]) -> None:
     """Say which text came from the file rather than from the event stream.
 
@@ -2484,6 +2582,14 @@ def _convert(
     # the story whole. After `textrepair`, whose repair is part of the text
     # this matches against the file.
     _note_restored_text(document, _restore_truncated_stories(document, structure))
+    # After it, and for the frames it cannot reach: a story delivered as
+    # nothing at all has no prefix to match on, and is found through the id
+    # the file gives it instead.
+    _note_filled_text(document, _fill_undelivered_stories(document, structure))
+    # Once both have had their say, so that a frame is only blank if the
+    # file agrees it is. `model` places every frame it is handed, because
+    # up to here an empty frame and an unfilled one look the same.
+    _drop_blank_frames(document)
     # Before every pass that reads a page by its index, and before the
     # page-number substitution in particular: a page put back afterwards
     # would leave the numbering it was restored to fix untouched.
