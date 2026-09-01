@@ -4864,3 +4864,115 @@ class RealWrapDistanceTest(unittest.TestCase):
         )
         bottom = portrait.y + portrait.height + portrait.wrap_offsets[2]
         self.assertGreater(bottom, 163.0)
+
+
+class WrapPageNarrowingTest(unittest.TestCase):
+    """A wrap distance comes off this page's shapes and no other's.
+
+    Escher coordinates are measured from the centre of *a* page, so a
+    photograph in the same corner of another page matches on position
+    alone. 40 items in the corpus took room off two pages before the
+    search was narrowed.
+    """
+
+    def structure(self) -> pubfile.FileStructure:
+        return pubfile.FileStructure(
+            anchors=[
+                pubfile.ShapeAnchor(shape_seq=1, centre_x=-143.0, centre_y=-206.0,
+                                    width=101.4, height=139.3,
+                                    wrap=(1.0, 1.0, 1.0, 1.0)),
+                pubfile.ShapeAnchor(shape_seq=2, centre_x=-143.0, centre_y=-206.0,
+                                    width=108.0, height=145.0,
+                                    wrap=(9.0, 9.0, 9.0, 9.0)),
+            ],
+        )
+
+    def test_a_shape_on_another_page_is_not_a_candidate(self):
+        offsets = self.structure().wrap_near(
+            -143.0, -206.0, 101.4, 139.3, shapes={1}
+        )
+        self.assertEqual(offsets, (1.0, 1.0, 1.0, 1.0))
+
+    def test_this_page_s_own_border_still_counts(self):
+        offsets = self.structure().wrap_near(
+            -143.0, -206.0, 101.4, 139.3, shapes={1, 2}
+        )
+        self.assertGreater(max(offsets), 9.0)
+
+    def test_none_of_this_page_s_shapes_states_one(self):
+        self.assertIsNone(
+            self.structure().wrap_near(-143.0, -206.0, 101.4, 139.3, shapes=set())
+        )
+
+
+class WrapDistanceLimitTest(unittest.TestCase):
+    """A property word read out of range is not a gap."""
+
+    def test_an_implausible_distance_is_refused(self):
+        huge = int(400.0 * pubfile._EMU_PER_POINT)
+        self.assertEqual(
+            pubfile._wrap_distances({pubfile._PROP_WRAP_DISTANCES[0]: huge}),
+            (0.0, 0.0, 0.0, 0.0),
+        )
+
+    def test_publishers_own_gap_is_kept(self):
+        emu = int(2.88 * pubfile._EMU_PER_POINT)
+        self.assertEqual(
+            pubfile._wrap_distances({pubfile._PROP_WRAP_DISTANCES[0]: emu})[1], 2.88
+        )
+
+
+class DuplicateStoryIdTest(unittest.TestCase):
+    """SYID naming one id twice cannot take a shape to a story."""
+
+    def test_a_repeated_id_makes_the_table_unusable(self):
+        stream = quill_stream(("SYID", story_ids_chunk(2, 13, 13, 40992)))
+        self.assertEqual(pubfile._story_ids(stream), [])
+
+
+class TableStructureEqualityTest(unittest.TestCase):
+    """Two tables drawing one grid are compared on their cells.
+
+    `_read_tables` nulls a signature whose two tables disagree. Comparing
+    the story id would make *every* pair disagree -- each table names its
+    own story -- and take the insets, rules and TCD pairing down with it.
+    """
+
+    def test_the_story_and_the_cell_order_are_not_part_of_it(self):
+        one = pubfile.TableStructure(story_id=70, cell_order=[(0, 0), (1, 0)])
+        two = pubfile.TableStructure(story_id=99, cell_order=[(1, 0), (0, 0)])
+        self.assertEqual(one, two)
+
+    def test_a_real_disagreement_still_shows(self):
+        one = pubfile.TableStructure(story_id=70, insets={(0, 0): (1.0, 1, 1, 1)})
+        two = pubfile.TableStructure(story_id=70, insets={(0, 0): (2.0, 2, 2, 2)})
+        self.assertNotEqual(one, two)
+
+
+class CellDivisionBoundsTest(unittest.TestCase):
+    """A chunk offset past the end of the stream must not raise.
+
+    `read_structure` catches everything and answers None, so an unguarded
+    struct error costs the whole file its masters, insets and tab stops.
+    """
+
+    def stream_pointing_past_the_end(self) -> bytes:
+        stream = bytearray(quill_stream(("TCD ", divisions_chunk(21, 51))))
+        # Two bytes from the end, so even the count cannot be read.
+        at = stream.index(b"TCD ") + 14
+        struct.pack_into("<I", stream, at, len(stream) - 2)
+        return bytes(stream)
+
+    def test_the_unguarded_read_really_would_raise(self):
+        # Pins that this is a test of the guard and not of nothing.
+        stream = self.stream_pointing_past_the_end()
+        name, offset, length = pubfile._quill_chunks(stream)[0]
+        self.assertEqual(name, pubfile._CELL_DIVISIONS_CHUNK)
+        self.assertGreaterEqual(length, 12)
+        with self.assertRaises(struct.error):
+            struct.unpack_from("<I", stream, offset)
+
+    def test_an_offset_past_the_end_is_passed_over(self):
+        self.assertEqual(
+            pubfile._cell_divisions(self.stream_pointing_past_the_end()), []
+        )

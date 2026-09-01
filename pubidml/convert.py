@@ -1640,19 +1640,44 @@ def _apply_wrap_offsets(
 
     Matched by where the shape sits, and left alone where that is not
     certain: an offset taken off the wrong shape is a gap invented, which
-    is the one thing worse than the zero this replaces.
+    is the one thing worse than the zero this replaces. That is also why
+    the search is one page wide -- Escher coordinates are measured from the
+    centre of *a* page, so a photograph in the same corner of another page
+    matches on position alone.
+
+    Masters as well as pages, because `_apply_master_pages` runs first and
+    has by then moved the items it attributed off the pages and onto a
+    master. A logo repeated on every page is exactly what it lifts, and
+    exactly the kind of picture copy has to keep clear of.
     """
     if structure is None or not structure.anchors:
         return 0
 
+    page_of_chunk = _page_by_chunk(document, structure)
+    shapes_on: Dict[int, set] = {}
+    for anchor in structure.anchors:
+        index = page_of_chunk.get(structure.page_seq_of(anchor.shape_seq))
+        if index is not None:
+            shapes_on.setdefault(index, set()).add(anchor.shape_seq)
+    # A master's content is held under a master chunk, so those are the
+    # shapes to search for it -- and they are not in `shapes_on`, whose
+    # mapping only covers the chunks libmspub turned into pages.
+    on_master = {
+        anchor.shape_seq for anchor in structure.anchors
+        if structure.page_seq_of(anchor.shape_seq) in structure.masters
+    }
+
     found = 0
-    for page in document.pages:
-        for item in model._walk(page.items):
+    holders = [(page, shapes_on.get(index)) for index, page in enumerate(document.pages)]
+    holders += [(master, on_master) for master in document.masters]
+    for holder, shapes in holders:
+        for item in model._walk(holder.items):
             offsets = structure.wrap_near(
-                item.x + item.width / 2.0 - page.width / 2.0,
-                item.y + item.height / 2.0 - page.height / 2.0,
+                item.x + item.width / 2.0 - holder.width / 2.0,
+                item.y + item.height / 2.0 - holder.height / 2.0,
                 item.width,
                 item.height,
+                shapes=shapes,
             )
             if offsets is not None:
                 item.wrap_offsets = offsets

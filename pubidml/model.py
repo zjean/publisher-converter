@@ -908,6 +908,19 @@ class ModelBuilder:
         # that story has words the emptiness is libmspub's and not
         # Publisher's. `convert._drop_blank_frames` asks once the file has
         # had its say.
+        #
+        # One thing is still settled here: an empty unpainted frame whose
+        # geometry is out of range is discarded without counting, the way
+        # it always was. `_place` counts what it drops and the document
+        # warns about the total, and an empty frame nobody wanted is not
+        # something the reader lost.
+        if (
+            frame.story.is_empty()
+            and not frame.style.fill
+            and not frame.style.stroke
+            and not _within_sane_bounds(frame)
+        ):
+            return
         self._place(frame)
 
     # Tables keep their structure. libmspub describes them completely --

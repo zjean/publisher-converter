@@ -1548,7 +1548,9 @@ class IdmlWriter:
         return _serialise(root)
 
     @staticmethod
-    def _emit_text_wrap(element: ET.Element, item: model.Item = None) -> None:
+    def _emit_text_wrap(
+        element: ET.Element, item: Optional[model.Item] = None
+    ) -> None:
         """Ask the text under an object to flow around it instead.
 
         libmspub reports no wrap *mode* for anything, so every object

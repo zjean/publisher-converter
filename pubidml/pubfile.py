@@ -294,6 +294,10 @@ _PROP_WRAP_DISTANCES = (0x0384, 0x0385, 0x0386, 0x0387)
 # round it rather than a different object. See `FileStructure.wrap_near`,
 # which is the only thing that uses it, for the measurement behind it.
 _WRAP_BORDER_LIMIT = 12.0
+# The most a wrap distance can plausibly be. Publisher offers a gap in
+# tenths of an inch and the corpus states 0.04in on all but eight shapes;
+# a value past this is a word read wrong, not a gap.
+_WRAP_DISTANCE_LIMIT = 144.0
 
 # WordArt's character formatting, which is not the shape's: bold, italic
 # and the rest are booleans of its own, packed into one property. MS-ODRAW
@@ -492,14 +496,27 @@ class TableStructure:
     #: The id of the story this table's text comes out of. A table names
     #: it in the same field a text frame does, which is what puts table
     #: text within reach of `FileStructure.story_of_shape`'s SYID lookup.
-    story_id: Optional[int] = None
+    #:
+    #: Out of the equality `_read_tables` uses to spot two tables drawing
+    #: one grid: every table names a *different* story, so comparing this
+    #: would make any two same-shaped grids disagree and null each other
+    #: out -- taking their insets and rules with them, and leaving
+    #: `_pair_divisions` one owner short of its divisions, which drops the
+    #: pairing for the whole document. What that check is asking is whether
+    #: two grids describe the same *cells*, and a story id is not that.
+    story_id: Optional[int] = field(default=None, compare=False)
     #: Where each cell record sits, as (row, column), **in the order the
     #: file holds the records**. That order is the order of the table's
     #: story, and the position is where the cell is drawn -- which is how
     #: a table whose rows Publisher sorted for display still gets its
     #: words into the right cells. Its length is the table's cell count,
     #: which is what a TCD division has to match to be this table's.
-    cell_order: List[Tuple[int, int]] = field(default_factory=list)
+    #: Out of the equality check for the same reason `story_id` is: two
+    #: grids can hold their cell records in different orders and still be
+    #: the same grid.
+    cell_order: List[Tuple[int, int]] = field(
+        default_factory=list, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -760,6 +777,7 @@ class FileStructure:
         width: float,
         height: float,
         tolerance: float = 1.5,
+        shapes: Optional[set] = None,
     ) -> Optional[Tuple[float, float, float, float]]:
         """How far text keeps off this item, as (top, left, bottom, right).
 
@@ -785,10 +803,21 @@ class FileStructure:
         Escher anchor measures a shape with its outline while libmspub
         reports the path inside it, about a point apart on a bordered
         picture. None where no shape here states a distance at all.
+
+        `shapes` narrows the search to one page's own shapes and the caller
+        should always pass it. Coordinates here are measured from the centre
+        of *a* page, so without it a photograph in the same corner of
+        another page is a candidate -- 40 items in the corpus unioned
+        shapes from two pages before this was added, one of them a frame on
+        page 3 of `MISSAL MARIANA E PEDRO.pub` taking room off pages 1 and
+        4. `convert._frames_by_shape` narrows the same way, for the same
+        reason: a newsletter repeats its layout, so position alone does not
+        identify a shape.
         """
         near = [
             anchor for anchor in self.anchors
             if anchor.wrap is not None
+            and (shapes is None or anchor.shape_seq in shapes)
             and abs(anchor.centre_x - centre_x) <= tolerance
             and abs(anchor.centre_y - centre_y) <= tolerance
             # A border, not another object. Measured over the corpus: every
@@ -1649,7 +1678,15 @@ def _wrap_distances(props: dict) -> Optional[Tuple[float, float, float, float]]:
 
     def points(side: int) -> float:
         value = props.get(side)
-        return value / _EMU_PER_POINT if isinstance(value, int) else 0.0
+        if not isinstance(value, int):
+            return 0.0
+        distance = value / _EMU_PER_POINT
+        # A raw property word read out of range would be written straight
+        # into the package as an enormous offset and push the copy off the
+        # page. Publisher's own dialog tops out well inside an inch, so
+        # anything past a quarter of the page is not a distance -- the same
+        # refusal `_default_tab_stop` makes for a tab interval.
+        return distance if 0.0 <= distance <= _WRAP_DISTANCE_LIMIT else 0.0
 
     return points(top), points(left), points(bottom), points(right)
 
@@ -2201,7 +2238,18 @@ def _story_ids(quill: bytes) -> List[int]:
     if 8 + count * 4 > length or table + count * 4 > len(quill):
         log.info("SYID states %d story/stories with room for fewer", count)
         return []
-    return list(struct.unpack_from("<%dI" % count, quill, table))
+    ids = list(struct.unpack_from("<%dI" % count, quill, table))
+    if len(set(ids)) != len(ids):
+        # An id naming two stories cannot take a shape to one of them, and
+        # the readers would disagree about which: `story_of_shape` takes
+        # the first by `index()` while `_pair_divisions` keys a dict and so
+        # keeps the last. A division filed under one story and its words
+        # fetched from another is the silent corruption the count check
+        # exists to prevent, so the table is refused whole. Nothing in the
+        # corpus repeats an id.
+        log.info("SYID names a story id twice; the table is not usable")
+        return []
+    return ids
 
 
 def _cell_divisions(quill: bytes) -> List[List[int]]:
@@ -2225,6 +2273,13 @@ def _cell_divisions(quill: bytes) -> List[List[int]]:
     divisions = []
     for name, offset, length in _quill_chunks(quill):
         if name != _CELL_DIVISIONS_CHUNK or length < 12:
+            continue
+        # The stated length is not the offset: `_quill_chunks` hands back
+        # what the file says, and a damaged stream can point past the end.
+        # Unguarded, the struct error would be caught by `read_structure`
+        # and cost the whole FileStructure -- masters, insets, tab stops
+        # and all -- for a file that converted before this existed.
+        if offset + 12 > len(quill):
             continue
         count = struct.unpack_from("<I", quill, offset)[0]
         table = offset + 12
