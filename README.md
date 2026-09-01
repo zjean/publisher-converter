@@ -922,6 +922,43 @@ These are real and deliberate, not bugs to be surprised by later.
   chain whose text fits its first frame is invisible to it — which is
   what reading the record fixes. The report says which of the two each
   chain came from. Files where this fires are flagged `review`.
+- **A story libmspub cuts short is completed from the file.** libmspub
+  builds its character runs from the Quill run tables, and where it
+  misreads them for a story it emits *a run per character* — alternating
+  bold letter by letter, a stray colour on a single glyph — and then
+  stops partway through. In `1337 kerkbode.pub` one story arrives holding
+  81 of the 4,562 characters the file states for it, cut mid-word at
+  `voor over|leg`: a two-page article that reaches the page as one line,
+  under a heading, with the facing page left empty. libmspub's own
+  `pub2raw` truncates it identically, so this is upstream of the shim and
+  not something the JSON boundary introduces.
+
+  **The words come from the file.** `TEXT` holds every story run
+  together with nothing between them, and `STRS` is the ruler that
+  divides it: a count, two words nothing reads, then one length per story
+  in characters. Those lengths are trusted only when they add up to the
+  `TEXT` chunk exactly — which is what says this is the `STRS` layout and
+  not something else the same four letters name, and which holds on every
+  file in the corpus that carries text at all.
+
+  A frame is completed only where the file settles what is missing beyond
+  argument: exactly one story has the delivered text as a prefix, **and
+  no story in the file *is* that text**. The second half is what leaves a
+  complete frame alone — a short label like `Datum` opens a longer story
+  elsewhere in the same document, and a frame holding all of its own
+  story must never be extended with somebody else's. Both frames of a
+  linked chain are filled, since libmspub hands the story to each of
+  them, and threading collapses them afterwards; the count in the report
+  is per story rather than per frame.
+
+  The restored text carries the format of the last run that did arrive —
+  the same sentence carrying on, and the only statement about its format
+  this has. Inventing nothing further is the point: what failed is
+  libmspub's reading of the formatting, so the run that survives at the
+  cut is better evidence than the fragments before it. The 70 characters
+  libmspub did deliver keep its reading, junk and all, because they are
+  its reading and not ours. Files where this fires are flagged `review`,
+  and the warning says how much went back into how many stories.
 - **Groups are flattened.** Children keep their absolute positions;
   nothing moves, but the grouping is gone.
 - **Gradients are carried, with every stop.** They become real IDML

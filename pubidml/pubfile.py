@@ -366,6 +366,9 @@ _DUMMY_PAGE_SEQNUMS = frozenset({0x10D, 0x110, 0x113, 0x117})
 # and its presence is what tells us the document has fields at all. TEXT
 # holds the words and FDPP the paragraph formatting that runs over them.
 _TOKEN_CHUNK, _TEXT_CHUNK, _PARAGRAPHS_CHUNK = "TOKN", "TEXT", "FDPP"
+# STRS states how the TEXT chunk divides into stories -- one length per
+# story, in characters, in text order. libmspub never reads it.
+_STRINGS_CHUNK = "STRS"
 
 # Tab stops, which libmspub reads into ParagraphStyle::m_tabStopsInEmu and
 # its collector then never looks at, so they are dropped before librevenge
@@ -654,6 +657,12 @@ class FileStructure:
     #: story flows through them. libmspub says nothing about a link, so
     #: without this the order is whatever order the frames turned up in.
     story_chains: List[List[int]] = field(default_factory=list)
+    #: Every story in the document as the file itself holds it, in text
+    #: order. libmspub builds its text from the character-run tables and
+    #: delivers a story short where it misreads them, so this is what a
+    #: truncated story is measured and completed against. Empty where the
+    #: Quill stream does not state a readable set (`_story_texts`).
+    story_texts: List[str] = field(default_factory=list)
     #: The pages libmspub never reports, as (reading position, chunk) with
     #: the position 1-based in the finished document. See `_blank_pages`.
     blank_pages: List[Tuple[int, PageStructure]] = field(default_factory=list)
@@ -1903,6 +1912,57 @@ def _paragraph_stops(quill: bytes):
     return found
 
 
+def _story_texts(quill: bytes) -> List[str]:
+    """The TEXT chunk cut into stories, in the order the file holds them.
+
+    TEXT is every word in the document run together with nothing between
+    one story and the next, and STRS is the ruler that divides it: a count,
+    two words nothing reads, then one length per story in characters.
+
+    This exists because libmspub does not always deliver a story whole. It
+    builds its spans from the character-run tables, and where it misreads
+    those for a story it emits a run per character and then stops -- one
+    frame of `1337 kerkbode.pub` arrives with 81 of the 4,562 characters
+    the file states for it, cut mid-word. The words themselves are never in
+    doubt; only the formatting over them is.
+
+    The lengths are trusted only when they add up to the TEXT chunk
+    exactly. That is a real check rather than a formality -- it is what
+    says this is the STRS layout and not something else the same four
+    letters name -- and it holds across every file in the corpus that
+    carries text at all. Anything else returns nothing, because a ruler
+    that does not measure the thing it is laid against cannot cut it.
+    """
+    chunks = _quill_chunks(quill)
+    text_chunk = next((c for c in chunks if c[0] == _TEXT_CHUNK), None)
+    strings = next((c for c in chunks if c[0] == _STRINGS_CHUNK), None)
+    if text_chunk is None or strings is None:
+        return []
+    _name, text_at, text_length = text_chunk
+    text = quill[text_at:text_at + text_length].decode("utf-16-le", "replace")
+
+    _name, offset, length = strings
+    if offset + 12 > len(quill):
+        return []
+    count = struct.unpack_from("<I", quill, offset)[0]
+    table = offset + 12
+    if count * 4 > length or table + count * 4 > len(quill):
+        return []
+    lengths = struct.unpack_from("<%dI" % count, quill, table)
+    if sum(lengths) != len(text):
+        log.info(
+            "STRS states %d character(s) against %d in TEXT; stories not cut",
+            sum(lengths), len(text),
+        )
+        return []
+
+    stories, at = [], 0
+    for size in lengths:
+        stories.append(text[at:at + size])
+        at += size
+    return stories
+
+
 def _default_tab_stop(quill: bytes) -> Optional[float]:
     """The document's default tab interval in points, where it states one.
 
@@ -1954,6 +2014,7 @@ def read_structure(source: Path) -> Optional[FileStructure]:
             default_tab_stop=_default_tab_stop(quill),
             anchors=_read_shape_anchors(data),
             story_chains=_read_story_chains(contents, refs),
+            story_texts=_story_texts(quill),
             guides=_read_guides(contents, refs),
         )
         chunks: Dict[int, PageStructure] = {}

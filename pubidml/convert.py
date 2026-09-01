@@ -12,7 +12,7 @@ import threading
 import time
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -1471,6 +1471,126 @@ def _note_unreadable_structure(
     )
 
 
+def _file_paragraphs(story: str) -> List[str]:
+    """One story's text as the paragraphs it is made of.
+
+    The carriage return is Publisher's paragraph *terminator*, so a story
+    ending in one does not end with an empty paragraph -- and `clean_text`
+    is what the event stream's own text goes through, so applying it here
+    is what makes the two comparable at all.
+    """
+    pieces = story.split("\r")
+    if pieces and not pieces[-1]:
+        pieces.pop()
+    return [model.clean_text(piece) for piece in pieces]
+
+
+def _extend_story(story: model.Story, paragraphs: List[str], delivered: int) -> None:
+    """Add the text from `delivered` characters on to a story that stops there.
+
+    The tail continues in the format of the last run that did arrive: it is
+    the same sentence carrying on, and the character it continues from is
+    the only statement about its format that this pass has. Paragraphs
+    after it copy the last one's shape for the same reason.
+    """
+    index, offset = 0, delivered
+    while index < len(paragraphs) and offset > len(paragraphs[index]):
+        offset -= len(paragraphs[index])
+        index += 1
+
+    last = story.paragraphs[-1]
+    template = last.spans[-1] if last.spans else model.Span()
+
+    def run(text: str) -> model.Span:
+        return replace(template, text=text)
+
+    rest = paragraphs[index][offset:] if index < len(paragraphs) else ""
+    if rest:
+        last.spans.append(run(rest))
+    for text in paragraphs[index + 1:]:
+        story.paragraphs.append(
+            replace(last, spans=[run(text)], tab_stops=list(last.tab_stops))
+        )
+
+
+def _restore_truncated_stories(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> List[int]:
+    """Put back the text libmspub stopped short of delivering.
+
+    libmspub builds its runs from the character-run tables, and where it
+    misreads them for a story it emits a run per character and then stops.
+    One frame of `1337 kerkbode.pub` arrives holding 81 of the 4,562
+    characters the file states for it, cut mid-word at 'voor over|leg' --
+    two pages of an article that reach the page as one line. The words are
+    not in doubt; only libmspub's reading of the formatting over them is.
+
+    A frame is completed only when the file settles what is missing beyond
+    argument: exactly one story has the delivered text as a prefix, and no
+    story in the file *is* that text. The second half is what keeps a
+    complete frame alone -- a short label like 'Datum' can open a longer
+    story elsewhere in the document, and a frame holding all of its own
+    story must never be extended with somebody else's.
+
+    Both frames of a linked chain are completed, since libmspub hands the
+    story to each of them; threading collapses them afterwards. What comes
+    back is one count per *story*, not per frame, because a chain restored
+    across two frames is one article recovered and not two.
+    """
+    if structure is None or not structure.story_texts:
+        return []
+
+    stories = [_file_paragraphs(text) for text in structure.story_texts]
+    joined = ["".join(paragraphs) for paragraphs in stories]
+    restored: Dict[int, int] = {}
+    for item in model._walk([i for page in document.pages for i in page.items]):
+        if not isinstance(item, model.TextFrame) or not item.story.paragraphs:
+            continue
+        delivered = _frame_text(item)
+        if not delivered.strip():
+            continue
+        if any(text == delivered for text in joined):
+            continue
+        found = [
+            index for index, text in enumerate(joined)
+            if len(text) > len(delivered) and text.startswith(delivered)
+        ]
+        if len(found) != 1:
+            continue
+        _extend_story(item.story, stories[found[0]], len(delivered))
+        missing = len(joined[found[0]]) - len(delivered)
+        restored[found[0]] = missing
+        log.info(
+            "restored %d character(s) of a story libmspub cut short", missing
+        )
+    return list(restored.values())
+
+
+def _note_restored_text(document: model.Document, restored: List[int]) -> None:
+    """Say which text came from the file rather than from the event stream.
+
+    It is the one thing in the document nobody has seen on a page: libmspub
+    never delivered it, so it has never been through the reader's own
+    layout, and the formatting over it is this pass's reading rather than
+    Publisher's. Where it breaks between the frames of a chain is worth the
+    same look threading already asks for.
+    """
+    if not restored:
+        return
+    document.warnings.append(
+        f"{sum(restored)} character(s) restored on {len(restored)} story/stories "
+        "that libmspub delivered cut short: it builds its runs from the "
+        "character-run tables and, where it misreads them for a story, emits "
+        "a run per character and then stops -- one story here arrived as a "
+        "single line of a two-page article. The words come from the file, "
+        "which states each story's length, and only where exactly one story "
+        "in it continues what did arrive. The restored text carries the "
+        "format of the last run that did arrive, since libmspub's reading of "
+        "the formatting is what failed -- check the type and where the text "
+        "breaks between frames"
+    )
+
+
 def _thread_duplicate_stories(
     document: model.Document, structure: Optional["pubfile.FileStructure"] = None
 ) -> None:
@@ -2357,6 +2477,13 @@ def _convert(
     textrepair.repair_document(document, codepage)
     structure = pubfile.read_structure(source)
     _note_unreadable_structure(document, structure)
+    # Before everything that reads the text: threading compares the frames
+    # of a chain and only collapses them where they agree, overset is
+    # measured against what the frame actually holds, and a tab stop is
+    # matched to its paragraph by that paragraph's words. All three want
+    # the story whole. After `textrepair`, whose repair is part of the text
+    # this matches against the file.
+    _note_restored_text(document, _restore_truncated_stories(document, structure))
     # Before every pass that reads a page by its index, and before the
     # page-number substitution in particular: a page put back afterwards
     # would leave the numbering it was restored to fix untouched.

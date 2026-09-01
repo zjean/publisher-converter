@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import math
 import struct
+import tempfile
 import threading
 import unittest
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
@@ -34,6 +37,13 @@ needs_samples = unittest.skipUnless(
 NEWSLETTER = SAMPLES / "cgk" / "1336 kerkbode.pub"
 needs_newsletter = unittest.skipUnless(
     NEWSLETTER.exists(), f"{NEWSLETTER.name} absent (not tracked)"
+)
+
+#: The one file in the corpus whose character runs libmspub misreads, and
+#: so the only one where a story arrives cut off. Same caveat as above.
+TRUNCATED = SAMPLES / "cgk" / "1337 kerkbode.pub"
+needs_truncated = unittest.skipUnless(
+    TRUNCATED.exists(), f"{TRUNCATED.name} absent (not tracked)"
 )
 
 
@@ -4013,3 +4023,168 @@ class RealFacingDetectionTest(unittest.TestCase):
             self.skipTest(f"{source.name} absent")
         self.assertIsNotNone(pubfile.read_structure(source).print_sheet)
         self.assertFalse(self.decide(source))
+
+
+def strings_chunk(*lengths: int) -> bytes:
+    """A STRS chunk: how many stories, two words nothing reads, a length each.
+
+    The lengths are in characters and cover the TEXT chunk exactly, which
+    is what `_story_texts` checks before it trusts them.
+    """
+    return struct.pack("<3I", len(lengths), 0, 0) + struct.pack(
+        "<%dI" % len(lengths), *lengths
+    )
+
+
+class StoryTextReadingTest(unittest.TestCase):
+    """The TEXT chunk cut into stories by the lengths STRS states."""
+
+    def test_cuts_the_text_at_the_stated_lengths(self):
+        text = "Ziekenzorg\rAfgelopen 11 mei\rSecond story\r"
+        stream = quill_stream(
+            ("TEXT", text.encode("utf-16-le")),
+            ("STRS", strings_chunk(28, 13)),
+        )
+        self.assertEqual(
+            pubfile._story_texts(stream),
+            ["Ziekenzorg\rAfgelopen 11 mei\r", "Second story\r"],
+        )
+
+    def test_refuses_lengths_that_do_not_cover_the_text(self):
+        stream = quill_stream(
+            ("TEXT", "Ziekenzorg\r".encode("utf-16-le")),
+            ("STRS", strings_chunk(4, 4)),
+        )
+        self.assertEqual(pubfile._story_texts(stream), [])
+
+
+class RealStoryTextTest(unittest.TestCase):
+    """The story libmspub cuts off, read whole from the file."""
+
+    @needs_truncated
+    def test_reads_the_article_libmspub_truncates(self):
+        structure = pubfile.read_structure(TRUNCATED)
+        article = next(
+            (t for t in structure.story_texts if t.startswith("Ziekenzorg\r")), None
+        )
+        self.assertIsNotNone(article, "the article is not among the stories read")
+        # libmspub stops at 'voor over', mid-word, 81 characters in.
+        self.assertIn("voor overleg", article)
+        self.assertIn("Commissie dames ziekenzorg", article)
+        self.assertEqual(len(article), 4562)
+
+
+class TruncatedStoryTest(unittest.TestCase):
+    """Text the event stream cut short, completed from the file.
+
+    libmspub builds its spans from the character-run tables and, where it
+    misreads them for a story, stops partway through -- so the frame holds
+    a prefix of what the file says is there. The file's own text is the
+    only thing that says how much is missing.
+    """
+
+    def restore(self, frame, *stories) -> model.Document:
+        document = model.Document()
+        document.pages.append(page_with(frame))
+        convert._restore_truncated_stories(
+            document, pubfile.FileStructure(story_texts=list(stories))
+        )
+        return document
+
+    def test_completes_a_story_cut_off_mid_paragraph(self):
+        frame = frame_saying("Ziekenzorg")
+        self.restore(frame, "Ziekenzorg\rAfgelopen 11 mei\r")
+        self.assertEqual(
+            [p.text() for p in frame.story.paragraphs],
+            ["Ziekenzorg", "Afgelopen 11 mei"],
+        )
+
+    def test_leaves_a_frame_holding_its_whole_story_alone(self):
+        frame = frame_saying("Datum")
+        self.restore(frame, "Datum\r", "Datum\r1e dienst:\r")
+        self.assertEqual([p.text() for p in frame.story.paragraphs], ["Datum"])
+
+    def test_refuses_a_prefix_two_stories_share(self):
+        frame = frame_saying("Beste gemeenteleden,")
+        self.restore(
+            frame,
+            "Beste gemeenteleden,\rHet duurt nog een poosje\r",
+            "Beste gemeenteleden,\rU kunt uw voorkeur\r",
+        )
+        self.assertEqual(
+            [p.text() for p in frame.story.paragraphs], ["Beste gemeenteleden,"]
+        )
+
+    def test_the_tail_continues_the_last_run_that_arrived(self):
+        frame = frame_saying("Ziekenzorg")
+        frame.story.paragraphs[0].spans[:] = [
+            model.Span(text="Zieken", font="Calibri", size_pt=10.0, bold=True),
+            model.Span(text="zorg", font="Calibri", size_pt=10.0),
+        ]
+        self.restore(frame, "Ziekenzorg\rAfgelopen 11 mei\r")
+        tail = frame.story.paragraphs[1].spans[0]
+        self.assertEqual(tail.text, "Afgelopen 11 mei")
+        self.assertEqual(tail.font, "Calibri")
+        self.assertEqual(tail.size_pt, 10.0)
+        self.assertFalse(tail.bold)
+
+    def test_reports_a_chain_s_story_once_though_both_frames_are_filled(self):
+        first, second = frame_saying("Ziekenzorg"), frame_saying("Ziekenzorg")
+        document = model.Document()
+        document.pages.append(page_with(first, second))
+        added = convert._restore_truncated_stories(
+            document,
+            pubfile.FileStructure(story_texts=["Ziekenzorg\rAfgelopen 11 mei\r"]),
+        )
+        self.assertEqual(added, [16])
+        for frame in (first, second):
+            self.assertEqual(frame.story.paragraphs[-1].text(), "Afgelopen 11 mei")
+
+
+class RealTruncatedStoryTest(unittest.TestCase):
+    """The article libmspub halves, against the file it came from.
+
+    `1337 kerkbode.pub` is the only file in the corpus this fires on. Its
+    'Ziekenzorg' story fills two facing pages and reaches the event stream
+    as a single line, so it is both the reason this pass exists and the
+    only real evidence that it works.
+    """
+
+    @needs_truncated
+    def test_the_article_reaches_the_page_whole(self):
+        work = Path(tempfile.mkdtemp())
+        destination = work / "1337.idml"
+        result = convert.convert(TRUNCATED, destination)
+        self.assertTrue(result.ok, result.error)
+
+        with zipfile.ZipFile(destination) as archive:
+            stories = [
+                "".join(
+                    element.text or ""
+                    for element in ET.fromstring(archive.read(name)).iter("Content")
+                )
+                for name in archive.namelist() if name.startswith("Stories/")
+            ]
+        article = next((s for s in stories if s.startswith("Ziekenzorg")), None)
+        self.assertIsNotNone(article, "the article is not in the package")
+        self.assertIn("voor overleg", article)
+        self.assertIn("Commissie dames ziekenzorg", article)
+        self.assertGreater(len(article), 4000)
+
+
+class RestoredTextWarningTest(unittest.TestCase):
+    """Text put back is text the operator has not proofread."""
+
+    def note(self, restored):
+        document = model.Document()
+        convert._note_restored_text(document, restored)
+        return document.warnings
+
+    def test_says_how_much_went_back_and_into_how_many_stories(self):
+        warnings = self.note([4323, 199])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("4522", warnings[0])
+        self.assertIn("2 story/stories", warnings[0])
+
+    def test_says_nothing_when_nothing_was_short(self):
+        self.assertEqual(self.note([]), [])
