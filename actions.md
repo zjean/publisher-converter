@@ -960,3 +960,125 @@ file's own page order in chunk `0x44` says where those pages belong and
 they are put back there (README, *Blank pages are put back*) — but if you
 check a page count against Publisher during this sitting, check it after
 that pass and not against the raw event stream.
+
+---
+
+## 13. Why Publisher hides a frame's stale tail  ⏰ needs Publisher, before 1 Oct 2026
+
+### Why this matters
+
+A recycled Publisher template accumulates old copy in its frames, and
+Publisher does not print it. The converter does, because nothing it reads
+says not to — so a caption block that reads as two lines in the original
+converts to a stack of them, pushing the page about.
+
+The reported case is the meditation caption on page 3 of
+`1338 kerkbode.pub`, `‘Houd dat gij hebt, opdat niemand uw kroon neme’`:
+**25 paragraphs written where Publisher prints 2.** The trailing
+whitespace is trimmed now (`backlog.md` §13), which takes it to 15. The
+other 13 are real characters that Publisher silently drops, and no rule
+this end can tell them from wanted copy.
+
+### What is already known
+
+Established here, so don't re-derive it. Everything the converter reads
+about this frame is **correct**:
+
+- **The box is right.** 346.28 x 382.36pt, matching the file's own Escher
+  anchor (seq 302) to a hundredth of a point. Exactly one shape holds the
+  story, so nothing is being conflated with a backing panel.
+- **The text area is the box.** `fo:padding-*` is 0 on three sides and
+  0.0006in on the fourth. There is no shrunken text rectangle.
+- **The words are really there.** The file states the story as 255
+  characters and libmspub delivers 158 of them. What is in the tail is a
+  second quotation from an earlier issue — `‘…’` and
+  `(Openbaring 6: 12-17)`, which is *1337's* meditation reference — then
+  38 tabs, a `‘.’`, an `()`, a stray `1`.
+- **Nothing marks them.** Every run is `#000000` Calibri at 10 and 8pt.
+  No white colour, no `text:display`, no size trick, no outline.
+- **No break character.** The whole story holds only CR and TAB — no
+  `0x0C` page break, no `0x0E` column break.
+- **Not a chain.** No other shape holds that story, so there is no
+  continuation frame for the overflow to have gone to.
+- **Not covered.** Both body columns over it are unfilled, and the
+  panel's own ramp is behind, not in front.
+- **Publisher draws none of it.** Checked twice: text extraction over all
+  14 sheets of `files/experiments/1338 kerkbode.pdf` finds
+  `Openbaring 6` nowhere, and a 6x crop of the strip between the caption
+  and the body columns is clean.
+
+So the mechanism is *not* in the shape record, the runs, the story text or
+the z-order. The remaining candidates are a frame property libmspub
+discards — it acts on only seven shape blocks and skips the rest
+(§1) — or a Publisher behaviour with no file representation at all.
+
+### Step 1 — produce the sample files (on Windows, with Publisher, ~10 min)
+
+The question is narrow: **does Publisher print text that sits below some
+boundary inside a frame that is plainly tall enough for it?** Four files,
+one variable at a time.
+
+1. New document. One text box, roughly 350 x 380pt — deliberately far
+   taller than its content. Type three short centred paragraphs, then a
+   fourth reading `SHOULD THIS PRINT?`. Save as `tail-plain.pub`, and
+   **export a PDF of it**. This is the control: if the fourth line prints,
+   an over-tall frame is not the answer and the cause is something the
+   1338 frame has that this one does not.
+2. Same file. Select the fourth paragraph and set **Format → Font →
+   Hidden** if the version offers it; otherwise skip to 3. Save as
+   `tail-hidden.pub` + PDF.
+3. Same as 1, but drag the box's **bottom handle up** until only three
+   lines show, leaving the fourth overset. Save as `tail-overset.pub` +
+   PDF. Publisher marks overflow with the A…A button; note whether it
+   appears. **This is the one that matters** — it is the shape the 1338
+   frame would have if libmspub were reporting the box wrong, and §13's
+   evidence says it is not, so a difference here is informative either
+   way.
+4. Open `1338 kerkbode.pub` itself, click into the meditation caption on
+   page 3, and **press Ctrl+End**. Write down whether the cursor lands
+   after `(Openb. 3:11)` or after the stray `1`, and whether Publisher
+   shows an overflow indicator on that frame. Ten seconds, and it may
+   answer the whole question on its own.
+
+Copy the six files to `files/tail-samples/` on the Mac.
+
+### Step 2 — read the result (on the Mac, ~1 min)
+
+```sh
+python3 research/diff_blocks.py     plain=files/tail-samples/tail-plain.pub     overset=files/tail-samples/tail-overset.pub
+```
+
+`tail-plain` and `tail-overset` differ only in the box height, so any
+block that changes besides the shape's own height and the anchor is a
+candidate for the flag. Then read the PDFs the same way §13 was
+established:
+
+```sh
+python3 - <<'EOF'
+from pathlib import Path
+from pubidml import pubfile as pf
+for name in ("tail-plain", "tail-overset"):
+    fs = pf.read_structure(Path(f"files/tail-samples/{name}.pub"))
+    print(name, [len(t) for t in fs.story_texts])
+EOF
+```
+
+### Step 3 — wire it in
+
+- **If the control prints its fourth line and the overset one does not**,
+  then Publisher is simply clipping to the frame and the 1338 box we read
+  is wrong after all — which contradicts the anchor, so re-measure the
+  anchor before believing it.
+- **If neither prints it**, the boundary is not the box, and step 4's
+  Ctrl+End answer says whether Publisher even considers the tail part of
+  the story. If it does not, the cut is in the Quill text and `STRS`
+  overstates the story — testable here without Publisher, by looking for
+  a second length that stops at `(Openb. 3:11)`.
+- **If a block in the diff tracks the overset state**, read it in
+  `pubfile` beside the wrap distances and have `convert` drop or overset
+  the tail past it, with a warning naming the frames — the same shape as
+  every other loss here.
+
+Until one of those lands, the tail stays. A rule that guessed which
+paragraphs are stale would delete real copy in another document, which is
+worse than a caption that is too long.

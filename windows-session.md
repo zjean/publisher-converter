@@ -1,7 +1,7 @@
 # The Publisher session
 
 **One sitting at a Windows machine with Microsoft Publisher on it.
-About 75 minutes. After 1 October 2026 none of it is possible.**
+About 85 minutes. After 1 October 2026 none of it is possible.**
 
 ---
 
@@ -25,18 +25,20 @@ and what it did not:
 
 Much shorter than the first: **`rotated_text.pdf` and the six remaining
 corpus PDFs** (irreplaceable), **the five fonts** (a drag-and-drop),
-**two field files**, and **six clean wrap saves** — one variable at a
-time, nothing else touched, including the picture's size.
+**two field files**, **six clean wrap saves** — one variable at a time,
+nothing else touched, including the picture's size — and **J step 0**,
+which is ten seconds inside a file you already have and may settle §13 on
+its own.
 
 ---
 
 Publisher retires on 1 October 2026 (13 October for perpetual Office
 2021), and after that `.pub` files cannot be opened in Publisher at all.
-Five things in `actions.md` are waiting on a reading that only Publisher
+Six things in `actions.md` are waiting on a reading that only Publisher
 can give, and each one is already prepared down to the click: the sample
 files are specified, the diff scripts are written, and the code that
 consumes the answer is in place. What is missing is ten minutes of
-clicking, five times over.
+clicking, six times over.
 
 This is the running order. Every step says where it happens — **[W]** on
 the Windows machine, **[M]** back on the Mac.
@@ -316,6 +318,38 @@ kerkbode.pub` is, on screen. It should read 28.
 
 ---
 
+## J. The stale tail · 10 min · [W]
+
+A recycled template keeps old copy in its frames and Publisher does not
+print it. The converter does, because nothing it reads says not to: the
+meditation caption on page 3 of `1338 kerkbode.pub` writes 25 paragraphs
+where Publisher prints 2. The box, the padding, the run colours, the
+story text and the z-order have all been checked and are all correct, so
+the mechanism is somewhere none of them reach.
+
+**Do step 0 first — it is ten seconds and may end the question.**
+
+0. Open `1338 kerkbode.pub`. Page 3, click into the caption block that
+   reads `‘Houd dat gij hebt…’`, press **Ctrl+End**. Write down where the
+   cursor lands — after `(Openb. 3:11)`, or after the stray `1` further
+   down — and whether the frame shows an **overflow indicator** (the
+   A…A button at its bottom right).
+1. New document. One text box about 350 x 380pt, far taller than its
+   content. Three short centred paragraphs, then a fourth reading
+   `SHOULD THIS PRINT?`. Save as `tail-plain.pub`, **export a PDF**.
+2. Same file, drag the box's **bottom handle up** until only three lines
+   show and the fourth is overset. Save As `tail-overset.pub`, export a
+   PDF. Note whether the overflow indicator appears.
+3. If the version offers **Format → Font → Hidden**, apply it to the
+   fourth paragraph of a third copy: `tail-hidden.pub` + PDF.
+
+The PDFs matter as much as the `.pub`s here — the whole question is what
+Publisher *prints*.
+
+*(actions.md §13)*
+
+---
+
 ## Coming home · [M]
 
 Copy back:
@@ -327,6 +361,7 @@ Copy back:
 | the four field files | `files/field-samples/` |
 | the three table files | `files/table-samples/` |
 | the three layout files | `files/layout-samples/` |
+| the tail files, **with their PDFs** | `files/tail-samples/` |
 | every PDF | `files/reference-pdfs/` |
 | the fonts | `~/Library/Fonts` |
 
@@ -366,6 +401,11 @@ python3 research/diff_blocks.py \
   booklet=files/layout-samples/layout-booklet.pub \
   twoup=files/layout-samples/layout-2up.pub
 
+# J — anything changing besides the box height is a candidate
+python3 research/diff_blocks.py \
+  plain=files/tail-samples/tail-plain.pub \
+  overset=files/tail-samples/tail-overset.pub
+
 # G — confirm the fonts took
 python3 -m research.font_metrics "Maiandra GD"
 ```
@@ -379,13 +419,15 @@ already written.
 
 ## If you only have twenty minutes
 
-Do **A** (5 min), **F** (10 min) and **G** (5 min).
+Do **J step 0** (10 seconds), **A** (5 min), **F** (10 min) and **G**
+(5 min).
 
-A settles a field that is currently wrong on 200 paragraphs across the
-three biggest documents in the collection. F is irreplaceable: it is the
+J step 0 is a keystroke in a file you already have, and it may answer §13
+outright. A settles a field that is currently wrong on 200 paragraphs
+across the three biggest documents in the collection. F is irreplaceable: it is the
 only Publisher rendering that will ever exist, and every later question
 about fidelity is answered against it. G costs nothing and removes a
 whole class of false conversion defect.
 
-B, C, D and E each improve the conversion. A and F are the ones that
-cannot be reconstructed afterwards by any amount of work.
+B, C, D, E, I and J each improve the conversion. A and F are the ones
+that cannot be reconstructed afterwards by any amount of work.
