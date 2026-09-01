@@ -999,6 +999,43 @@ These are real and deliberate, not bugs to be surprised by later.
   and `convert._drop_blank_frames` decides between them once the file
   has had its say — the same deferral `_drop_blank_tables` already makes
   for a grid whose rules have not been read yet.
+- **A table libmspub never fills is cut from its story by `TCD`.** The
+  same failure again, in the shape a table takes. Page 27 of
+  `1337 kerkbode.pub` is a cleaning rota — a headline, an intro box and
+  two columns of forty lines — and all three of its tables arrive with
+  every one of their 90 cells empty, so `_drop_blank_tables` takes them
+  and the page prints as a headline and a page number.
+
+  A table's words are a story like any other and it names that story in
+  the same `0x27` field a text frame uses, so `SYID` reaches them: in
+  `1337` the eleven tables name exactly the eleven stories no shape
+  claims, which closes the accounting — every story in the file has one
+  owner. What a table needs beyond that is where each cell's share of
+  the story stops, and **`TCD`** states it: a count, two words nothing
+  reads, then one running character offset per cell boundary, with
+  Publisher's paragraph terminator sitting between the pieces rather
+  than inside them.
+
+  Nothing in a `TCD` chunk names the table it divides. The pairing comes
+  from the order — the divisions sit in the stream in the `STRS` order
+  of the stories they cut, one for every table with more than one cell,
+  a single-celled table needing no boundary at all — and it is checked
+  rather than assumed: every division must state exactly as many cells
+  as the table it lands on has, and any disagreement anywhere drops the
+  whole pairing. That check holds across every file in the corpus that
+  has tables. It matters more than most, because a division applied to
+  the wrong table would cut somebody else's words into these cells and
+  nothing on the page would look wrong.
+
+  **Only tables that arrived entirely empty are filled**, and that guard
+  is doing real work rather than being tidy. Publisher lets a table's
+  rows be sorted for display while `TCD` keeps cutting the story in the
+  order it was typed, so for a table whose rows have been reordered the
+  two genuinely disagree — the agenda on page 7 of `1337` is printed in
+  date order and stored in the order its rows were added. Every such
+  table in the corpus is one libmspub delivers, so leaving delivered
+  tables alone keeps this away from the one thing the file does not say.
+  The warning says to check a table whose rows look sorted.
 - **Groups are flattened.** Children keep their absolute positions;
   nothing moves, but the grouping is gone.
 - **Gradients are carried, with every stop.** They become real IDML

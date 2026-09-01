@@ -4417,14 +4417,226 @@ class FilledTextWarningTest(unittest.TestCase):
         convert._note_filled_text(document, filled)
         return document.warnings
 
-    def test_says_how_much_went_in_and_into_how_many_frames(self):
+    def test_says_how_much_went_in_and_into_how_many_places(self):
         warnings = self.note([2187, 2106])
         self.assertEqual(len(warnings), 1)
         self.assertIn("4293", warnings[0])
-        self.assertIn("2 frame(s)", warnings[0])
+        self.assertIn("2 frame(s) and table(s)", warnings[0])
 
     def test_says_the_type_is_not_publishers(self):
         self.assertIn("default face", self.note([2187])[0])
 
     def test_says_nothing_when_every_frame_arrived_filled(self):
         self.assertEqual(self.note([]), [])
+
+
+def divisions_chunk(*bounds: int) -> bytes:
+    """A TCD chunk: the boundary count, two words nothing reads, then them."""
+    return struct.pack("<3I", len(bounds), 0, 0xFF00) + struct.pack(
+        "<%dI" % len(bounds), *bounds
+    )
+
+
+class CellDivisionReadingTest(unittest.TestCase):
+    """Where each of a table's cells stops in the story it is cut from."""
+
+    def test_reads_the_boundaries(self):
+        stream = quill_stream(("TCD ", divisions_chunk(21, 51, 65)))
+        self.assertEqual(pubfile._cell_divisions(stream), [[21, 51, 65]])
+
+    def test_refuses_boundaries_that_do_not_ascend(self):
+        # A cell cannot end before the cell in front of it, so this is not
+        # the layout being read and cutting on it would scramble the table.
+        stream = quill_stream(("TCD ", divisions_chunk(21, 12, 65)))
+        self.assertEqual(pubfile._cell_divisions(stream), [])
+
+    def test_refuses_a_count_the_chunk_has_no_room_for(self):
+        stream = quill_stream(
+            ("TCD ", struct.pack("<3I", 40, 0, 0xFF00) + b"\x15\x00\x00\x00")
+        )
+        self.assertEqual(pubfile._cell_divisions(stream), [])
+
+    def test_reads_one_per_table(self):
+        stream = quill_stream(
+            ("TCD ", divisions_chunk(21, 51)), ("TCD ", divisions_chunk(9)),
+        )
+        self.assertEqual(pubfile._cell_divisions(stream), [[21, 51], [9]])
+
+
+class DivisionPairingTest(unittest.TestCase):
+    """Which division cuts which story, settled by order and checked by count.
+
+    Nothing in a TCD chunk names its table, so the pairing rests on the
+    stream order matching the STRS order of the stories being cut. That is
+    only usable because it can be checked: every division has to state the
+    cell count of the table it lands on.
+    """
+
+    def tables(self, *specs) -> dict:
+        return {
+            ("grid", index): pubfile.TableStructure(story_id=story, cell_count=cells)
+            for index, (story, cells) in enumerate(specs)
+        }
+
+    def test_pairs_them_in_the_order_the_stories_come(self):
+        paired = pubfile._pair_divisions(
+            self.tables((70, 3), (62, 2)), [[5], [4, 9]], [62, 70],
+        )
+        # Story 62 sits first in SYID, so the first division is its own.
+        self.assertEqual(paired, {0: [5], 1: [4, 9]})
+
+    def test_a_count_that_does_not_fit_drops_the_whole_pairing(self):
+        # One division landing on the wrong table would cut somebody else's
+        # words into these cells, and nothing on the page would look wrong.
+        self.assertEqual(
+            pubfile._pair_divisions(
+                self.tables((70, 3), (62, 9)), [[5], [4, 9]], [62, 70],
+            ),
+            {},
+        )
+
+    def test_a_single_celled_table_needs_no_division(self):
+        paired = pubfile._pair_divisions(
+            self.tables((62, 1), (70, 3)), [[4, 9]], [62, 70],
+        )
+        self.assertEqual(paired, {1: [4, 9]})
+
+
+class TableCellTextTest(unittest.TestCase):
+    """A table's story cut into its cells."""
+
+    def structure(self, **kwargs) -> pubfile.FileStructure:
+        signature = pubfile.table_signature([50.0], [10.0, 10.0, 10.0])
+        defaults = dict(
+            tables={signature: pubfile.TableStructure(story_id=70, cell_count=3)},
+            story_texts=["Maandag\rKrooswijkhof\rJos Mol\r"],
+            story_ids=[70],
+            table_divisions={0: [7, 20]},
+        )
+        defaults.update(kwargs)
+        return pubfile.FileStructure(**defaults)
+
+    def cut(self, structure):
+        return structure.table_cell_texts([50.0], [10.0, 10.0, 10.0])
+
+    def test_cuts_the_story_one_piece_per_cell(self):
+        self.assertEqual(
+            self.cut(self.structure()), ["Maandag", "Krooswijkhof", "Jos Mol\r"]
+        )
+
+    def test_a_single_celled_table_takes_the_whole_story(self):
+        signature = pubfile.table_signature([50.0], [10.0])
+        structure = pubfile.FileStructure(
+            tables={signature: pubfile.TableStructure(story_id=70, cell_count=1)},
+            story_texts=["Beste gemeenteleden,\rU kunt uw voorkeur\r"],
+            story_ids=[70],
+        )
+        self.assertEqual(
+            structure.table_cell_texts([50.0], [10.0]),
+            ["Beste gemeenteleden,\rU kunt uw voorkeur\r"],
+        )
+
+    def test_a_table_with_no_division_is_not_cut(self):
+        self.assertIsNone(self.cut(self.structure(table_divisions={})))
+
+    def test_a_boundary_past_the_end_of_the_story_is_not_cut(self):
+        self.assertIsNone(self.cut(self.structure(table_divisions={0: [7, 900]})))
+
+    def test_a_story_id_the_file_does_not_name_is_not_cut(self):
+        self.assertIsNone(self.cut(self.structure(story_ids=[4])))
+
+
+class UndeliveredTableTest(unittest.TestCase):
+    """Tables libmspub opened and left with every cell empty."""
+
+    def table(self, cells=3) -> model.Table:
+        table = model.Table(column_widths=[50.0], row_heights=[10.0] * cells)
+        table.cells = [model.TableCell(row=i, column=0) for i in range(cells)]
+        return table
+
+    def fill(self, table, **kwargs):
+        signature = pubfile.table_signature(table.column_widths, table.row_heights)
+        defaults = dict(
+            tables={
+                signature: pubfile.TableStructure(story_id=70, cell_count=len(table.cells))
+            },
+            story_texts=["Maandag\rKrooswijkhof\rJos Mol\r"],
+            story_ids=[70],
+            table_divisions={0: [7, 20]},
+        )
+        defaults.update(kwargs)
+        document = model.Document(pages=[page_with(table)])
+        return convert._fill_undelivered_tables(document, pubfile.FileStructure(**defaults))
+
+    def texts(self, table) -> List[str]:
+        return ["".join(p.text() for p in c.story.paragraphs) for c in table.cells]
+
+    def test_an_empty_table_gets_the_story_cut_into_its_cells(self):
+        table = self.table()
+        filled = self.fill(table)
+        self.assertEqual(self.texts(table), ["Maandag", "Krooswijkhof", "Jos Mol"])
+        self.assertEqual(filled, [len("MaandagKrooswijkhofJos Mol")])
+
+    def test_a_table_holding_text_is_left_alone(self):
+        # Publisher's row order and the story's typing order can differ, so
+        # a table that arrived with text keeps libmspub's placement of it.
+        table = self.table()
+        table.cells[0].story.paragraphs.append(
+            model.Paragraph(spans=[model.Span(text="8-7-2026")])
+        )
+        self.fill(table)
+        self.assertEqual(self.texts(table), ["8-7-2026", "", ""])
+
+    def test_a_table_the_file_states_no_division_for_is_left_alone(self):
+        table = self.table()
+        self.fill(table, table_divisions={})
+        self.assertEqual(self.texts(table), ["", "", ""])
+
+    def test_a_story_with_no_words_leaves_the_table_empty(self):
+        table = self.table()
+        filled = self.fill(table, story_texts=["\r\r\r"], table_divisions={0: [0, 1]})
+        self.assertEqual(self.texts(table), ["", "", ""])
+        self.assertEqual(filled, [])
+
+    def test_a_document_with_no_structure_read_changes_nothing(self):
+        table = self.table()
+        document = model.Document(pages=[page_with(table)])
+        self.assertEqual(convert._fill_undelivered_tables(document, None), [])
+
+
+class RealUndeliveredTableTest(unittest.TestCase):
+    """Page 27 of 1337: a cleaning rota whose 90 cells all arrive empty."""
+
+    @needs_truncated
+    def test_the_rota_columns_are_cut_in_the_order_they_are_printed(self):
+        # Checked against the Publisher PDF when this was written: each
+        # column's forty lines match the printed page exactly, in order.
+        structure = pubfile.read_structure(TRUNCATED)
+        document = convert.parse_document(TRUNCATED)
+        convert._fill_undelivered_tables(document, structure)
+        rotas = [
+            item for item in document.all_items()
+            if isinstance(item, model.Table) and len(item.cells) in (44, 45)
+        ]
+        self.assertEqual(len(rotas), 2, "the rota is two single-column tables")
+        left = next(t for t in rotas if len(t.cells) == 45)
+        texts = ["".join(p.text() for p in c.story.paragraphs) for c in left.cells]
+        self.assertEqual(texts[0].strip(), "Maandag 29 juni 2026")
+        self.assertEqual(texts[1].strip(), "Krooswijkhof |09:00-10.45 uur")
+        self.assertEqual(texts[2].strip(), "Corné de Jong")
+        self.assertEqual(texts[7].strip(), "Jos Mol")
+        self.assertEqual(texts[8].strip(), "", "a blank row separates the groups")
+        self.assertEqual(texts[9].strip(), "Donderdag 02 juli 2026")
+
+    @needs_truncated
+    def test_the_intro_box_takes_the_whole_story(self):
+        structure = pubfile.read_structure(TRUNCATED)
+        document = convert.parse_document(TRUNCATED)
+        convert._fill_undelivered_tables(document, structure)
+        box = next(
+            item for item in document.all_items()
+            if isinstance(item, model.Table) and len(item.cells) == 1
+        )
+        text = "".join(p.text() for p in box.cells[0].story.paragraphs)
+        self.assertIn("Beste gemeenteleden", text)
+        self.assertIn("schoonmaak.cgkdordrecht-c.nl", text)

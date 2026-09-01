@@ -373,6 +373,10 @@ _STRINGS_CHUNK = "STRS"
 # the id a shape carries in _SHAPE_STORY_ID. It is the only thing in the
 # file that ties a frame to its words without going through the text.
 _STORY_IDS_CHUNK = "SYID"
+# TCD divides one table's story into its cells: a count, two words nothing
+# reads, then a running character offset per cell boundary. The name is
+# four characters like every other chunk, so the trailing space is real.
+_CELL_DIVISIONS_CHUNK = "TCD "
 
 # Tab stops, which libmspub reads into ParagraphStyle::m_tabStopsInEmu and
 # its collector then never looks at, so they are dropped before librevenge
@@ -481,6 +485,13 @@ class TableStructure:
     rules: Dict[tuple, "CellRule"] = field(default_factory=dict)
     #: The cells Publisher fills, keyed by (row, column).
     shades: Dict[tuple, Tuple[int, int, int]] = field(default_factory=dict)
+    #: The id of the story this table's text comes out of. A table names
+    #: it in the same field a text frame does, which is what puts table
+    #: text within reach of `FileStructure.story_of_shape`'s SYID lookup.
+    story_id: Optional[int] = None
+    #: How many cell records the file states for this table -- the count
+    #: a TCD division has to match to be this table's.
+    cell_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -674,6 +685,12 @@ class FileStructure:
     #: The story id each shape holds, by shape seqnum. A shape drawing no
     #: text names none and is absent (`_read_shape_stories`).
     shape_stories: Dict[int, int] = field(default_factory=dict)
+    #: Every table's cell boundaries, as running offsets into that table's
+    #: story, in the order the Quill stream holds them (`_cell_divisions`).
+    cell_divisions: List[List[int]] = field(default_factory=list)
+    #: Those boundaries paired to the story each divides, by story index.
+    #: Empty where the pairing does not check out (`_pair_divisions`).
+    table_divisions: Dict[int, List[int]] = field(default_factory=dict)
     #: The pages libmspub never reports, as (reading position, chunk) with
     #: the position 1-based in the finished document. See `_blank_pages`.
     blank_pages: List[Tuple[int, PageStructure]] = field(default_factory=list)
@@ -744,6 +761,48 @@ class FileStructure:
             return self.story_ids.index(story_id)
         except ValueError:
             return None
+
+    def table_cell_texts(
+        self, column_widths: List[float], row_heights: List[float]
+    ) -> Optional[List[str]]:
+        """This table's story cut into one piece per cell, where certain.
+
+        A table names its story with the same id a text frame uses, so SYID
+        takes it to the words; TCD says where each cell's share of them
+        stops. Neither is a guess, but the pairing between the two has to
+        be: TCD chunks carry nothing naming the table they divide, so a
+        division is this table's only when its cell count matches and no
+        other division's does. Where two tables have the same number of
+        cells, neither can claim either.
+
+        The boundaries must also fall inside the story they are cutting,
+        which is what stops a division being paired with a story that
+        merely happens to have as many cells.
+        """
+        found = self.tables.get(table_signature(column_widths, row_heights))
+        if found is None or not found.cell_count:
+            return None
+        if not self.story_ids or len(self.story_ids) != len(self.story_texts):
+            return None
+        try:
+            index = self.story_ids.index(found.story_id)
+        except ValueError:
+            return None
+        story = self.story_texts[index]
+        if found.cell_count == 1:
+            return [story]
+        bounds = self.table_divisions.get(index)
+        if bounds is None or len(bounds) + 1 != found.cell_count:
+            return None
+        if bounds[-1] >= len(story):
+            return None
+        pieces, at = [], 0
+        for bound in bounds + [len(story)]:
+            pieces.append(story[at:bound])
+            # Publisher's paragraph terminator separates the pieces rather
+            # than belonging to either, so the next cell starts past it.
+            at = bound + 1
+        return pieces
 
     def wordart_near(
         self, centre_x: float, centre_y: float, tolerance: float = 0.5
@@ -1107,6 +1166,7 @@ def _table_cells(contents: bytes, offset: int) -> TableStructure:
             if record.id != _ARRAY_ENTRY:
                 continue
             cell = {sub.id: sub.data for sub in _children(contents, record)}
+            table.cell_count += 1
             position = (
                 cell.get(_CELL_FIRST_ROW, 0),
                 cell.get(_CELL_FIRST_COLUMN, 0),
@@ -1334,6 +1394,7 @@ def _read_tables(
         drawing = drawings.get(seq, _TableDrawing())
         table.rules = _rules_on_cells(drawing.segments, len(rows), len(columns))
         table.shades = dict(drawing.shades)
+        table.story_id = fields.get(_SHAPE_STORY_ID)
         # Two tables drawing the same grid are only usable while they agree
         # about their cells; where they differ, neither is.
         if tables.setdefault(signature, table) != table:
@@ -2025,6 +2086,75 @@ def _story_ids(quill: bytes) -> List[int]:
     return list(struct.unpack_from("<%dI" % count, quill, table))
 
 
+def _cell_divisions(quill: bytes) -> List[List[int]]:
+    """Every table's cell boundaries: running offsets into its story.
+
+    A table's text is one story like any other, and TCD is the ruler that
+    says where each cell's share of it stops -- a count, two words nothing
+    reads, then that many running character offsets. One boundary short of
+    the cell count, because the last cell runs to the end of the story.
+
+    Publisher's paragraph terminator sits *between* the pieces rather than
+    inside them, so a boundary points at the character after a cell's text
+    and the next cell starts one past it. That is what makes the pieces cut
+    here line up exactly with the cells libmspub delivers where it delivers
+    them at all -- which is the only check there is on this reading, and it
+    is the reason a table this cuts is compared against one first.
+
+    Boundaries must ascend, since a cell cannot end before the one before
+    it; anything else is not this layout and is dropped whole.
+    """
+    divisions = []
+    for name, offset, length in _quill_chunks(quill):
+        if name != _CELL_DIVISIONS_CHUNK or length < 12:
+            continue
+        count = struct.unpack_from("<I", quill, offset)[0]
+        table = offset + 12
+        if 12 + count * 4 > length or table + count * 4 > len(quill):
+            log.info("TCD states %d boundary/boundaries with room for fewer", count)
+            continue
+        bounds = list(struct.unpack_from("<%dI" % count, quill, table))
+        if bounds != sorted(bounds):
+            log.info("TCD boundaries do not ascend; the division is dropped")
+            continue
+        divisions.append(bounds)
+    return divisions
+
+
+def _pair_divisions(
+    tables: Dict[tuple, Optional[TableStructure]],
+    divisions: List[List[int]],
+    story_ids: List[int],
+) -> Dict[int, List[int]]:
+    """Which cell division belongs to which story.
+
+    A TCD chunk carries nothing naming the table it divides, so the pairing
+    has to come from the order: the divisions sit in the stream in the STRS
+    order of the stories they cut, one for every table with more than one
+    cell -- a single-celled table needs no boundary and gets no chunk.
+
+    That is checked rather than assumed, and checked on the one thing that
+    would break if the order were wrong: each division must state exactly
+    as many cells as the table it lands on has. Any disagreement anywhere
+    and the whole pairing is dropped, because a division applied to the
+    wrong table would cut somebody else's words into these cells -- and
+    unlike a wrong inset, that is not visibly wrong on the page.
+    """
+    positions = {story_id: index for index, story_id in enumerate(story_ids)}
+    owners = sorted(
+        (positions[table.story_id], table.cell_count)
+        for table in tables.values()
+        if table is not None and table.cell_count > 1 and table.story_id in positions
+    )
+    if [count for _index, count in owners] != [len(b) + 1 for b in divisions]:
+        log.info(
+            "%d cell division(s) against %d table(s) that need one; not paired",
+            len(divisions), len(owners),
+        )
+        return {}
+    return {index: bounds for (index, _c), bounds in zip(owners, divisions)}
+
+
 def _read_shape_stories(contents: bytes, refs) -> Dict[int, int]:
     """The story id each shape holds, by shape seqnum.
 
@@ -2097,7 +2227,11 @@ def read_structure(source: Path) -> Optional[FileStructure]:
             story_texts=_story_texts(quill),
             story_ids=_story_ids(quill),
             shape_stories=_read_shape_stories(contents, refs),
+            cell_divisions=_cell_divisions(quill),
             guides=_read_guides(contents, refs),
+        )
+        structure.table_divisions = _pair_divisions(
+            structure.tables, structure.cell_divisions, structure.story_ids
         )
         chunks: Dict[int, PageStructure] = {}
         for seq, kind, offset in refs:

@@ -1620,6 +1620,64 @@ def _fill_undelivered_stories(
     return list(filled.values())
 
 
+def _fill_undelivered_tables(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> List[int]:
+    """Put the words in the tables libmspub opened and never filled.
+
+    The same failure as the frames above, in the shape a table takes. Page
+    27 of `1337 kerkbode.pub` is a cleaning rota -- a headline, an intro
+    box and two columns of forty lines -- and all three of its tables come
+    through with every one of their 90 cells empty, so `_drop_blank_tables`
+    takes them and the page prints as a headline and a page number.
+
+    A table's words are a story like any other and it names that story in
+    the same field a frame does, so SYID reaches them. What a table needs
+    on top of that is where one cell's share of the story stops, and TCD
+    says exactly that -- see `pubfile.table_cell_texts`, which also does
+    the pairing and refuses it unless it checks out.
+
+    Only tables that arrived *entirely* empty are filled. That is what
+    keeps this away from the one thing the file does not say: Publisher
+    lets a table's rows be sorted for display, and TCD cuts the story in
+    the order it was typed, so for a table whose rows have been reordered
+    the two disagree. Every such table in the corpus is one libmspub
+    delivers, and a table with text in it is never touched here.
+    """
+    if structure is None:
+        return []
+
+    filled = []
+    for item in document.all_items():
+        if not isinstance(item, model.Table) or not item.cells:
+            continue
+        if any(_cell_text(cell).strip() for cell in item.cells):
+            continue
+        pieces = structure.table_cell_texts(item.column_widths, item.row_heights)
+        if pieces is None or len(pieces) != len(item.cells):
+            continue
+        paragraphs = [_file_paragraphs(piece) for piece in pieces]
+        if not any(text.strip() for cell in paragraphs for text in cell):
+            continue
+        for cell, texts in zip(item.cells, paragraphs):
+            cell.story.paragraphs[:] = [
+                model.Paragraph(spans=[model.Span(text=text)]) for text in texts
+            ]
+        filled.append(sum(len(t) for cell in paragraphs for t in cell))
+        log.info(
+            "filled a table libmspub left empty with %d character(s) from the file",
+            filled[-1],
+        )
+    return filled
+
+
+def _cell_text(cell: "model.TableCell") -> str:
+    """Everything one cell holds, as one string."""
+    return "".join(
+        span.text for paragraph in cell.story.paragraphs for span in paragraph.spans
+    )
+
+
 def _note_filled_text(document: model.Document, filled: List[int]) -> None:
     """Say which frames hold words libmspub never delivered at all.
 
@@ -1633,13 +1691,14 @@ def _note_filled_text(document: model.Document, filled: List[int]) -> None:
     if not filled:
         return
     document.warnings.append(
-        f"{sum(filled)} character(s) put into {len(filled)} frame(s) that "
-        "libmspub opened and left completely empty: it delivered no text for "
-        "them at all, so unlike text merely cut short there is no run to take "
-        "the formatting from. The words come from the file, which names the "
-        "story each frame holds; the type does not, and every one of these "
-        "frames is in the default face at the default size -- restyle them in "
-        "Affinity against the original"
+        f"{sum(filled)} character(s) put into {len(filled)} frame(s) and "
+        "table(s) that libmspub opened and left completely empty: it delivered "
+        "no text for them at all, so unlike text merely cut short there is no "
+        "run to take the formatting from. The words come from the file, which "
+        "names the story each of them holds; the type does not, and every one "
+        "is in the default face at the default size -- restyle them in Affinity "
+        "against the original. A table's cells are cut in the order the story "
+        "was typed, so check a table whose rows look sorted"
     )
 
 
@@ -2585,7 +2644,11 @@ def _convert(
     # After it, and for the frames it cannot reach: a story delivered as
     # nothing at all has no prefix to match on, and is found through the id
     # the file gives it instead.
-    _note_filled_text(document, _fill_undelivered_stories(document, structure))
+    _note_filled_text(
+        document,
+        _fill_undelivered_stories(document, structure)
+        + _fill_undelivered_tables(document, structure),
+    )
     # Once both have had their say, so that a frame is only blank if the
     # file agrees it is. `model` places every frame it is handed, because
     # up to here an empty frame and an unfilled one look the same.
