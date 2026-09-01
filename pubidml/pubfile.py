@@ -489,9 +489,13 @@ class TableStructure:
     #: it in the same field a text frame does, which is what puts table
     #: text within reach of `FileStructure.story_of_shape`'s SYID lookup.
     story_id: Optional[int] = None
-    #: How many cell records the file states for this table -- the count
-    #: a TCD division has to match to be this table's.
-    cell_count: int = 0
+    #: Where each cell record sits, as (row, column), **in the order the
+    #: file holds the records**. That order is the order of the table's
+    #: story, and the position is where the cell is drawn -- which is how
+    #: a table whose rows Publisher sorted for display still gets its
+    #: words into the right cells. Its length is the table's cell count,
+    #: which is what a TCD division has to match to be this table's.
+    cell_order: List[Tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -764,23 +768,27 @@ class FileStructure:
 
     def table_cell_texts(
         self, column_widths: List[float], row_heights: List[float]
-    ) -> Optional[List[str]]:
-        """This table's story cut into one piece per cell, where certain.
+    ) -> Optional[Dict[Tuple[int, int], str]]:
+        """This table's story, cut up and put in the cells it belongs to.
 
-        A table names its story with the same id a text frame uses, so SYID
-        takes it to the words; TCD says where each cell's share of them
-        stops. Neither is a guess, but the pairing between the two has to
-        be: TCD chunks carry nothing naming the table they divide, so a
-        division is this table's only when its cell count matches and no
-        other division's does. Where two tables have the same number of
-        cells, neither can claim either.
+        Three statements of the file compose into one answer. A table names
+        its story with the same id a text frame uses, so SYID takes it to
+        the words. TCD says where each cell's share of those words stops.
+        And the cell records are held **in the order of the story** while
+        each one names the position it is drawn at, which is what turns a
+        run of pieces into a map of the grid.
 
-        The boundaries must also fall inside the story they are cutting,
-        which is what stops a division being paired with a story that
-        merely happens to have as many cells.
+        That last part is not a nicety. Publisher lets a table's rows be
+        sorted for display, and then the order the cells are typed in is
+        not the order they are printed in -- the agenda in `1337 kerkbode`
+        is stored with its last-added row first and printed in date order.
+        Reading the records in file order and trusting the position each
+        one states is what gets those rows back where they are shown.
+
+        None where any of the three is missing or disagrees.
         """
         found = self.tables.get(table_signature(column_widths, row_heights))
-        if found is None or not found.cell_count:
+        if found is None or not found.cell_order:
             return None
         if not self.story_ids or len(self.story_ids) != len(self.story_texts):
             return None
@@ -789,10 +797,10 @@ class FileStructure:
         except ValueError:
             return None
         story = self.story_texts[index]
-        if found.cell_count == 1:
-            return [story]
+        if len(found.cell_order) == 1:
+            return {found.cell_order[0]: story}
         bounds = self.table_divisions.get(index)
-        if bounds is None or len(bounds) + 1 != found.cell_count:
+        if bounds is None or len(bounds) + 1 != len(found.cell_order):
             return None
         if bounds[-1] >= len(story):
             return None
@@ -802,7 +810,11 @@ class FileStructure:
             # Publisher's paragraph terminator separates the pieces rather
             # than belonging to either, so the next cell starts past it.
             at = bound + 1
-        return pieces
+        # A position stated twice would silently lose a piece, so a grid
+        # that names one cell twice is not one this can lay text onto.
+        if len(set(found.cell_order)) != len(found.cell_order):
+            return None
+        return dict(zip(found.cell_order, pieces))
 
     def wordart_near(
         self, centre_x: float, centre_y: float, tolerance: float = 0.5
@@ -1166,11 +1178,11 @@ def _table_cells(contents: bytes, offset: int) -> TableStructure:
             if record.id != _ARRAY_ENTRY:
                 continue
             cell = {sub.id: sub.data for sub in _children(contents, record)}
-            table.cell_count += 1
             position = (
                 cell.get(_CELL_FIRST_ROW, 0),
                 cell.get(_CELL_FIRST_COLUMN, 0),
             )
+            table.cell_order.append(position)
             table.insets[position] = tuple(
                 cell.get(side, 0) / _EMU_PER_POINT for side in _CELL_INSETS
             )
@@ -2142,9 +2154,10 @@ def _pair_divisions(
     """
     positions = {story_id: index for index, story_id in enumerate(story_ids)}
     owners = sorted(
-        (positions[table.story_id], table.cell_count)
+        (positions[table.story_id], len(table.cell_order))
         for table in tables.values()
-        if table is not None and table.cell_count > 1 and table.story_id in positions
+        if table is not None and len(table.cell_order) > 1
+        and table.story_id in positions
     )
     if [count for _index, count in owners] != [len(b) + 1 for b in divisions]:
         log.info(

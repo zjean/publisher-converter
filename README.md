@@ -1027,15 +1027,27 @@ These are real and deliberate, not bugs to be surprised by later.
   the wrong table would cut somebody else's words into these cells and
   nothing on the page would look wrong.
 
-  **Only tables that arrived entirely empty are filled**, and that guard
-  is doing real work rather than being tidy. Publisher lets a table's
-  rows be sorted for display while `TCD` keeps cutting the story in the
-  order it was typed, so for a table whose rows have been reordered the
-  two genuinely disagree — the agenda on page 7 of `1337` is printed in
-  date order and stored in the order its rows were added. Every such
-  table in the corpus is one libmspub delivers, so leaving delivered
-  tables alone keeps this away from the one thing the file does not say.
-  The warning says to check a table whose rows look sorted.
+  Which cell each piece belongs in is the third record, and the one that
+  makes this safe rather than lucky: **the cell records are held in the
+  order of the story, and each names the position it is drawn at**.
+  Publisher lets a table's rows be sorted for display, and then the order
+  the cells were typed in is not the order they are printed in — the
+  agenda on page 7 of `1337` is stored with its last-added row first and
+  printed in date order. Reading the records in file order and trusting
+  the position each one states puts every piece where it is shown.
+
+  That covers the worse failure too. In `1338 kerkbode.pub` libmspub does
+  not leave the rota empty — it puts the **entire story into the first
+  cell** and leaves the other forty blank, which is not a page anybody
+  can repair by hand. So the map is applied wherever it disagrees with
+  what arrived, not only to empty tables. Where the file and the event
+  stream already agree about a cell it is left exactly as it came, span
+  for span, which is what keeps libmspub's reading of the type on the
+  seventeen tables in the corpus it lays out correctly.
+
+  Checked against Publisher's own PDFs rather than against libmspub,
+  which is the broken party here: all four rota columns across `1337`
+  and `1338` come out matching the printed page line for line, in order.
 - **Groups are flattened.** Children keep their absolute positions;
   nothing moves, but the grouping is gone.
 - **Gradients are carried, with every stop.** They become real IDML

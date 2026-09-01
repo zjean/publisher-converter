@@ -1623,52 +1623,62 @@ def _fill_undelivered_stories(
 def _fill_undelivered_tables(
     document: model.Document, structure: Optional["pubfile.FileStructure"]
 ) -> List[int]:
-    """Put the words in the tables libmspub opened and never filled.
+    """Lay a table's story out over its cells the way the file states it.
 
-    The same failure as the frames above, in the shape a table takes. Page
-    27 of `1337 kerkbode.pub` is a cleaning rota -- a headline, an intro
-    box and two columns of forty lines -- and all three of its tables come
-    through with every one of their 90 cells empty, so `_drop_blank_tables`
-    takes them and the page prints as a headline and a page number.
+    Two failures, one answer. Page 27 of `1337 kerkbode.pub` is a cleaning
+    rota whose three tables arrive with every one of their 90 cells empty,
+    so `_drop_blank_tables` takes them and the page prints as a headline
+    and a page number. The rota in `1338 kerkbode.pub` arrives worse than
+    empty: libmspub puts the entire story into the *first* cell and leaves
+    the other forty blank, which is not a page a reader can fix by hand.
 
-    A table's words are a story like any other and it names that story in
-    the same field a frame does, so SYID reaches them. What a table needs
-    on top of that is where one cell's share of the story stops, and TCD
-    says exactly that -- see `pubfile.table_cell_texts`, which also does
-    the pairing and refuses it unless it checks out.
+    Both are the same thing -- libmspub failing to divide a story over the
+    cells it belongs to -- and the file states that division outright.
+    `pubfile.table_cell_texts` composes the three records it takes and
+    answers None unless all of them agree, so what comes back is a map of
+    the grid rather than a guess at one.
 
-    Only tables that arrived *entirely* empty are filled. That is what
-    keeps this away from the one thing the file does not say: Publisher
-    lets a table's rows be sorted for display, and TCD cuts the story in
-    the order it was typed, so for a table whose rows have been reordered
-    the two disagree. Every such table in the corpus is one libmspub
-    delivers, and a table with text in it is never touched here.
+    Where the file and the event stream already agree about a cell, the
+    cell is left exactly as it arrived. That is what keeps libmspub's
+    reading of the type on the seventeen tables in the corpus it gets
+    right: those are untouched, span for span, and only a cell whose text
+    the file places differently is rewritten. Publisher's own sorting of a
+    table's rows is handled by the same map, since the cell records name
+    the position each piece is drawn at.
     """
     if structure is None:
         return []
 
-    filled = []
+    moved = []
     for item in document.all_items():
         if not isinstance(item, model.Table) or not item.cells:
             continue
-        if any(_cell_text(cell).strip() for cell in item.cells):
+        placed = structure.table_cell_texts(item.column_widths, item.row_heights)
+        if placed is None or len(placed) != len(item.cells):
             continue
-        pieces = structure.table_cell_texts(item.column_widths, item.row_heights)
-        if pieces is None or len(pieces) != len(item.cells):
+        if {(cell.row, cell.column) for cell in item.cells} != set(placed):
             continue
-        paragraphs = [_file_paragraphs(piece) for piece in pieces]
-        if not any(text.strip() for cell in paragraphs for text in cell):
+        paragraphs = {
+            position: _file_paragraphs(text) for position, text in placed.items()
+        }
+        if not any(t.strip() for texts in paragraphs.values() for t in texts):
             continue
-        for cell, texts in zip(item.cells, paragraphs):
+        characters = 0
+        for cell in item.cells:
+            texts = paragraphs[(cell.row, cell.column)]
+            if _cell_text(cell).strip() == "".join(texts).strip():
+                continue
             cell.story.paragraphs[:] = [
                 model.Paragraph(spans=[model.Span(text=text)]) for text in texts
             ]
-        filled.append(sum(len(t) for cell in paragraphs for t in cell))
-        log.info(
-            "filled a table libmspub left empty with %d character(s) from the file",
-            filled[-1],
-        )
-    return filled
+            characters += sum(len(text) for text in texts)
+        if characters:
+            moved.append(characters)
+            log.info(
+                "laid %d character(s) of a table out over its cells from the file",
+                characters,
+            )
+    return moved
 
 
 def _cell_text(cell: "model.TableCell") -> str:
@@ -1692,13 +1702,13 @@ def _note_filled_text(document: model.Document, filled: List[int]) -> None:
         return
     document.warnings.append(
         f"{sum(filled)} character(s) put into {len(filled)} frame(s) and "
-        "table(s) that libmspub opened and left completely empty: it delivered "
-        "no text for them at all, so unlike text merely cut short there is no "
-        "run to take the formatting from. The words come from the file, which "
-        "names the story each of them holds; the type does not, and every one "
-        "is in the default face at the default size -- restyle them in Affinity "
-        "against the original. A table's cells are cut in the order the story "
-        "was typed, so check a table whose rows look sorted"
+        "table(s) libmspub did not fill: a frame it opened and left empty, or "
+        "a table whose story it never divided over the cells -- in one file it "
+        "puts a whole rota into the first cell and leaves the other forty "
+        "blank. The words and, for a table, which cell each one belongs in "
+        "come from the file. The type does not: there was no run delivered to "
+        "take it from, so this text is in the default face at the default size "
+        "-- restyle it in Affinity against the original"
     )
 
 

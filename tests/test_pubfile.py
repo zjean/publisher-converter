@@ -4426,6 +4426,9 @@ class FilledTextWarningTest(unittest.TestCase):
     def test_says_the_type_is_not_publishers(self):
         self.assertIn("default face", self.note([2187])[0])
 
+    def test_says_a_table_may_have_been_undivided_rather_than_empty(self):
+        self.assertIn("never divided over the cells", self.note([2187])[0])
+
     def test_says_nothing_when_every_frame_arrived_filled(self):
         self.assertEqual(self.note([]), [])
 
@@ -4474,7 +4477,9 @@ class DivisionPairingTest(unittest.TestCase):
 
     def tables(self, *specs) -> dict:
         return {
-            ("grid", index): pubfile.TableStructure(story_id=story, cell_count=cells)
+            ("grid", index): pubfile.TableStructure(
+                story_id=story, cell_order=[(i, 0) for i in range(cells)]
+            )
             for index, (story, cells) in enumerate(specs)
         }
 
@@ -4508,7 +4513,9 @@ class TableCellTextTest(unittest.TestCase):
     def structure(self, **kwargs) -> pubfile.FileStructure:
         signature = pubfile.table_signature([50.0], [10.0, 10.0, 10.0])
         defaults = dict(
-            tables={signature: pubfile.TableStructure(story_id=70, cell_count=3)},
+            tables={signature: pubfile.TableStructure(
+                story_id=70, cell_order=[(0, 0), (1, 0), (2, 0)]
+            )},
             story_texts=["Maandag\rKrooswijkhof\rJos Mol\r"],
             story_ids=[70],
             table_divisions={0: [7, 20]},
@@ -4521,19 +4528,22 @@ class TableCellTextTest(unittest.TestCase):
 
     def test_cuts_the_story_one_piece_per_cell(self):
         self.assertEqual(
-            self.cut(self.structure()), ["Maandag", "Krooswijkhof", "Jos Mol\r"]
+            self.cut(self.structure()),
+            {(0, 0): "Maandag", (1, 0): "Krooswijkhof", (2, 0): "Jos Mol\r"},
         )
 
     def test_a_single_celled_table_takes_the_whole_story(self):
         signature = pubfile.table_signature([50.0], [10.0])
         structure = pubfile.FileStructure(
-            tables={signature: pubfile.TableStructure(story_id=70, cell_count=1)},
+            tables={signature: pubfile.TableStructure(
+                story_id=70, cell_order=[(0, 0)]
+            )},
             story_texts=["Beste gemeenteleden,\rU kunt uw voorkeur\r"],
             story_ids=[70],
         )
         self.assertEqual(
             structure.table_cell_texts([50.0], [10.0]),
-            ["Beste gemeenteleden,\rU kunt uw voorkeur\r"],
+            {(0, 0): "Beste gemeenteleden,\rU kunt uw voorkeur\r"},
         )
 
     def test_a_table_with_no_division_is_not_cut(self):
@@ -4558,7 +4568,10 @@ class UndeliveredTableTest(unittest.TestCase):
         signature = pubfile.table_signature(table.column_widths, table.row_heights)
         defaults = dict(
             tables={
-                signature: pubfile.TableStructure(story_id=70, cell_count=len(table.cells))
+                signature: pubfile.TableStructure(
+                    story_id=70,
+                    cell_order=[(c.row, c.column) for c in table.cells],
+                )
             },
             story_texts=["Maandag\rKrooswijkhof\rJos Mol\r"],
             story_ids=[70],
@@ -4577,15 +4590,35 @@ class UndeliveredTableTest(unittest.TestCase):
         self.assertEqual(self.texts(table), ["Maandag", "Krooswijkhof", "Jos Mol"])
         self.assertEqual(filled, [len("MaandagKrooswijkhofJos Mol")])
 
-    def test_a_table_holding_text_is_left_alone(self):
-        # Publisher's row order and the story's typing order can differ, so
-        # a table that arrived with text keeps libmspub's placement of it.
+    def test_a_cell_that_already_agrees_keeps_libmspubs_reading_of_it(self):
+        # The seventeen tables in the corpus libmspub lays out correctly
+        # must come through span for span, so a cell whose text the file
+        # places where it already is keeps the type it arrived with.
+        table = self.table()
+        span = model.Span(text="Maandag", font="Calibri", size_pt=10.0, bold=True)
+        table.cells[0].story.paragraphs.append(model.Paragraph(spans=[span]))
+        self.fill(table)
+        self.assertIs(table.cells[0].story.paragraphs[0].spans[0], span)
+
+    def test_a_cell_libmspub_crammed_is_laid_out_again(self):
+        # `1338 kerkbode.pub` puts a whole rota into the first cell and
+        # leaves the other forty empty. That is worse than empty -- it is
+        # not a page anybody can fix by hand -- and the file says better.
         table = self.table()
         table.cells[0].story.paragraphs.append(
-            model.Paragraph(spans=[model.Span(text="8-7-2026")])
+            model.Paragraph(spans=[model.Span(text="MaandagKrooswijkhofJos Mol")])
         )
-        self.fill(table)
-        self.assertEqual(self.texts(table), ["8-7-2026", "", ""])
+        moved = self.fill(table)
+        self.assertEqual(self.texts(table), ["Maandag", "Krooswijkhof", "Jos Mol"])
+        self.assertEqual(moved, [len("MaandagKrooswijkhofJos Mol")])
+
+    def test_a_table_already_laid_out_right_is_not_reported_as_moved(self):
+        table = self.table()
+        for cell, text in zip(table.cells, ("Maandag", "Krooswijkhof", "Jos Mol")):
+            cell.story.paragraphs.append(
+                model.Paragraph(spans=[model.Span(text=text)])
+            )
+        self.assertEqual(self.fill(table), [])
 
     def test_a_table_the_file_states_no_division_for_is_left_alone(self):
         table = self.table()
@@ -4640,3 +4673,48 @@ class RealUndeliveredTableTest(unittest.TestCase):
         text = "".join(p.text() for p in box.cells[0].story.paragraphs)
         self.assertIn("Beste gemeenteleden", text)
         self.assertIn("schoonmaak.cgkdordrecht-c.nl", text)
+
+
+class RealCrammedTableTest(unittest.TestCase):
+    """A rota libmspub puts entirely in one cell, laid out again.
+
+    Worse than the empty tables above: the page is not blank, it is one
+    cell holding forty rows of text and forty empty cells under it, which
+    is not something a reader can put right by hand.
+    """
+
+    CRAMMED = SAMPLES / "cgk" / "1338 kerkbode.pub"
+
+    def setUp(self):
+        if not self.CRAMMED.exists():
+            self.skipTest(f"{self.CRAMMED.name} absent (not tracked)")
+        self.document = convert.parse_document(self.CRAMMED)
+        self.structure = pubfile.read_structure(self.CRAMMED)
+
+    def rota(self, cells: int) -> model.Table:
+        return next(
+            item for item in self.document.all_items()
+            if isinstance(item, model.Table) and len(item.cells) == cells
+        )
+
+    def texts(self, table) -> List[str]:
+        return ["".join(p.text() for p in c.story.paragraphs).strip()
+                for c in table.cells]
+
+    def test_libmspub_delivers_it_all_in_the_first_cell(self):
+        # The thing being fixed, asserted so that this stays a test of the
+        # fix rather than of a file that might arrive whole one day.
+        held = self.texts(self.rota(41))
+        self.assertIn("Maandag 27 juli 2026", held[0])
+        self.assertIn("Gerhard van de Hoef", held[0], "the last row is in there too")
+        self.assertEqual([t for t in held[1:] if t], [], "and every other cell is empty")
+
+    def test_the_rows_are_put_back_one_per_cell(self):
+        convert._fill_undelivered_tables(self.document, self.structure)
+        held = self.texts(self.rota(41))
+        self.assertEqual(held[0], "Maandag 27 juli 2026")
+        self.assertEqual(held[1], "Krooswijkhof |09:00-10.45 uur")
+        self.assertEqual(held[2], "Gerda van Ballegooijen - van Emmerloot")
+        filled = [t for t in held if t]
+        self.assertEqual(filled[-1], "Gerhard van de Hoef")
+        self.assertEqual(len(filled), 40, "forty rows over forty-one cells")
