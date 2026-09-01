@@ -325,6 +325,14 @@ class TextFrame(Item):
     # than run under it -- a recovered WordArt headline, which is a shape
     # floating over the page and not a box the layout made room for.
     wrap_text: bool = False
+    # Set when this frame's first line has to sit on the baseline its
+    # leading states, rather than wherever the reader would put it. A
+    # reader left to itself hangs the first baseline a whole font ascent
+    # below the frame's top, which is more than a WordArt band is tall --
+    # and a baseline past the frame's bottom is a line the reader hides
+    # rather than draws. Measured, not argued:
+    # research/probe_wordart_baseline.py.
+    first_baseline_from_leading: bool = False
 
 
 @dataclass

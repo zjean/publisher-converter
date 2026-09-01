@@ -1377,6 +1377,40 @@ class TextGradientTest(unittest.TestCase):
         self.assertEqual(len(list(graphic.iter("Gradient"))), 1)
 
 
+class FirstBaselineTest(unittest.TestCase):
+    """A frame that has to place its own first line, and one that does not."""
+
+    def _preference(self, **kwargs):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        frame = model.TextFrame(x=20.0, y=30.0, width=45.0, height=40.0, **kwargs)
+        paragraph = model.Paragraph(line_spacing_pt=39.2)
+        paragraph.spans.append(model.Span(text="D", size_pt=57.9, font="Pristina"))
+        frame.story.paragraphs.append(paragraph)
+        document.pages[0].items.append(frame)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            spread = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            root = ET.fromstring(archive.read(spread))
+            return next(root.iter("TextFramePreference"))
+
+    def test_an_ordinary_frame_leaves_the_first_baseline_to_the_reader(self):
+        # Body text is set at a size its frame has room for, so the
+        # reader's own rule is the right one and stating anything would be
+        # overriding it for no reason.
+        self.assertIsNone(self._preference().get("FirstBaselineOffset"))
+
+    def test_a_frame_that_asks_places_it_on_the_leading(self):
+        # A WordArt band is shorter than the ascent the font asks for --
+        # 0.69 of an em against 0.86 for the corpus's dropped initial --
+        # and a reader hanging the first baseline a whole ascent below the
+        # frame's top puts it past the bottom, where the line is hidden
+        # rather than drawn. LeadingOffset and not FixedHeight: Affinity
+        # draws the headline above its box for FixedHeight, the same
+        # lifting-off-position answer a table gets.
+        # research/probe_wordart_baseline.py measured both.
+        preference = self._preference(first_baseline_from_leading=True)
+        self.assertEqual(preference.get("FirstBaselineOffset"), "LeadingOffset")
+
+
 class TablePlacementTest(unittest.TestCase):
     """A table starts at the top-left of the frame that holds it."""
 

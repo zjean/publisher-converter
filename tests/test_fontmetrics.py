@@ -205,33 +205,49 @@ class MeasurementTest(unittest.TestCase):
         return fontmetrics.faces(build_font(glyphs=_GLYPHS, **kwargs))[0]
 
     def test_one_glyph_measures_its_own_box_and_advance(self):
-        ink, width, advance = self.face().measure("A")
+        ink, above, width, advance = self.face().measure("A")
         self.assertAlmostEqual(ink, 0.700)
+        self.assertAlmostEqual(above, 0.700)
         self.assertAlmostEqual(width, 0.600)
         self.assertAlmostEqual(advance, 0.600)
 
     def test_ink_spans_the_tallest_and_deepest_glyph_of_the_string(self):
         # 700 up and 200 down is 900 units of a 1000-unit em. This is the
         # descender case the old 0.70 constant got wrong by construction.
-        ink, width, advance = self.face().measure("Ay")
+        ink, above, width, advance = self.face().measure("Ay")
         self.assertAlmostEqual(ink, 0.900)
         self.assertAlmostEqual(width, 1.100)
         self.assertAlmostEqual(advance, 0.550)
+        # And of those 900 units, 700 are above the baseline. That split is
+        # where a headline's baseline goes inside its band, so a descender
+        # has to move it rather than only make the ink taller.
+        self.assertAlmostEqual(above, 0.700)
+
+    def test_the_baseline_share_follows_the_tallest_glyph_not_the_first(self):
+        tall = fontmetrics.faces(build_font(glyphs={
+            "a": (500, (20, -100, 480, 500)),
+            "l": (300, (40, 0, 260, 900)),
+        }))[0]
+        ink, above, _width, _advance = tall.measure("al")
+        self.assertAlmostEqual(ink, 1.000)
+        self.assertAlmostEqual(above, 0.900)
 
     def test_a_short_loca_font_measures_the_same(self):
-        ink, _width, _advance = self.face(long_loca=False).measure("A")
+        ink, above, _width, _advance = self.face(long_loca=False).measure("A")
         self.assertAlmostEqual(ink, 0.700)
+        self.assertAlmostEqual(above, 0.700)
 
     def test_a_format_12_cmap_is_read(self):
-        ink, _width, _advance = self.face(cmap_format=12).measure("A")
+        ink, _above, _width, _advance = self.face(cmap_format=12).measure("A")
         self.assertAlmostEqual(ink, 0.700)
 
     def test_units_per_em_scales_the_result(self):
         big = fontmetrics.faces(
             build_font(upem=2000, glyphs={"A": (1200, (100, 0, 1100, 1400))})
         )[0]
-        ink, width, _advance = big.measure("A")
+        ink, above, width, _advance = big.measure("A")
         self.assertAlmostEqual(ink, 0.700)
+        self.assertAlmostEqual(above, 0.700)
         self.assertAlmostEqual(width, 0.600)
 
     def test_a_face_covering_none_of_the_string_measures_nothing(self):
@@ -241,7 +257,7 @@ class MeasurementTest(unittest.TestCase):
         self.assertIsNone(self.face().measure("שלום"))
 
     def test_characters_the_face_lacks_are_skipped_not_counted(self):
-        ink, width, advance = self.face().measure("Aא")
+        ink, _above, width, advance = self.face().measure("Aא")
         self.assertAlmostEqual(ink, 0.700)
         self.assertAlmostEqual(width, 0.600)
         self.assertAlmostEqual(advance, 0.600)
@@ -343,17 +359,20 @@ class TierTest(unittest.TestCase):
         self.assertEqual(found.source, "font")
         self.assertTrue(found.exact)
         self.assertAlmostEqual(found.ink_per_em, 0.900)
+        self.assertAlmostEqual(found.ink_above_baseline_per_em, 0.700)
         self.assertAlmostEqual(found.width_per_em, 1.100)
         self.assertAlmostEqual(found.mean_advance_per_em, 0.550)
 
     def test_a_baked_family_is_used_when_the_font_is_not_installed(self):
         with mock.patch.dict(
-            fontmetrics.BAKED, {"pristina": (0.62, 0.41, 0.44)}, clear=False
+            fontmetrics.BAKED, {"pristina": (0.62, 0.48, 0.41, 0.44)},
+            clear=False,
         ):
             found = fontmetrics.measure("Pristina", False, False, "Kerkbode")
         self.assertEqual(found.source, "table")
         self.assertFalse(found.exact)
         self.assertAlmostEqual(found.ink_per_em, 0.62)
+        self.assertAlmostEqual(found.ink_above_baseline_per_em, 0.48)
         self.assertAlmostEqual(found.mean_advance_per_em, 0.41)
         self.assertAlmostEqual(found.width_per_em, 0.44 * len("Kerkbode"))
 
@@ -362,6 +381,7 @@ class TierTest(unittest.TestCase):
         self.assertEqual(found.source, "average")
         self.assertFalse(found.exact)
         self.assertAlmostEqual(found.ink_per_em, 0.70)
+        self.assertAlmostEqual(found.ink_above_baseline_per_em, 0.55)
         self.assertAlmostEqual(found.mean_advance_per_em, 0.50)
         self.assertAlmostEqual(found.width_per_em, 0.55 * len("Kerkbode"))
 
@@ -387,6 +407,9 @@ class TierTest(unittest.TestCase):
         self.assertEqual(found.source, "font")
         self.assertAlmostEqual(found.width_per_em, 1.100)
         self.assertAlmostEqual(found.ink_per_em, 0.70)
+        # The baseline is borrowed with the ink: there are no boxes to find
+        # it in either.
+        self.assertAlmostEqual(found.ink_above_baseline_per_em, 0.55)
 
 
 class BakedTableTest(unittest.TestCase):
@@ -405,12 +428,15 @@ class BakedTableTest(unittest.TestCase):
             with self.subTest(family=family):
                 self.assertIn(family, fontmetrics.BAKED)
 
-    def test_every_baked_entry_is_three_plausible_ratios(self):
+    def test_every_baked_entry_is_four_plausible_ratios(self):
         for family, entry in fontmetrics.BAKED.items():
             with self.subTest(family=family):
-                ink, advance, per_glyph = entry
+                ink, above, advance, per_glyph = entry
                 # An em of ink is normal for type with both ascenders and
                 # descenders; twice an em is a misread table.
                 self.assertTrue(0.3 < ink < 2.0, ink)
                 self.assertTrue(0.1 < advance < 1.5, advance)
                 self.assertTrue(0.1 < per_glyph < 1.5, per_glyph)
+                # And the part above the baseline is part of the ink, not
+                # a second measurement of the whole of it.
+                self.assertTrue(0 < above <= ink, (above, ink))

@@ -1303,6 +1303,19 @@ class IdmlWriter:
             "InsetSpacing": f"{fmt(top)} {fmt(left)} {fmt(bottom)} {fmt(right)}",
             "AutoSizingType": "Off",
         }
+        if frame.first_baseline_from_leading:
+            # The leading, not the font's ascent, decides where the first
+            # baseline goes. Left unstated, Affinity hangs it a full
+            # usWinAscent below the frame's top -- 0.86 of an em against
+            # the 0.69 a WordArt band is tall for this corpus's dropped
+            # initial -- and a first baseline past the bottom of its frame
+            # is a line it hides rather than draws.
+            #
+            # `LeadingOffset` and not `FixedHeight`: the two were measured
+            # side by side and Affinity draws the headline above its box
+            # for FixedHeight, which is the same lifting-off-position bug
+            # `_emit_table` records for a table.
+            preference["FirstBaselineOffset"] = "LeadingOffset"
         if columns > 1:
             # Stated explicitly, never left to the reader's default: InDesign's
             # is 12pt against Publisher's 2mm, which would widen every gap and

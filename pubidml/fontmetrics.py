@@ -236,12 +236,19 @@ class Face:
             return None
 
     def measure(self, text: str):
-        """(ink, width, mean advance) for `text`, per em, or None.
+        """(ink, ink above the baseline, width, mean advance), per em, or None.
 
         None means this face covers none of the string. That is not a
         malformed font: Corsiva Hebrew parses cleanly, states a cmap and
         has no Latin letters at all, and measuring a headline against the
         punctuation that happened to match would be worse than declining.
+
+        The ink and the part of it above the baseline are two numbers
+        rather than one because a headline needs both: the ink says what
+        point size fills the band, and the share of it above the baseline
+        says where in the band the baseline goes -- which is the only way
+        to ask a reader for the line Publisher drew (`README`, *A recovered
+        headline states its own first baseline*).
         """
         glyphs = [self.cmap.get(ord(char)) for char in text]
         glyphs = [glyph for glyph in glyphs if glyph]
@@ -250,9 +257,11 @@ class Face:
         width = sum(self.advance(glyph) for glyph in glyphs)
         boxes = [self.bbox(glyph) for glyph in glyphs]
         boxes = [box for box in boxes if box]
-        ink = max(b[3] for b in boxes) - min(b[1] for b in boxes) if boxes else None
+        top = max(b[3] for b in boxes) if boxes else None
+        ink = top - min(b[1] for b in boxes) if boxes else None
         return (
             (ink / self.upem) if ink else None,
+            (top / self.upem) if ink else None,
             width / self.upem,
             width / len(glyphs) / self.upem,
         )
@@ -402,9 +411,19 @@ _AVERAGE_INK_PER_EM = 0.70
 _AVERAGE_EM_PER_GLYPH = 0.55
 _AVERAGE_EM_PER_ADVANCE = 0.50
 
+# How much of that ink sits above the baseline. The four faces below put
+# between 0.74 and 0.85 of theirs there, so a headline of unknown face is
+# given the middle of that: 0.79 of the 0.70 above. It decides where the
+# baseline goes inside the band, so being out by a twentieth of an em
+# moves a headline by a twentieth of its band -- visible, but nothing
+# like the alternative, which is a reader placing the baseline by the
+# font's own ascent and hiding the headline altogether.
+_AVERAGE_INK_ABOVE_BASELINE_PER_EM = 0.55
+
 # Faces measured once on a machine that has them, so a document converts
 # the same way everywhere. `research/font_metrics.py` prints these.
-# Entries are (ink per em, mean advance per em, em per glyph).
+# Entries are (ink per em, ink above the baseline per em, mean advance per
+# em, em per glyph).
 #
 # These four are the corpus's headline faces -- Monotype Corsiva sets 40
 # of its 48 WordArt shapes and Pristina 6 -- and both ship with Office
@@ -412,15 +431,15 @@ _AVERAGE_EM_PER_ADVANCE = 0.50
 # document is quite likely not to have them. Measured over the corpus's
 # own headline words, which is why the ink runs high: 'Verjaardagen'
 # descends and a single sample word would not have shown that.
-BAKED: Dict[str, Tuple[float, float, float]] = {
+BAKED: Dict[str, Tuple[float, float, float, float]] = {
     # Monotype Corsiva Regular, measured over 7 headline(s)
-    "monotype corsiva": (0.894, 0.382, 0.382),
+    "monotype corsiva": (0.894, 0.688, 0.382, 0.382),
     # Pristina Regular, measured over 7 headline(s)
-    "pristina": (1.100, 0.347, 0.347),
+    "pristina": (1.100, 0.814, 0.347, 0.347),
     # Comic Sans MS Regular, measured over 7 headline(s)
-    "comic sans ms": (0.965, 0.510, 0.510),
+    "comic sans ms": (0.965, 0.781, 0.510, 0.510),
     # Arial Black Regular, measured over 7 headline(s)
-    "arial black": (0.843, 0.598, 0.598),
+    "arial black": (0.843, 0.718, 0.598, 0.598),
 }
 
 
@@ -429,6 +448,12 @@ class Metrics:
     """What a string measures, per em, and where the numbers came from."""
 
     ink_per_em: float
+    #: How much of that ink sits above the baseline, per em. A headline is
+    #: sized so its ink fills the band, so this is where in the band the
+    #: baseline falls -- and stating that is what stops a reader placing
+    #: the baseline by the font's own ascent, which is taller than the
+    #: band and hides the headline.
+    ink_above_baseline_per_em: float
     width_per_em: float
     mean_advance_per_em: float
     #: 'font' read from the font itself, 'table' a baked family average,
@@ -449,6 +474,7 @@ class Metrics:
 def _averages(text: str) -> Metrics:
     return Metrics(
         ink_per_em=_AVERAGE_INK_PER_EM,
+        ink_above_baseline_per_em=_AVERAGE_INK_ABOVE_BASELINE_PER_EM,
         width_per_em=_AVERAGE_EM_PER_GLYPH * max(len(text), 1),
         mean_advance_per_em=_AVERAGE_EM_PER_ADVANCE,
         source="average",
@@ -473,20 +499,26 @@ def measure(family: Optional[str], bold: bool, italic: bool, text: str) -> Metri
             except (FontError, struct.error):
                 found = None
             if found is not None:
-                ink, width, advance = found
+                ink, above, width, advance = found
                 return Metrics(
                     # A CFF face states advances but no outlines, so the
-                    # width is real and only the ink has to be borrowed.
+                    # width is real and only the ink has to be borrowed --
+                    # and the baseline inside it with the ink, because
+                    # there are no boxes to find it in either.
                     ink_per_em=ink if ink else _AVERAGE_INK_PER_EM,
+                    ink_above_baseline_per_em=(
+                        above if ink else _AVERAGE_INK_ABOVE_BASELINE_PER_EM
+                    ),
                     width_per_em=width,
                     mean_advance_per_em=advance,
                     source="font",
                 )
         baked = BAKED.get(family.casefold())
         if baked:
-            ink, advance, per_glyph = baked
+            ink, above, advance, per_glyph = baked
             return Metrics(
                 ink_per_em=ink,
+                ink_above_baseline_per_em=above,
                 width_per_em=per_glyph * max(len(text), 1),
                 mean_advance_per_em=advance,
                 source="table",

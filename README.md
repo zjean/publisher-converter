@@ -550,13 +550,69 @@ These are real and deliberate, not bugs to be surprised by later.
 
   Because WordArt fits its glyphs to the shape, the band is not a box the
   words sit somewhere inside — it *is* the words. So the text is centred
-  in it both ways rather than hung off the top-left corner. The frame
-  stays exactly the band: making it taller, so a headline wrapped by a
-  substituted font had somewhere to go, was tried and taken back out,
-  because the extra height only holds the words in place if the reader
-  centres them vertically and hangs the headline half a band high if it
-  does not. Centring inside the band is safe either way — ignored, it
-  lands on the top of the band, where the words went before.
+  across it rather than hung off a corner, and the frame stays exactly the
+  band: making it taller, so a headline wrapped by a substituted font had
+  somewhere to go, was tried and taken back out, because the extra height
+  only holds the words in place if the reader centres them vertically and
+  hangs the headline half a band high if it does not.
+
+  **A recovered headline states its own first baseline**, and without that
+  it is not drawn at all. Affinity hangs a frame's first baseline one
+  `usWinAscent` below the frame's top and hides the line — draws nothing,
+  keeps the frame — when that baseline would fall past the frame's bottom.
+  A band is by definition shorter than that: it is what the glyphs *ink*,
+  0.69 of an em for the corpus's dropped initial, against a win ascent of
+  0.86. Every headline whose band is tighter than its face's ascent
+  therefore vanished, which on `1337 kerkbode.pub` was the dropped *D*,
+  *Meditatie* and *Financiën*.
+
+  Sizing the type down until the ascent fits would set that *D* at 46.4pt
+  where Publisher draws it at 57.9, and growing the frame moves the wrap
+  the body copy flows around. So the baseline is stated instead, as IDML's
+  `FirstBaselineOffset="LeadingOffset"` with the leading set to where it
+  belongs: a headline is sized so its ink fills the band, so the share of
+  that ink sitting above the baseline is the share of the band above it —
+  39.2pt of that *D*'s 40.1pt band, which is where Publisher's own PDF
+  export draws it, to a fifth of a point. On a headline set on several
+  lines the first line states the baseline and every line after it steps
+  down by the band's own share.
+
+  `LeadingOffset` and not `FixedHeight`: the two were measured side by
+  side and Affinity draws the headline *above* its box for `FixedHeight`,
+  the same lifting-off-position answer a table gets from it. The frame is
+  top-aligned rather than centred for the same measured reason — a reader
+  centres nothing it has decided will not fit. All of it is
+  `research/probe_wordart_initial.py`, `probe_wordart_fit.py` and
+  `probe_wordart_baseline.py`, in that order: twelve cells each, one thing
+  changed per cell, read off in Affinity.
+
+  **A headline of one glyph is not stretched to its band.** The band is
+  the bounding box of the *slanted* text — WordArt italic, on faces like
+  Pristina that ship no italic and are therefore slanted by whoever draws
+  them — so part of its width is slant overhang rather than room for
+  glyphs. On a long headline that overhang is a few percent of a wide
+  band; on a single dropped initial it is a fifth of a narrow one.
+  `research/wordart_stretch.py` measures it by fitting the outline
+  Publisher's PDF export draws against the outline in the font file, which
+  closes to 0.017pt across 41 points:
+
+  | file | glyph | drawn | fitting advances to the band | stating no scale |
+  |---|---|---|---|---|
+  | 1336 | D | 95.7% | 121.2% | 104.6% |
+  | 1338 | L | 97.0% | 151.9% | 103.4% |
+
+  **What that measurement does not settle is the stretch on a longer
+  headline.** The overhang the fit recovers — 9.5pt of a 44.9pt band —
+  predicts one of those two initials to within 0.25% and the other not at
+  all, and the two share a band exactly, so the corpus holds one geometry
+  to fit against rather than two. The long headlines cannot supply another
+  from this machine either: the Monotype Corsiva installed here is a
+  different cut from the one Publisher drew with (34 outline points
+  against 49 for a capital *M*), so only the Pristina shapes can be
+  measured at all. Until a `.pub` supplies an italic band of another
+  shape, a headline of more than one glyph keeps the rule it has, and is
+  wide by however much of its band is slant — a few percent on the
+  corpus's headlines, and more the shorter the headline.
 
   **A WordArt shape libmspub reported *nothing* for is placed from the file
   instead, once the file has been made to prove where it goes.** There is no

@@ -1921,6 +1921,26 @@ def _wordart_fit(
     the smaller of what the height allows and what the width allows, and no
     condensation at all. Condensing by a ratio derived from a guessed width
     would state a precision that is not there.
+
+    **A headline of one glyph earns no scale either**, for the same reason
+    and on measured grounds. The band is the bounding box of the *slanted*
+    text -- WordArt italic, on faces that ship no italic and are therefore
+    slanted by whoever draws them -- so part of its width is slant overhang
+    rather than room for glyphs. On a long headline that overhang is a few
+    percent of a wide band; on a single dropped initial it is a fifth of a
+    narrow one. Both of the corpus's single-glyph headlines were fitted
+    against Publisher's own PDF export, glyph outline against glyph
+    outline, and it draws them at 95.7% and 97.0% where fitting the
+    advances to the whole band asks for 121.2% and 151.9%. Stating no
+    scale lands them within 4.6% and 3.4% instead
+    (`research/wordart_stretch.py`).
+
+    What that measurement does *not* settle is the formula for the rest.
+    The overhang the fit recovers, 9.5pt of a 44.9pt band, predicts the
+    one initial to within 0.25% and the other not at all -- and the two
+    share a band exactly, so the corpus holds only one geometry to fit
+    against. Until a file supplies another, a long headline keeps the rule
+    it has.
     """
     measured = [measure(art.font, art.bold, art.italic, line) for line in lines]
     spacing = art.spacing or 1.0
@@ -1940,6 +1960,10 @@ def _wordart_fit(
     if not exact or widest <= 0:
         by_width = art.width / widest if widest > 0 else by_height
         return min(by_height, by_width), None, source
+
+    # One glyph, and the band is mostly the slant's overhang: see above.
+    if sum(len(line) for line in lines) <= 1:
+        return by_height, None, source
 
     scale = art.width / (widest * by_height) * 100.0
     return (
@@ -1991,27 +2015,47 @@ def _wordart_frame(
     )
     art.applied_source = source
 
+    # Where in the band the baseline goes. A headline is sized so its ink
+    # fills the band, so the share of that ink above the baseline is the
+    # share of the band above the baseline -- and stating it is what stops
+    # a reader placing the first baseline by the font's own ascent, which
+    # is taller than the band and puts the baseline past the frame's
+    # bottom, where the line is hidden rather than drawn. Measured against
+    # Publisher's own PDF: this puts the dropped initial's baseline 39.2pt
+    # into its 40.1pt band, which is where Publisher draws it.
+    #
+    # The first line's, not the tallest line's: it is the first baseline
+    # being placed, and every later line steps from it by the band's own
+    # share below.
+    first_line = measure(art.font, art.bold, art.italic, lines[0] or " ")
+    baseline = size * first_line.ink_above_baseline_per_em
+
     # The frame is the band, exactly. Making it taller so a headline
     # wrapped by a substituted font still had somewhere to go was tried
     # and taken back out: it only holds the words in place if the reader
     # centres them vertically, and if it does not, the headline hangs
     # half a band high instead -- a certain error traded for a possible
-    # one. Centring inside the band is safe either way, because a reader
-    # that ignores it lands on the top of the band, which is where the
-    # words used to be put anyway.
+    # one. Growing it is also no longer the way out of a band too short
+    # for the type: the baseline below says where the line sits, and the
+    # frame is what the copy flows around.
     frame = model.TextFrame(
         x=page_width / 2.0 + art.centre_x - art.width / 2.0,
         y=page_height / 2.0 + art.centre_y - art.height / 2.0,
         width=art.width,
         height=art.height,
         rotation=art.rotation,
-        # WordArt fits its glyphs to the shape, so the band is not a box
-        # the words sit somewhere inside -- it *is* the words, and their
-        # centre is its centre. Straight text is the most that can come
-        # across, and centred in the band is where that lands closest;
-        # left and top would hang the headline off one corner with the
-        # space the stretch used to fill left empty beside it.
-        vertical_align="center",
+        # Top, with the first baseline stated below. Centring was what
+        # this asked for until the band's own height was measured against
+        # what a reader will place inside it: Affinity centres nothing it
+        # has decided will not fit, and a band is by definition shorter
+        # than the ascent the font asks for -- 0.69 of an em against 0.86
+        # for the dropped initial. So the line is placed rather than
+        # centred, which lands the ink filling the band either way, and
+        # that is where WordArt's stretch put it.
+        vertical_align="top",
+        # And the leading, not the reader's idea of an ascent, is what
+        # places it. Without this the headline is not drawn at all.
+        first_baseline_from_leading=True,
         # A headline is a shape floating over the page rather than a box
         # the layout made room for, and the one place that shows is a
         # dropped initial: its band overlaps the column it begins, and the
@@ -2030,7 +2074,7 @@ def _wordart_frame(
     # A WordArt headline can be set on more than one line, and states the
     # break as the same CR LF Publisher uses in body text; one paragraph
     # per line is what that means.
-    for line in lines:
+    for index, line in enumerate(lines):
         paragraph = model.Paragraph(
             align="center",
             # WordArt stretches its glyphs to the band, so a headline is set
@@ -2042,7 +2086,22 @@ def _wordart_frame(
             # did. What is stated instead is the line: the band's own share
             # of its height, one share per line the words are set on, which
             # is exactly the room Publisher gave them.
-            line_spacing_pt=art.height / max(len(lines), 1),
+            #
+            # Except the first, which is doing a second job: the frame asks
+            # for its first baseline at its first line's leading, so that
+            # one states the baseline instead of the share. Every later
+            # line then steps from it by the share, which puts each one's
+            # ink in its own slice of the band.
+            #
+            # The single-line case is what was measured in Affinity; the
+            # stacking is the arithmetic that follows from it, and the one
+            # headline it applies to in the corpus (`Lisa Hoogendijk.pub`,
+            # set on two lines) has a band far taller than its ascent, so
+            # it drew before this and draws now. Worth a look on the first
+            # stacked headline whose band is tight.
+            line_spacing_pt=(
+                baseline if index == 0 else art.height / max(len(lines), 1)
+            ),
         )
         paragraph.spans.append(
             model.Span(

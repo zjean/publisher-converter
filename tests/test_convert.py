@@ -907,17 +907,23 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def fake_measure(table, default=(0.70, 0.55, 0.50, "average")):
+def fake_measure(table, default=(0.70, 0.55, 0.50, "average"), above=0.8):
     """A stand-in for fontmetrics.measure keyed by the string measured.
 
     Sizing is tested against numbers the test states, so it needs no font
     installed -- which matters, because the two faces 46 of the corpus's
     headlines use are not installed on every machine.
+
+    `above` is the share of the ink that sits above the baseline, which
+    decides where in the band the first baseline goes. Stated once here
+    rather than per entry, because only the tests about the baseline care
+    what it is.
     """
     def measure(family, bold, italic, text):
         ink, width_per_glyph, advance, source = table.get(text, default)
         return fontmetrics.Metrics(
             ink_per_em=ink,
+            ink_above_baseline_per_em=ink * above,
             width_per_em=width_per_glyph * max(len(text), 1),
             mean_advance_per_em=advance,
             source=source,
@@ -986,11 +992,34 @@ class WordArtFitTest(unittest.TestCase):
         self.assertAlmostEqual(scale, 50.0)
 
     def test_the_scale_is_clamped(self):
-        measure = fake_measure({"I": (0.80, 0.10, 0.10, "font")})
+        measure = fake_measure({"II": (0.80, 0.10, 0.10, "font")})
         _size, scale, _source = convert._wordart_fit(
-            self.art(text="I", width=400.0), ["I"], measure
+            self.art(text="II", width=400.0), ["II"], measure
         )
         self.assertAlmostEqual(scale, convert._MAX_HORIZONTAL_SCALE)
+
+    def test_a_single_glyph_headline_takes_no_scale(self):
+        # A dropped initial. Its band is the bounding box of slanted text
+        # and on one glyph the slant's overhang is a fifth of it, so the
+        # band's width is not a measure of the glyph's width. Publisher
+        # draws the corpus's two at 95.7% and 97.0% where fitting the
+        # advances to the band asks 121.2% and 151.9%
+        # (research/wordart_stretch.py).
+        measure = fake_measure({"D": (0.80, 0.50, 0.50, "font")})
+        size, scale, _source = convert._wordart_fit(
+            self.art(text="D", width=44.9), ["D"], measure
+        )
+        self.assertAlmostEqual(size, 50.0)
+        self.assertIsNone(scale)
+
+    def test_two_glyphs_are_still_fitted_to_the_band(self):
+        # The rule above is about one glyph only: nothing measured says a
+        # short word should stop being fitted.
+        measure = fake_measure({"De": (0.80, 0.50, 0.50, "font")})
+        _size, scale, _source = convert._wordart_fit(
+            self.art(text="De", width=50.0), ["De"], measure
+        )
+        self.assertAlmostEqual(scale, 100.0)
 
     def test_spacing_widens_the_headline_before_it_is_fitted(self):
         # WordArt's multiple scales every advance, so a loose headline sets

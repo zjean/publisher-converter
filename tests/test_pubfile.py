@@ -1943,9 +1943,10 @@ class WordArtRecoveryTest(unittest.TestCase):
         # Giving it room for a wrapped headline was tried and taken back
         # out: the extra height only holds the words in place if the
         # reader centres them vertically, and if it does not the headline
-        # hangs half a band high. Centring inside the band is safe either
-        # way -- ignored, it lands on the top of the band, where the words
-        # were put before there was any centring at all.
+        # hangs half a band high. Growing it is not the answer to a band
+        # too short for the type either -- the frame is what the copy
+        # flows around, and the first baseline below is what places the
+        # line inside it.
         document = self.document_with(self.guides())
         convert._recover_wordart(document, self.structure_with(self.art()))
         frame = document.pages[0].items[0]
@@ -1970,32 +1971,68 @@ class WordArtRecoveryTest(unittest.TestCase):
         convert._recover_wordart(document, self.structure_with(self.art()))
         self.assertFalse(document.pages[0].items[0].wrap_text)
 
-    def test_the_line_is_as_tall_as_the_band_and_no_taller(self):
-        # The type is sized to fill the band, so its own line box is taller
-        # than the band -- and a line that does not fit its frame is overset
-        # text, which a reader hides rather than draws. The frame has to
-        # stay the band, because that is what the copy flows around, so it
-        # is the line that is stated: the band's own share of the height.
+    def test_the_first_line_states_the_baseline_it_sits_on(self):
+        # A reader left to itself hangs the first baseline a whole font
+        # ascent below the frame's top, and a band is shorter than that --
+        # so the baseline lands past the bottom of its frame and the
+        # headline is not drawn at all. What is stated instead is where
+        # in the band the baseline goes: a headline is sized so its ink
+        # fills the band, so that is the share of the ink above the
+        # baseline. Ink of 0.75 em fills a 30pt band at 40pt, and 0.60 em
+        # of that 40 is 24pt down.
         document = self.document_with(self.guides())
-        convert._recover_wordart(document, self.structure_with(self.art()))
-        paragraph = document.pages[0].items[0].story.paragraphs[0]
-        self.assertAlmostEqual(paragraph.line_spacing_pt, 30.0)
+        with self.measured(ink=0.75, above=0.60):
+            convert._recover_wordart(
+                document, self.structure_with(self.art(size=None, stretch=True))
+            )
+        frame = document.pages[0].items[0]
+        self.assertTrue(frame.first_baseline_from_leading)
+        self.assertAlmostEqual(frame.story.paragraphs[0].line_spacing_pt, 24.0)
 
-    def test_each_line_of_a_stacked_headline_takes_its_share(self):
+    def test_the_stated_baseline_never_reaches_past_the_band(self):
+        # It cannot, and this is why: the size is what makes the ink fill
+        # the band, so the part of the ink above the baseline is a share of
+        # a band's worth. A baseline past the frame's bottom is the whole
+        # failure being fixed here.
         document = self.document_with(self.guides())
-        convert._recover_wordart(
-            document, self.structure_with(self.art(text="one\r\ntwo\r\nthree"))
-        )
-        for paragraph in document.pages[0].items[0].story.paragraphs:
-            self.assertAlmostEqual(paragraph.line_spacing_pt, 10.0)
+        with self.measured(ink=0.75, above=0.75):
+            convert._recover_wordart(
+                document, self.structure_with(self.art(size=None, stretch=True))
+            )
+        frame = document.pages[0].items[0]
+        self.assertLessEqual(frame.story.paragraphs[0].line_spacing_pt, 30.0)
 
-    def test_the_words_are_centred_in_the_band(self):
-        # WordArt fits its glyphs to the shape, so the band is the words
-        # rather than a box they sit in one corner of.
+    def test_each_later_line_of_a_stacked_headline_takes_its_share(self):
+        # The first line states the baseline; every line after it steps
+        # down by the band's own share, which puts each one's ink in its
+        # own slice of the band.
+        document = self.document_with(self.guides())
+        with self.measured(ink=0.75, above=0.60):
+            convert._recover_wordart(
+                document,
+                self.structure_with(self.art(
+                    text="one\r\ntwo\r\nthree", size=None, stretch=True
+                )),
+            )
+        spacing = [
+            paragraph.line_spacing_pt
+            for paragraph in document.pages[0].items[0].story.paragraphs
+        ]
+        # 30pt of band over three lines is 10pt each, and the first states
+        # its baseline instead: 0.60 of the 13.33pt those 10pt buy.
+        self.assertAlmostEqual(spacing[0], 10.0 / 0.75 * 0.60)
+        self.assertAlmostEqual(spacing[1], 10.0)
+        self.assertAlmostEqual(spacing[2], 10.0)
+
+    def test_the_words_are_centred_across_the_band_and_placed_down_it(self):
+        # Across, because WordArt fits its glyphs to the shape and the band
+        # is the words rather than a box they sit in one corner of. Down
+        # it, because a reader centres nothing it has decided will not fit,
+        # and the stated baseline is what makes it fit.
         document = self.document_with(self.guides())
         convert._recover_wordart(document, self.structure_with(self.art()))
         frame = document.pages[0].items[0]
-        self.assertEqual(frame.vertical_align, "center")
+        self.assertEqual(frame.vertical_align, "top")
         self.assertEqual(frame.story.paragraphs[0].align, "center")
 
     def test_the_words_take_the_colour_of_the_shape(self):
@@ -2104,12 +2141,21 @@ class WordArtRecoveryTest(unittest.TestCase):
     # machine has. Monotype Corsiva is installed on the machine this was
     # written on and not on the build runner, which is exactly the way a
     # test like this fails somewhere else.
-    def measured(self, source="font"):
+    def measured(self, source="font", ink=0.8, above=0.6, advance=0.5):
+        """Measure what the test states, not what this machine has.
+
+        The size a headline is set at and the baseline it sits on are both
+        worked out from the font, and the two faces 46 of the corpus's
+        headlines use ship with Office rather than with an operating
+        system -- so a test asserting either has to state the metrics
+        behind it or it passes here and fails on a build runner.
+        """
         def measure(family, bold, italic, text):
             return fontmetrics.Metrics(
-                ink_per_em=0.8,
-                width_per_em=0.5 * max(len(text), 1),
-                mean_advance_per_em=0.5,
+                ink_per_em=ink,
+                ink_above_baseline_per_em=above,
+                width_per_em=advance * max(len(text), 1),
+                mean_advance_per_em=advance,
                 source=source,
             )
         return mock.patch.object(convert.fontmetrics, "measure", measure)

@@ -35,24 +35,33 @@ def main() -> int:
         print(f"{args.family!r} is not installed on this machine")
         return 1
 
-    inks, advances, per_glyph = [], [], []
+    inks, above, advances, per_glyph = [], [], [], []
     for sample in _SAMPLES:
         found = face.measure(sample)
         if not found:
             continue
-        ink, width, advance = found
+        ink, ink_above, width, advance = found
         if ink:
             inks.append(ink)
+            above.append(ink_above)
         advances.append(advance)
         per_glyph.append(width / len(sample))
     if not advances:
         print(f"{args.family!r} covers none of the sample words")
+        return 1
+    if not inks:
+        # A CFF face states advances but no outlines, so there is no ink to
+        # average and no baseline inside it either. Both are borrowed from
+        # the global averages at measuring time; a table line stating them
+        # as if measured would hide that.
+        print(f"{args.family!r} states no outlines, so its ink cannot be baked")
         return 1
 
     print(f"# {face.family} {face.subfamily}, measured over "
           f"{len(advances)} headline(s)")
     print(f'    "{args.family.casefold()}": '
           f"({sum(inks) / len(inks):.3f}, "
+          f"{sum(above) / len(above):.3f}, "
           f"{sum(advances) / len(advances):.3f}, "
           f"{sum(per_glyph) / len(per_glyph):.3f}),")
     return 0
