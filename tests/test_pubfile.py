@@ -4976,3 +4976,83 @@ class CellDivisionBoundsTest(unittest.TestCase):
         self.assertEqual(
             pubfile._cell_divisions(self.stream_pointing_past_the_end()), []
         )
+
+
+class TrailingBlankParagraphTest(unittest.TestCase):
+    """Paragraphs at the end of a story that hold only whitespace.
+
+    A recycled Publisher template collects them, and each one costs a line
+    of height in a reader that lays out what it is given: the caption on
+    1338's meditation page states 25 paragraphs where Publisher prints two.
+    """
+
+    def story(self, *texts) -> model.TextFrame:
+        frame = model.TextFrame()
+        frame.story.paragraphs[:] = [
+            model.Paragraph(spans=[model.Span(text=t)]) for t in texts
+        ]
+        return frame
+
+    def trim(self, frame) -> int:
+        document = model.Document(pages=[page_with(frame)])
+        return convert._trim_trailing_blank_paragraphs(document)
+
+    def texts(self, frame) -> List[str]:
+        return [p.text() for p in frame.story.paragraphs]
+
+    def test_the_trailing_run_goes(self):
+        frame = self.story("(Openb. 3:11)", "", "  ", "\t\t\t", "")
+        self.assertEqual(self.trim(frame), 4)
+        self.assertEqual(self.texts(frame), ["(Openb. 3:11)"])
+
+    def test_a_blank_between_two_others_is_spacing_and_stays(self):
+        frame = self.story("first", "", "second")
+        self.assertEqual(self.trim(frame), 0)
+        self.assertEqual(self.texts(frame), ["first", "", "second"])
+
+    def test_it_stops_at_the_last_paragraph_with_words(self):
+        frame = self.story("first", "", "1 ", "", "\t")
+        self.trim(frame)
+        self.assertEqual(self.texts(frame), ["first", "", "1 "])
+
+    def test_a_story_that_is_all_whitespace_is_left_alone(self):
+        # Nothing to be trailing after, and emptying it would hand the
+        # frame to `_drop_blank_frames` -- a bigger decision than this.
+        frame = self.story("", "  ", "\t")
+        self.assertEqual(self.trim(frame), 0)
+        self.assertEqual(len(frame.story.paragraphs), 3)
+
+    def test_a_tab_only_paragraph_counts_as_blank(self):
+        frame = self.story("words", "\t\t\t\t\t\t")
+        self.assertEqual(self.trim(frame), 1)
+
+    def test_a_non_breaking_space_counts_as_blank(self):
+        frame = self.story("words", "\xa0")
+        self.assertEqual(self.trim(frame), 1)
+
+
+class RealTrailingBlankTest(unittest.TestCase):
+    """1338's meditation caption, the frame this pass was written for."""
+
+    CAPTION = SAMPLES / "cgk" / "1338 kerkbode.pub"
+
+    @unittest.skipUnless(
+        (SAMPLES / "cgk" / "1338 kerkbode.pub").exists(),
+        "1338 kerkbode.pub absent (not tracked)",
+    )
+    def test_the_stale_tail_of_the_caption_is_dropped(self):
+        document = convert.parse_document(self.CAPTION)
+        caption = next(
+            item for item in model._walk(document.pages[2].items)
+            if isinstance(item, model.TextFrame)
+            and "Houd dat gij hebt" in "".join(
+                s.text for p in item.story.paragraphs for s in p.spans
+            )
+        )
+        before = len(caption.story.paragraphs)
+        convert._trim_trailing_blank_paragraphs(document)
+        after = len(caption.story.paragraphs)
+        self.assertGreater(before, after, "the tail was not trimmed")
+        # What is left ends on the stray '1', which is not whitespace and
+        # so is not this pass's to remove.
+        self.assertTrue(caption.story.paragraphs[-1].text().strip())

@@ -1620,6 +1620,45 @@ def _fill_undelivered_stories(
     return list(filled.values())
 
 
+def _trim_trailing_blank_paragraphs(document: model.Document) -> int:
+    """Drop the paragraphs at the end of a story that hold only whitespace.
+
+    A recycled Publisher template accumulates them. The caption frame on
+    the meditation page of `1338 kerkbode.pub` states 25 paragraphs where
+    Publisher prints two: the quotation, its reference, and then a second
+    quotation left over from an earlier issue followed by 38 tabs, a stray
+    `1`, and ten paragraphs of nothing at all. Every one of those costs a
+    line of height in a reader that lays out what it is given.
+
+    Only the trailing run, and only whitespace. A blank paragraph between
+    two others is spacing somebody asked for, and this cannot tell that
+    from an accident; at the end of a story there is nothing left to space
+    away from, and a paragraph of spaces and tabs draws nothing wherever it
+    sits. A story that is *entirely* whitespace is left alone -- there is
+    no content to be trailing after, and emptying it would hand the frame
+    to `_drop_blank_frames`, which is a bigger decision than this pass is
+    making.
+
+    What it does not touch: the leftover text itself. Nothing in the file
+    or the event stream distinguishes a stale quotation from a wanted one,
+    and a rule that guessed would delete real copy elsewhere.
+    """
+    trimmed = 0
+    for holder in list(document.pages) + list(document.masters):
+        for item in model._walk(holder.items):
+            if not isinstance(item, model.TextFrame):
+                continue
+            paragraphs = item.story.paragraphs
+            if not any(p.text().strip() for p in paragraphs):
+                continue
+            while paragraphs and not paragraphs[-1].text().strip():
+                paragraphs.pop()
+                trimmed += 1
+    if trimmed:
+        log.info("%d trailing blank paragraph(s) trimmed", trimmed)
+    return trimmed
+
+
 def _apply_wrap_offsets(
     document: model.Document, structure: Optional["pubfile.FileStructure"]
 ) -> int:
@@ -2759,6 +2798,12 @@ def _convert(
     # a run of identical empty frames is exactly what master lifting looks
     # for, so doing this first would sweep the chain onto a master spread.
     _thread_duplicate_stories(document, structure)
+    # After threading, which empties the continuation frames of a chain, so
+    # that this reads the one frame still holding the paragraphs. Before the
+    # two passes below, both of which count paragraphs: a tab stop is not
+    # wanted for a line of tabs nobody sees, and text that only oversets
+    # because of them is not overset.
+    _trim_trailing_blank_paragraphs(document)
     # After threading, so that a paragraph is counted once rather than once
     # per frame the story was copied into before the links were made.
     _apply_tab_stops(document, structure)

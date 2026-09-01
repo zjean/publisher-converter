@@ -541,6 +541,55 @@ cell — 95 of them in `MISSAL MARIANA E PEDRO`, at 1.5, 2 and 2.5 spaces —
 are untouched. They run to many lines, where the spacing is the layout,
 and nothing measures their box the way a row measures a cell's.
 
+## 13. A recycled template's stale paragraphs
+
+Reported from Affinity: the caption on 1338's meditation page — the block
+holding `‘Houd dat gij hebt, opdat niemand uw kroon neme’` — renders far
+too many lines. It does: **25 paragraphs against the two Publisher
+prints.**
+
+Everything the converter reads is right. The frame box is 346.28 x
+382.36pt and matches the file's own Escher anchor (seq 302) to a
+hundredth; only one shape holds that story, so nothing is conflated.
+Padding is ~0, so there is no shrunken text area. The file states the
+story as 255 characters and libmspub delivers 158. Every run is black
+Calibri at 10 and 8pt with **nothing marking the stale text** — no white
+colour, no hidden flag, no size trick — and the story holds no page- or
+column-break character, only CR and TAB. The frame is in no chain. And
+Publisher draws none of it: confirmed by text extraction over all 14
+sheets of its PDF and by a 6x crop of the exact strip between the caption
+and the body columns.
+
+What is in there is a recycled template's leavings: a second quotation
+from an earlier issue (`‘…’` / `(Openbaring 6: 12-17)`, which is 1337's
+meditation reference), then 38 tabs, a `‘.’`, an `()`, a stray `1`, and
+ten paragraphs of nothing.
+
+**The trailing whitespace is trimmed** (`convert._trim_trailing_blank
+_paragraphs`): 25 paragraphs to 15, and the same pass takes 41 characters
+off 1336, 40 off 1337 and 1338, 26 off `Lisa Hoogendijk` and 81 off
+`rotated_text`. Its side effects are all in the right direction — the
+spurious "paragraph states no tab stop" counts fall from 51 to 48 on
+1337, 42 to 39 on 1338, and `rotated_text`'s overset warning from 3,911
+characters to 3,868. Only the trailing run, and only whitespace: a blank
+paragraph *between* two others is spacing somebody asked for, and a story
+that is entirely whitespace is left alone rather than emptied into
+`_drop_blank_frames`.
+
+**The stale text itself is left.** Nothing in the file or the event stream
+tells a leftover quotation from a wanted one, and a rule that guessed
+would delete real copy in another document. Why Publisher does not lay it
+out is unexplained by anything we read, and settling it needs the same
+kind of controlled experiment as `actions.md` §1 — a probe `.pub` with
+known stale text in an over-tall frame, exported from Publisher before it
+retires on 1 October 2026.
+
+**Not the fill.** This was first written up as the cream panel coming out
+white, on a reading of `style.fill` — which is only the flat fallback. The
+panel carries its whole ramp and the package writes it: `Gradient/G_1`,
+white for the first 2% and `C_FFF2C9` — (255, 242, 201) — from there on.
+There was nothing to fix.
+
 ## 12. How much room a wrap leaves — **read from the file now**
 
 Reported from Affinity, and measured against Publisher's own PDF: on page
