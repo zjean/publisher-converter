@@ -4718,3 +4718,108 @@ class RealCrammedTableTest(unittest.TestCase):
         filled = [t for t in held if t]
         self.assertEqual(filled[-1], "Gerhard van de Hoef")
         self.assertEqual(len(filled), 40, "forty rows over forty-one cells")
+
+
+class WrapDistanceTest(unittest.TestCase):
+    """How far a shape keeps text off itself, as the file states it."""
+
+    LEFT, TOP, RIGHT, BOTTOM = pubfile._PROP_WRAP_DISTANCES
+
+    def test_reads_a_distance_per_side_in_points(self):
+        emu = int(2.88 * pubfile._EMU_PER_POINT)
+        self.assertEqual(
+            pubfile._wrap_distances(
+                {self.LEFT: emu, self.TOP: emu, self.RIGHT: emu, self.BOTTOM: emu}
+            ),
+            (2.88, 2.88, 2.88, 2.88),
+        )
+
+    def test_a_side_left_out_is_no_room_rather_than_unknown(self):
+        # Publisher writes a field when it has something to say, so the
+        # eight shapes in the corpus that state only a bottom really do
+        # keep text off one edge and not the other three.
+        emu = int(5.65 * pubfile._EMU_PER_POINT)
+        top, left, bottom, right = pubfile._wrap_distances({self.BOTTOM: emu})
+        self.assertAlmostEqual(bottom, 5.65, places=2)
+        self.assertEqual((top, left, right), (0.0, 0.0, 0.0))
+
+    def test_a_shape_stating_none_wraps_nothing(self):
+        self.assertIsNone(pubfile._wrap_distances({}))
+
+
+class WrapNearTest(unittest.TestCase):
+    """Finding the shape an item was drawn from, to read its distance off."""
+
+    def structure(self, *anchors) -> pubfile.FileStructure:
+        return pubfile.FileStructure(anchors=list(anchors))
+
+    def anchor(self, cx, cy, w, h, wrap=(2.88, 2.88, 2.88, 2.88), seq=1):
+        return pubfile.ShapeAnchor(
+            shape_seq=seq, centre_x=cx, centre_y=cy, width=w, height=h, wrap=wrap
+        )
+
+    def test_finds_the_shape_sitting_here(self):
+        structure = self.structure(self.anchor(-143.0, -206.0, 101.4, 139.3))
+        self.assertEqual(
+            structure.wrap_near(-143.0, -206.0, 101.4, 139.3),
+            (2.88, 2.88, 2.88, 2.88),
+        )
+
+    def test_size_settles_two_shapes_at_one_centre(self):
+        # A picture and the border around it share a centre and differ by
+        # a couple of points, which is exactly the pair on page 11.
+        structure = self.structure(
+            self.anchor(-143.0, -206.0, 101.4, 139.3, (1.0, 1.0, 1.0, 1.0), seq=1),
+            self.anchor(-143.0, -206.0, 130.0, 170.0, (2.0, 2.0, 2.0, 2.0), seq=2),
+        )
+        self.assertEqual(
+            structure.wrap_near(-143.0, -206.0, 101.4, 139.3),
+            (1.0, 1.0, 1.0, 1.0),
+        )
+
+    def test_two_shapes_equally_close_answer_nothing(self):
+        # A distance taken off the wrong shape is a gap invented, which is
+        # worse than leaving the reader to close it.
+        structure = self.structure(
+            self.anchor(-143.0, -206.0, 100.0, 140.0, seq=1),
+            self.anchor(-143.0, -206.0, 100.0, 140.0, (9.0, 9.0, 9.0, 9.0), seq=2),
+        )
+        self.assertIsNone(structure.wrap_near(-143.0, -206.0, 100.0, 140.0))
+
+    def test_nothing_here_answers_nothing(self):
+        structure = self.structure(self.anchor(200.0, 200.0, 50.0, 50.0))
+        self.assertIsNone(structure.wrap_near(-143.0, -206.0, 101.4, 139.3))
+
+    def test_a_shape_stating_no_distance_is_not_a_candidate(self):
+        structure = self.structure(self.anchor(-143.0, -206.0, 101.4, 139.3, None))
+        self.assertIsNone(structure.wrap_near(-143.0, -206.0, 101.4, 139.3))
+
+
+class RealWrapDistanceTest(unittest.TestCase):
+    """The portrait on page 11 of 1337, which the copy runs down beside."""
+
+    @needs_truncated
+    def test_the_picture_states_publishers_own_gap(self):
+        structure = pubfile.read_structure(TRUNCATED)
+        document = convert.parse_document(TRUNCATED)
+        convert._apply_wrap_offsets(document, structure)
+        portrait = next(
+            item for item in model._walk(document.pages[10].items)
+            if isinstance(item, model.Image) and abs(item.width - 101.43) < 0.5
+        )
+        self.assertEqual(portrait.wrap_offsets, (2.88, 2.88, 2.88, 2.88))
+
+    @needs_truncated
+    def test_the_wrap_reaches_below_the_last_line_it_holds(self):
+        # The bottom edge decides how many lines are narrow. Publisher's
+        # ninth line sits with its box at 163.0 and the picture ends at
+        # 161.25, so a zero offset widened the column a line early.
+        structure = pubfile.read_structure(TRUNCATED)
+        document = convert.parse_document(TRUNCATED)
+        convert._apply_wrap_offsets(document, structure)
+        portrait = next(
+            item for item in model._walk(document.pages[10].items)
+            if isinstance(item, model.Image) and abs(item.width - 101.43) < 0.5
+        )
+        bottom = portrait.y + portrait.height + portrait.wrap_offsets[2]
+        self.assertGreater(bottom, 163.0)

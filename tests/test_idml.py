@@ -2538,3 +2538,40 @@ class MasterNameTest(unittest.TestCase):
         with zipfile.ZipFile(write_package(document)) as archive:
             parts = [n for n in archive.namelist() if n.startswith("MasterSpreads/")]
         self.assertEqual(len(parts), 30)
+
+
+class ImageWrapOffsetTest(unittest.TestCase):
+    """The room a wrap leaves comes from the file, not from zero."""
+
+    def _wrap(self, offsets):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        image = model.Image(
+            x=20.0, y=30.0, width=100.0, height=140.0,
+            data=b"\x89PNG\r\n\x1a\n", mime_type="image/png",
+        )
+        image.wrap_offsets = offsets
+        document.pages[0].items.append(image)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            spread = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            root = ET.fromstring(archive.read(spread))
+            return next(root.iter("TextWrapOffset")).attrib
+
+    def test_the_stated_distance_is_written_on_every_side(self):
+        self.assertEqual(
+            self._wrap((2.88, 2.88, 2.88, 2.88)),
+            {"Top": "2.88", "Left": "2.88", "Bottom": "2.88", "Right": "2.88"},
+        )
+
+    def test_a_side_the_file_leaves_out_stays_closed_up(self):
+        attrib = self._wrap((0.0, 0.0, 5.65, 0.0))
+        self.assertEqual(attrib["Bottom"], "5.65")
+        self.assertEqual(attrib["Top"], "0")
+
+    def test_an_object_with_no_distance_read_keeps_the_reader_its_own(self):
+        # Zero is the honest answer where nothing was matched: a gap the
+        # file does not state is one this would be inventing.
+        self.assertEqual(
+            self._wrap(None),
+            {"Top": "0", "Left": "0", "Bottom": "0", "Right": "0"},
+        )
+

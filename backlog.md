@@ -541,6 +541,42 @@ cell — 95 of them in `MISSAL MARIANA E PEDRO`, at 1.5, 2 and 2.5 spaces —
 are untouched. They run to many lines, where the spacing is the layout,
 and nothing measures their box the way a row measures a cell's.
 
+## 12. How much room a wrap leaves — **read from the file now**
+
+Reported from Affinity, and measured against Publisher's own PDF: on page
+11 of `1337` the copy runs down the side of a portrait, and it ran too
+close to it.
+
+Publisher starts those nine wrapped lines at **x=125**; a zero offset
+starts them at 117.3. The picture is two Escher shapes, `457` the frame
+at (14.33, 19.55)-(120.64, 162.88) and `458` the image inside it at
+(15.89, 21.92)-(117.32, 161.25), and **both state a wrap distance of
+2.88pt** — 0.04in, Publisher's own default gap. `_emit_text_wrap` was
+writing `TextWrapOffset` as zero on all four sides and throwing that away.
+
+The bottom edge mattered more than the extra air, because it decides *how
+many* lines are narrow. The wrap ended at 161.25 against the last wrapped
+line's box at 163.0, so the column widened one line before Publisher
+widens it. With the stated 2.88 the wrap reaches **164.13** and that line
+stays in, which is what the PDF shows.
+
+Read per shape (`pubfile._wrap_distances` → `ShapeAnchor.wrap`), matched
+to an item by where it sits (`wrap_near`, on the same centre-and-size
+handle `gradient_for` uses), and left at zero where no shape matches —
+a gap the file does not state is one this would be inventing. 762 of the
+corpus's 1,353 items match.
+
+**Still ~4.8pt short, and worth a probe rather than a guess.** With the
+distance applied the right edge is 120.20 against Publisher's ≥125. The
+best model of the rest is that Publisher wraps the **union** of the two
+shapes: `max(120.64 + 2.88, 117.32 + 2.88)` = 123.52, which also keeps the
+bottom at 164.13 and lands within 1.5pt. Making it so means the picture's
+*frame* wrapping as well as the image inside it, and the two boxes differ
+by about a point in each direction because an Escher anchor measures a
+shape with its outline while libmspub reports the path inside — so the
+match is not clean enough to do on inference. `actions.md` §1 is the
+experiment that would settle it.
+
 ### A table cannot flow around a picture — **fixed**
 
 Reported from Affinity: the agenda on page 7 of `1337` sits at the wrong

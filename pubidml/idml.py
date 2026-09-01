@@ -1328,7 +1328,7 @@ class IdmlWriter:
         # question, whether placement or legibility wins where Publisher's
         # objects overlap.
         if frame.wrap_text and self.wrap_images:
-            self._emit_text_wrap(element)
+            self._emit_text_wrap(element, frame)
         self._emit_transparency(element, frame.style)
 
         # A chain's text belongs to the story, not to each frame that shows
@@ -1548,13 +1548,23 @@ class IdmlWriter:
         return _serialise(root)
 
     @staticmethod
-    def _emit_text_wrap(element: ET.Element) -> None:
+    def _emit_text_wrap(element: ET.Element, item: model.Item = None) -> None:
         """Ask the text under an object to flow around it instead.
 
-        libmspub reports no wrap for anything, so every object Publisher
-        floated over its copy arrives with nothing to say it was floated.
-        A bounding-box wrap is what those documents almost always intend,
-        and the alternative is the object drawn straight over the words.
+        libmspub reports no wrap *mode* for anything, so every object
+        Publisher floated over its copy arrives with nothing to say it was
+        floated. A bounding-box wrap is what those documents almost always
+        intend, and the alternative is the object drawn straight over the
+        words.
+
+        The room the wrap leaves is not a guess: the file states a distance
+        per side and `convert._apply_wrap_offsets` puts it on the item. Left
+        at zero -- as this did until it was measured -- the copy runs right
+        up against the picture where Publisher keeps 0.04in of air, and the
+        wrap ends level with the picture instead of below it, which widens
+        the column a line early. Zero stays the answer for an object whose
+        distances could not be read, since a gap nothing states is one this
+        would be inventing.
         """
         wrap = ET.SubElement(
             element,
@@ -1566,10 +1576,15 @@ class IdmlWriter:
                 "TextWrapMode": "BoundingBoxTextWrap",
             },
         )
+        offsets = getattr(item, "wrap_offsets", None) or (0.0, 0.0, 0.0, 0.0)
+        top, left, bottom, right = offsets
         ET.SubElement(
             ET.SubElement(wrap, "Properties"),
             "TextWrapOffset",
-            {"Top": "0", "Left": "0", "Bottom": "0", "Right": "0"},
+            {
+                "Top": fmt(top), "Left": fmt(left),
+                "Bottom": fmt(bottom), "Right": fmt(right),
+            },
         )
 
     def _emit_image(
@@ -1607,7 +1622,7 @@ class IdmlWriter:
         # documents almost always intend. Page-sized images are excluded:
         # those are backgrounds, and wrapping would push all text off.
         if self.wrap_images and item.width * item.height < 0.6 * page.width * page.height:
-            self._emit_text_wrap(rectangle)
+            self._emit_text_wrap(rectangle, item)
 
         # On the frame rather than the Image inside it: Publisher shadows
         # the picture as placed, and a shadow on the content would sit

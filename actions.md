@@ -50,8 +50,22 @@ Established here, so don't re-derive it:
   defaults, an image store *and* a shape per ruled or shaded table cell;
   only `EscherDelayStm` is just image blips.
 - The Escher wrap distances (`dxWrapDistLeft` `0x0384` … `dyWrapDistBottom`
-  `0x0387`) *are* present but appear **once each** — they are document
-  defaults, not per-shape values.
+  `0x0387`) *are* present, and — correcting what stood here before — they
+  are **per-shape, not document defaults**. `1337 kerkbode.pub` states them
+  on **450 shapes**: 438 with all four sides at 2.88pt (0.04in, Publisher's
+  own default gap), 8 with a 5.65pt bottom and nothing else, and 4 with
+  three sides of the four. They are read per shape by
+  `pubfile._wrap_distances` onto `ShapeAnchor.wrap`, matched to an item by
+  `wrap_near`, and written as `TextWrapOffset` — which is what closed the
+  gap on page 11 of `1337`, where the copy running down the side of a
+  portrait sat 2.88pt too close and the column widened a line early.
+
+  This does **not** answer the question below. A distance says how much
+  room a wrap leaves, not whether wrapping is on: 438 of 450 shapes state
+  one, page backgrounds included, so the distances cannot be the switch.
+  What they do give is a second signal to correlate against once the
+  controlled experiment exists — a shape whose wrap is off may well state
+  no distance, which is the reading `_read_wordart` already relies on.
 - libmspub's shape-chunk loop (`MSPUBParser.cpp`, the `else` branch
   around line 874) reads every block in the chunk but acts on only
   **seven** IDs: `SHAPE_WIDTH 0xAA`, `SHAPE_HEIGHT 0xAB`,

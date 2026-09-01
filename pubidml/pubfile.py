@@ -598,6 +598,12 @@ class ShapeAnchor:
     centre_y: float
     width: float = 0.0
     height: float = 0.0
+    #: How far text keeps clear of this shape, as (top, left, bottom,
+    #: right) in points, where the shape states any of the four. Publisher
+    #: writes one distance per side and leaves out a side it has nothing
+    #: to say about, so a missing side is no room rather than an unknown.
+    #: None where the shape states none at all.
+    wrap: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -742,6 +748,42 @@ class FileStructure:
         if shape_seq is None:
             return None
         return self.shape_pages.get(shape_seq)
+
+    def wrap_near(
+        self,
+        centre_x: float,
+        centre_y: float,
+        width: float,
+        height: float,
+        tolerance: float = 1.5,
+    ) -> Optional[Tuple[float, float, float, float]]:
+        """The room this shape leaves text, where the file states it.
+
+        Matched the way `gradient_for` matches a ramp: by where the shape
+        sits, with size settling which of two at the same centre it is. The
+        tolerance is wider here than the half-point used elsewhere, because
+        an Escher anchor measures a shape *with* its outline while libmspub
+        reports the path inside it -- a picture in a 2pt border differs by
+        about a point in each direction, and both boxes are the same shape.
+
+        None where nothing sits here, and None where two shapes are equally
+        close: a distance taken off the wrong shape is a gap invented.
+        """
+        near = [
+            anchor for anchor in self.anchors
+            if anchor.wrap is not None
+            and abs(anchor.centre_x - centre_x) <= tolerance
+            and abs(anchor.centre_y - centre_y) <= tolerance
+        ]
+        if not near:
+            return None
+        near.sort(key=lambda a: abs(a.width - width) + abs(a.height - height))
+        if len(near) > 1:
+            first = abs(near[0].width - width) + abs(near[0].height - height)
+            second = abs(near[1].width - width) + abs(near[1].height - height)
+            if abs(first - second) <= tolerance:
+                return None
+        return near[0].wrap
 
     def story_of_shape(self, shape_seq: Optional[int]) -> Optional[int]:
         """Which of `story_texts` this shape holds, where the file says.
@@ -1520,10 +1562,13 @@ def _shape_anchors(escher: bytes) -> List[ShapeAnchor]:
     found: List[ShapeAnchor] = []
     for body, end in _escher_shapes(escher, 0, len(escher)):
         shape_seq = box = None
-        for _version, _instance, rec_type, sub_body, sub_end in _escher_records(
+        props: Dict[int, object] = {}
+        for _version, instance, rec_type, sub_body, sub_end in _escher_records(
             escher, body, end
         ):
-            if rec_type == _CLIENT_DATA:
+            if rec_type in _PROPERTY_RECORDS:
+                props.update(_escher_properties(escher, sub_body, sub_end, instance))
+            elif rec_type == _CLIENT_DATA:
                 shape_seq = _escher_values(escher, sub_body, sub_end).get(
                     _CLIENT_DATA_SEQNUM
                 )
@@ -1543,9 +1588,34 @@ def _shape_anchors(escher: bytes) -> List[ShapeAnchor]:
                 centre_y=(box[1] + box[3]) / 2.0,
                 width=box[2] - box[0],
                 height=box[3] - box[1],
+                wrap=_wrap_distances(props),
             )
         )
     return found
+
+
+def _wrap_distances(props: dict) -> Optional[Tuple[float, float, float, float]]:
+    """How far text keeps clear of a shape, as (top, left, bottom, right).
+
+    Publisher states a distance per side -- `dxWrapDistLeft` and its three
+    neighbours -- and leaves out a side it has nothing to say about, so a
+    side that is absent is nothing rather than unknown. Almost every shape
+    in the corpus states 0.04in on all four, which is Publisher's own
+    default gap; the exceptions are eight that state only a 5.65pt bottom.
+
+    None where the shape states no distance at all, which is the only thing
+    in the file that separates an object the copy flows around from one it
+    runs under -- `_read_wordart` reads it for exactly that.
+    """
+    left, top, right, bottom = _PROP_WRAP_DISTANCES
+    if not any(side in props for side in _PROP_WRAP_DISTANCES):
+        return None
+
+    def points(side: int) -> float:
+        value = props.get(side)
+        return value / _EMU_PER_POINT if isinstance(value, int) else 0.0
+
+    return points(top), points(left), points(bottom), points(right)
 
 
 def _table_drawings(escher: bytes, palette) -> Dict[int, _TableDrawing]:

@@ -1620,6 +1620,47 @@ def _fill_undelivered_stories(
     return list(filled.values())
 
 
+def _apply_wrap_offsets(
+    document: model.Document, structure: Optional["pubfile.FileStructure"]
+) -> int:
+    """Give every object the room it keeps text at, as the file states it.
+
+    libmspub reports no wrap of any kind, so the converter decides for
+    itself *which* objects text flows around -- but not by how much. The
+    file says that outright, one distance per side on the shape, and until
+    this pass read it the offset was written as zero on all four.
+
+    Measured on page 11 of `1337 kerkbode.pub`, where the copy runs down
+    the side of a portrait: Publisher starts those nine lines at x=125 and
+    a zero offset starts them at 117.3. The bottom edge matters more than
+    the extra air, because it decides *how many* lines are narrow -- the
+    wrap ended at 161.25, above the last wrapped line's box at 163.0, so
+    the column widened one line before Publisher widens it. With the
+    file's 2.88pt the wrap reaches 164.13 and that line stays in.
+
+    Matched by where the shape sits, and left alone where that is not
+    certain: an offset taken off the wrong shape is a gap invented, which
+    is the one thing worse than the zero this replaces.
+    """
+    if structure is None or not structure.anchors:
+        return 0
+
+    found = 0
+    for page in document.pages:
+        for item in model._walk(page.items):
+            offsets = structure.wrap_near(
+                item.x + item.width / 2.0 - page.width / 2.0,
+                item.y + item.height / 2.0 - page.height / 2.0,
+                item.width,
+                item.height,
+            )
+            if offsets is not None:
+                item.wrap_offsets = offsets
+                found += 1
+    log.info("wrap distance read for %d item(s)", found)
+    return found
+
+
 def _fill_undelivered_tables(
     document: model.Document, structure: Optional["pubfile.FileStructure"]
 ) -> List[int]:
@@ -2685,6 +2726,9 @@ def _convert(
     # drew rather than the narrower one a straightened band leaves.
     _restore_floored_turns(document, structure)
     _recover_wordart(document, structure)
+    # After the WordArt pass, which places bands of its own that wrap, and
+    # before the writer, which is the only thing that reads the offsets.
+    _apply_wrap_offsets(document, structure)
     _rasterise_metafiles(document)
     # After the master pass: threading empties the continuation frames, and
     # a run of identical empty frames is exactly what master lifting looks
