@@ -566,16 +566,32 @@ handle `gradient_for` uses), and left at zero where no shape matches —
 a gap the file does not state is one this would be inventing. 762 of the
 corpus's 1,353 items match.
 
-**Still ~4.8pt short, and worth a probe rather than a guess.** With the
-distance applied the right edge is 120.20 against Publisher's ≥125. The
-best model of the rest is that Publisher wraps the **union** of the two
-shapes: `max(120.64 + 2.88, 117.32 + 2.88)` = 123.52, which also keeps the
-bottom at 164.13 and lands within 1.5pt. Making it so means the picture's
-*frame* wrapping as well as the image inside it, and the two boxes differ
-by about a point in each direction because an Escher anchor measures a
-shape with its outline while libmspub reports the path inside — so the
-match is not clean enough to do on inference. `actions.md` §1 is the
-experiment that would settle it.
+### The border was still standing on the copy — **fixed, union of the two**
+
+Reported next from Affinity, and the same picture: *the picture is over
+the text.* The distance alone was not enough, and the reason is that a
+Publisher picture is **two** shapes. The image ends at 117.32 and the gold
+border around it at 120.64, so text placed 2.88pt off the *image* lands at
+120.20 — under the border. Text has to clear the picture as drawn.
+
+So the room is the union of every concentric shape's box plus that shape's
+own distance, measured edge to edge rather than by half-widths (the frame
+and its image are 0.89pt off-centre here, and assuming they share a centre
+loses that much room). Page 11's portrait now reaches **123.49**, clear of
+the border and within 1.5pt of the x=125 Publisher prints.
+
+**Bounded to a border, not another object.** Unioning everything
+concentric is how this first went wrong: the corpus produced offsets of
+255 and 286pt, because a 57pt image sharing a centre with a 397pt panel
+counts as nested. Measured over all 22 files, every concentric shape
+within **12pt** of an item's box is the frame drawn round it — 101.4x139.3
+inside 106.3x143.3 is this portrait, and the widest such ring is 6.3pt —
+while past that the pairs are unrelated. With the limit in place the
+largest offset anywhere in the corpus is 9.7pt and the median is 2.88.
+
+Affinity does honour the wrap, which the round-trip settles: it put those
+nine lines at x=117, flush against the image edge. The wrap was never the
+missing part; the border was.
 
 ### A table cannot flow around a picture — **fixed**
 

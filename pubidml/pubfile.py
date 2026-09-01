@@ -290,6 +290,10 @@ _PROP_WORDART_SPACING = 0x00C4
 # in the file that separates a headline the copy flows around from one it
 # runs under, and libmspub reports neither.
 _PROP_WRAP_DISTANCES = (0x0384, 0x0385, 0x0386, 0x0387)
+# How much bigger than an item a shape may be and still be the border drawn
+# round it rather than a different object. See `FileStructure.wrap_near`,
+# which is the only thing that uses it, for the measurement behind it.
+_WRAP_BORDER_LIMIT = 12.0
 
 # WordArt's character formatting, which is not the shape's: bold, italic
 # and the rest are booleans of its own, packed into one property. MS-ODRAW
@@ -757,33 +761,65 @@ class FileStructure:
         height: float,
         tolerance: float = 1.5,
     ) -> Optional[Tuple[float, float, float, float]]:
-        """The room this shape leaves text, where the file states it.
+        """How far text keeps off this item, as (top, left, bottom, right).
 
-        Matched the way `gradient_for` matches a ramp: by where the shape
-        sits, with size settling which of two at the same centre it is. The
-        tolerance is wider here than the half-point used elsewhere, because
-        an Escher anchor measures a shape *with* its outline while libmspub
-        reports the path inside it -- a picture in a 2pt border differs by
-        about a point in each direction, and both boxes are the same shape.
+        The answer is measured from the box handed in, so it can be written
+        straight out as an IDML `TextWrapOffset`.
 
-        None where nothing sits here, and None where two shapes are equally
-        close: a distance taken off the wrong shape is a gap invented.
+        What makes it more than a lookup is that a Publisher picture is
+        *two* shapes -- the frame that draws the border and the image sitting
+        inside it -- and each states its own distance. Text has to clear the
+        picture as it is drawn, border and all. Wrapping the image alone
+        leaves the border standing over the copy: on page 11 of
+        `1337 kerkbode.pub` the image ends at 117.32 and its gold border at
+        120.64, so text placed 2.88pt off the image lands at 120.20, under
+        the border. So the room is the **union** of every concentric shape's
+        box plus that shape's own distance.
+
+        Only shapes that nest are unioned -- one box inside the other, which
+        is what a frame and its content are. Two shapes that merely overlap
+        are two objects, and rolling them together would push text off a
+        picture that is not there.
+
+        The tolerance is wider than the half-point used elsewhere because an
+        Escher anchor measures a shape with its outline while libmspub
+        reports the path inside it, about a point apart on a bordered
+        picture. None where no shape here states a distance at all.
         """
         near = [
             anchor for anchor in self.anchors
             if anchor.wrap is not None
             and abs(anchor.centre_x - centre_x) <= tolerance
             and abs(anchor.centre_y - centre_y) <= tolerance
+            # A border, not another object. Measured over the corpus: every
+            # concentric shape within 12pt of an item's box is the frame
+            # drawn round it -- 101.4x139.3 inside 106.3x143.3 is page 11's
+            # portrait, and the widest such ring is 6.3pt. Past that the
+            # pairs are unrelated things that happen to share a centre, up
+            # to a 57pt image concentric with a 397pt panel, and unioning
+            # one of those would push text hundreds of points off a picture
+            # that is not there.
+            and abs(anchor.width - width) <= _WRAP_BORDER_LIMIT
+            and abs(anchor.height - height) <= _WRAP_BORDER_LIMIT
         ]
         if not near:
             return None
-        near.sort(key=lambda a: abs(a.width - width) + abs(a.height - height))
-        if len(near) > 1:
-            first = abs(near[0].width - width) + abs(near[0].height - height)
-            second = abs(near[1].width - width) + abs(near[1].height - height)
-            if abs(first - second) <= tolerance:
-                return None
-        return near[0].wrap
+
+        # Edge to edge rather than by half-widths: the frame and the image
+        # it holds are nearly but not exactly concentric -- 0.89pt apart on
+        # page 11 -- and assuming they share a centre loses that much room.
+        top = left = bottom = right = 0.0
+        for anchor in near:
+            a_top, a_left, a_bottom, a_right = anchor.wrap
+            top = max(top, (centre_y - height / 2.0)
+                      - (anchor.centre_y - anchor.height / 2.0) + a_top)
+            bottom = max(bottom, (anchor.centre_y + anchor.height / 2.0)
+                         - (centre_y + height / 2.0) + a_bottom)
+            left = max(left, (centre_x - width / 2.0)
+                       - (anchor.centre_x - anchor.width / 2.0) + a_left)
+            right = max(right, (anchor.centre_x + anchor.width / 2.0)
+                        - (centre_x + width / 2.0) + a_right)
+        return top, left, bottom, right
 
     def story_of_shape(self, shape_seq: Optional[int]) -> Optional[int]:
         """Which of `story_texts` this shape holds, where the file says.

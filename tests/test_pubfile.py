@@ -4748,7 +4748,12 @@ class WrapDistanceTest(unittest.TestCase):
 
 
 class WrapNearTest(unittest.TestCase):
-    """Finding the shape an item was drawn from, to read its distance off."""
+    """The room an item leaves text, measured from the item's own box.
+
+    A Publisher picture is two shapes -- the frame that draws the border
+    and the image inside it -- so the answer is the union of what both
+    keep clear, expressed as offsets from the box handed in.
+    """
 
     def structure(self, *anchors) -> pubfile.FileStructure:
         return pubfile.FileStructure(anchors=list(anchors))
@@ -4758,33 +4763,59 @@ class WrapNearTest(unittest.TestCase):
             shape_seq=seq, centre_x=cx, centre_y=cy, width=w, height=h, wrap=wrap
         )
 
-    def test_finds_the_shape_sitting_here(self):
+    def test_one_shape_gives_its_own_distance(self):
         structure = self.structure(self.anchor(-143.0, -206.0, 101.4, 139.3))
         self.assertEqual(
             structure.wrap_near(-143.0, -206.0, 101.4, 139.3),
             (2.88, 2.88, 2.88, 2.88),
         )
 
-    def test_size_settles_two_shapes_at_one_centre(self):
-        # A picture and the border around it share a centre and differ by
-        # a couple of points, which is exactly the pair on page 11.
+    def test_a_border_round_the_image_widens_the_room(self):
+        # Page 11's picture: the image ends at 117.32 and its border at
+        # 120.64, so wrapping the image alone leaves the border standing
+        # over the copy. 3.32pt of border plus the border's own 2.88.
         structure = self.structure(
-            self.anchor(-143.0, -206.0, 101.4, 139.3, (1.0, 1.0, 1.0, 1.0), seq=1),
-            self.anchor(-143.0, -206.0, 130.0, 170.0, (2.0, 2.0, 2.0, 2.0), seq=2),
+            self.anchor(-143.0, -206.0, 101.4, 139.3, seq=1),
+            self.anchor(-143.0, -206.0, 108.0, 145.0, seq=2),
+        )
+        top, left, bottom, right = structure.wrap_near(-143.0, -206.0, 101.4, 139.3)
+        self.assertAlmostEqual(right, (108.0 - 101.4) / 2 + 2.88, places=2)
+        self.assertAlmostEqual(bottom, (145.0 - 139.3) / 2 + 2.88, places=2)
+
+    def test_boxes_off_centre_are_measured_edge_to_edge(self):
+        # The frame and its image are nearly but not exactly concentric --
+        # 0.89pt apart on page 11 -- and halving the widths loses that.
+        structure = self.structure(
+            self.anchor(-143.0, -206.0, 100.0, 140.0, (0.0, 0.0, 0.0, 0.0), seq=1),
+            self.anchor(-142.0, -206.0, 100.0, 140.0, (0.0, 0.0, 0.0, 0.0), seq=2),
+        )
+        _t, left, _b, right = structure.wrap_near(-143.0, -206.0, 100.0, 140.0)
+        self.assertAlmostEqual(right, 1.0, places=2)
+        self.assertAlmostEqual(left, 0.0, places=2)
+
+    def test_a_shape_too_big_to_be_a_border_is_another_object(self):
+        # Measured over the corpus: a concentric shape within 12pt of an
+        # item is the frame drawn round it, and past that they are
+        # unrelated things sharing a centre -- a 57pt image inside a 397pt
+        # panel among them. Unioning one of those would push text hundreds
+        # of points off a picture that is not there.
+        structure = self.structure(
+            self.anchor(-143.0, -206.0, 101.4, 139.3, seq=1),
+            self.anchor(-143.0, -206.0, 397.0, 560.0, (9.0, 9.0, 9.0, 9.0), seq=2),
         )
         self.assertEqual(
             structure.wrap_near(-143.0, -206.0, 101.4, 139.3),
-            (1.0, 1.0, 1.0, 1.0),
+            (2.88, 2.88, 2.88, 2.88),
         )
 
-    def test_two_shapes_equally_close_answer_nothing(self):
-        # A distance taken off the wrong shape is a gap invented, which is
-        # worse than leaving the reader to close it.
+    def test_the_widest_offset_in_the_corpus_stays_small(self):
+        # The guard's whole point: a ring 12pt wide is the most this can
+        # add, so no wrap can run away with the page.
         structure = self.structure(
-            self.anchor(-143.0, -206.0, 100.0, 140.0, seq=1),
-            self.anchor(-143.0, -206.0, 100.0, 140.0, (9.0, 9.0, 9.0, 9.0), seq=2),
+            self.anchor(-143.0, -206.0, 101.4, 139.3, seq=1),
+            self.anchor(-143.0, -206.0, 113.0, 151.0, seq=2),
         )
-        self.assertIsNone(structure.wrap_near(-143.0, -206.0, 100.0, 140.0))
+        self.assertLess(max(structure.wrap_near(-143.0, -206.0, 101.4, 139.3)), 12.0)
 
     def test_nothing_here_answers_nothing(self):
         structure = self.structure(self.anchor(200.0, 200.0, 50.0, 50.0))
@@ -4798,16 +4829,26 @@ class WrapNearTest(unittest.TestCase):
 class RealWrapDistanceTest(unittest.TestCase):
     """The portrait on page 11 of 1337, which the copy runs down beside."""
 
-    @needs_truncated
-    def test_the_picture_states_publishers_own_gap(self):
+    def portrait(self) -> model.Image:
         structure = pubfile.read_structure(TRUNCATED)
         document = convert.parse_document(TRUNCATED)
         convert._apply_wrap_offsets(document, structure)
-        portrait = next(
+        return next(
             item for item in model._walk(document.pages[10].items)
             if isinstance(item, model.Image) and abs(item.width - 101.43) < 0.5
         )
-        self.assertEqual(portrait.wrap_offsets, (2.88, 2.88, 2.88, 2.88))
+
+    @needs_truncated
+    def test_the_wrap_clears_the_border_and_not_just_the_image(self):
+        # The image ends at 117.32 and its gold border at 120.64, so a wrap
+        # round the image alone -- even with the file's own 2.88pt of air --
+        # puts text at 120.20, under the border. That is the picture sitting
+        # on the copy, which is what this is here to stop.
+        portrait = self.portrait()
+        right = portrait.x + portrait.width + portrait.wrap_offsets[3]
+        self.assertGreater(right, 120.64, "text would land under the border")
+        # Publisher starts those lines at 125; this reaches 123.5.
+        self.assertAlmostEqual(right, 123.5, delta=1.0)
 
     @needs_truncated
     def test_the_wrap_reaches_below_the_last_line_it_holds(self):

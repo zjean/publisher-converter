@@ -304,6 +304,14 @@ class Item:
     height: float = 0.0
     rotation: float = 0.0
     style: GraphicStyle = field(default_factory=GraphicStyle)
+    #: How far text keeps clear of this item where it wraps, as (top, left,
+    #: bottom, right) in points -- the union of what the picture's frame and
+    #: the image inside it each keep clear, since text has to miss the
+    #: picture as drawn. On `Item` because a picture wraps as readily as a
+    #: headline does. None where the .pub was not read or no shape could be
+    #: found here, which leaves the reader to close the gap rather than
+    #: inventing one (`convert._apply_wrap_offsets`).
+    wrap_offsets: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -325,11 +333,6 @@ class TextFrame(Item):
     # than run under it -- a recovered WordArt headline, which is a shape
     # floating over the page and not a box the layout made room for.
     wrap_text: bool = False
-    #: How far text keeps clear of this item when it wraps, as (top, left,
-    #: bottom, right) in points. None where the .pub was not read or the
-    #: shape could not be found in it, which leaves the reader to close the
-    #: gap itself rather than inventing one (`convert._apply_wrap_offsets`).
-    wrap_offsets: Optional[Tuple[float, float, float, float]] = None
     # Set when this frame's first line has to sit on the baseline its
     # leading states, rather than wherever the reader would put it. A
     # reader left to itself hangs the first baseline a whole font ascent
