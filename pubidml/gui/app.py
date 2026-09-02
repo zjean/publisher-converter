@@ -41,6 +41,14 @@ class Application(tk.Tk):
         log_path: Optional[Path] = None,
     ):
         super().__init__()
+        # First statement, before any widget is built, and deiconified as
+        # the last one. A withdrawn toplevel cannot be mapped, so the
+        # update_idletasks() that _fit_to_the_largest_step needs cannot
+        # put a half-built window on screen whatever Tk decides to process
+        # -- the guarantee comes from the window's state rather than from
+        # a belief about when Tk maps things. Reordering these two lines
+        # is what the covering test exists to catch.
+        self.withdraw()
         self.title(strings.WINDOW_TITLE)
         self.minsize(MIN_WIDTH, MIN_HEIGHT)
 
@@ -106,6 +114,10 @@ class Application(tk.Tk):
             if self.selection is not None:
                 self._next()
 
+        # Last, so a wizard started with a folder on its icon appears
+        # already on step 2 rather than appearing on step 1 and jumping.
+        self.deiconify()
+
     def _fit_to_the_largest_step(self) -> None:
         """Floor the window at the roomiest step, not at a guessed number.
 
@@ -117,9 +129,16 @@ class Application(tk.Tk):
         The constant above does win at default fonts -- but only by about
         forty pixels vertically, and Windows text scaling at 125% pushes
         step 4 past it while leaving step 3 short, so the margin is not
-        something to rely on. winfo_reqheight is the *requested* size,
-        which a frame computes from its children whether it is mapped or
-        not, so grid_remove does not hide the three steps that are away.
+        something to rely on.
+
+        winfo_reqheight is the *requested* size, which the geometry manager
+        computes without the window being mapped. That is what lets this
+        run with the toplevel still withdrawn, and it is the same reason
+        grid_remove does not hide the three steps that are away. If it
+        ever did come back unmeasured, the maxes below fall back to the
+        constants -- the arrangement this replaced -- rather than pinning
+        the window to nothing; self_test checks for that so the CI run
+        catches it rather than a user.
         """
         self.update_idletasks()
         widest = max(frame.winfo_reqwidth() for frame in self.steps.values())
@@ -358,7 +377,25 @@ def self_test() -> int:
                  wizard.CONVERTING, wizard.DONE):
         application.show(step)
         application.update_idletasks()
+
+    # The window is sized from what the frames ask for while it is still
+    # withdrawn, which cannot be checked on a machine with no Tk at all.
+    # An unmapped window that reported nothing would leave the minsize
+    # silently back at its constants, so the one run that has a real Tcl/Tk
+    # is the right place to find out. A frame holding labels asks for far
+    # more than a pixel; only a measurement that did not happen gives 1.
+    unmeasured = [
+        step for step, frame in application.steps.items()
+        if frame.winfo_reqwidth() <= 1 or frame.winfo_reqheight() <= 1
+    ]
     application.destroy()
+    if unmeasured:
+        print(
+            "self-test: steps %s reported no requested size; the window "
+            "would fall back to its minimum" % sorted(unmeasured),
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

@@ -193,6 +193,54 @@ class NavigationTest(_ApplicationCase):
             self.application.next_button.invoke()
         self.assertEqual(on_close.call_count, 1)
 
+    def test_no_widget_is_built_while_the_window_could_be_seen(self):
+        # The measurement in __init__ needs update_idletasks(), which may
+        # map the window. A withdrawn toplevel cannot be mapped, so the
+        # guarantee is the window's state, not a belief about Tk's timing
+        # -- and the only way that evaporates is someone reordering the
+        # withdraw and the widget building, which is what this catches.
+        from pubidml.gui import app
+        states = []
+        original = app.ttk.Frame
+
+        class Recording(original):
+            def __init__(self, master, *args, **kwargs):
+                states.append(master.winfo_toplevel().state())
+                super().__init__(master, *args, **kwargs)
+
+        with mock.patch.object(app.ttk, "Frame", Recording):
+            application = app.Application()
+        try:
+            self.assertTrue(states, "no frame was built at all")
+            self.assertEqual(
+                set(states), {"withdrawn"},
+                "a widget was built while the window was on screen",
+            )
+            # And it must not stay hidden: deiconify is the last statement.
+            self.assertEqual(application.state(), "normal")
+        finally:
+            application.destroy()
+
+    def test_a_dropped_folder_is_on_screen_only_once_it_reads_step_two(self):
+        # deiconify last, so a wizard started from the icon does not
+        # appear on step 1 and then jump.
+        from pubidml.gui import app, wizard
+        folder = self.pub_folder("Gesleept")
+        states = []
+        original = app.Application.deiconify
+
+        def recording(self):
+            states.append(self.step)
+            return original(self)
+
+        with mock.patch.object(app.Application, "deiconify", recording):
+            application = app.Application(initial=[folder])
+        try:
+            self.assertEqual(states, [wizard.DESTINATION])
+            self.assertEqual(application.state(), "normal")
+        finally:
+            application.destroy()
+
     def test_the_window_is_floored_at_the_roomiest_step(self):
         # Only one frame is mapped, so the window would otherwise grow
         # entering the tallest step and shrink leaving it.
