@@ -27,6 +27,11 @@ STEP1_NONE = (
     "Kies een andere map."
 )
 
+STEP1_MIXED_ROOTS = (
+    "Deze bestanden staan op verschillende schijven.\n"
+    "Kies bestanden uit één map, of kies een map."
+)
+
 # --- Step 2: bestemming ---------------------------------------------
 STEP2_TITLE = "Waar moeten de omgezette bestanden komen?"
 STEP2_SAVE_TO = "Opslaan in:"

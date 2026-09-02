@@ -19,6 +19,17 @@ from . import strings
 CHOOSE, DESTINATION, CONVERTING, DONE = 0, 1, 2, 3
 
 
+class MixedRootsError(Exception):
+    """The chosen files share no folder to mirror the tree from.
+
+    Only reachable from a multi-path selection: two Windows drives, or a
+    UNC path beside a drive letter. commonpath raises on Windows and
+    returns the filesystem root on POSIX -- and the second is the worse
+    outcome, because it silently mirrors the whole absolute path into the
+    destination instead of failing.
+    """
+
+
 @dataclass
 class Selection:
     """The .pub files to convert, and the root their tree hangs from."""
@@ -31,8 +42,26 @@ class Selection:
         return len({p.parent for p in self.paths})
 
 
+def _shares_one_root(paths: List[Path]) -> bool:
+    """Whether every path hangs from the same filesystem anchor.
+
+    On POSIX every absolute path's anchor is "/", so this only ever
+    refuses on Windows -- two drive letters, or a UNC share beside a
+    drive letter -- which is exactly the case os.path.commonpath cannot
+    turn into one destination tree.
+    """
+    return len({p.anchor for p in paths}) <= 1
+
+
 def scan(paths: List[Path]) -> Optional[Selection]:
-    """Work out what was chosen. None when it holds no .pub files.
+    """Work out what was chosen.
+
+    Two different things can go wrong, and they mean different things to
+    a caller: this returns None when the selection holds no .pub files at
+    all, and it raises MixedRootsError when it holds files that cannot be
+    mirrored under one destination tree (they live on different drives).
+    Task 6 must tell these apart rather than treating both as "nothing to
+    convert".
 
     Delegates the folder search to batch.find_sources rather than walking
     globs here, so the ~$-lock-file rule has one owner instead of two that
@@ -61,6 +90,9 @@ def scan(paths: List[Path]) -> Optional[Selection]:
             files.append(path)
     if not files:
         return None
+
+    if not _shares_one_root(files):
+        raise MixedRootsError()
 
     root = Path(os.path.commonpath([str(p.parent) for p in files]))
     return Selection(sorted(files), root)

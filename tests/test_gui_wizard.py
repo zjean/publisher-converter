@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from pubidml.gui import wizard
 
@@ -47,6 +47,27 @@ class ScanTest(unittest.TestCase):
         )
         self.assertEqual(selection.root, self.work)
         self.assertFalse(selection.is_single_file)
+
+    # test_files_chosen_from_one_folder_share_it_as_their_root above is
+    # the same-anchor case: it already proves the mixed-root guard does
+    # not fire on the common path of a normal, single-drive selection.
+
+    def test_files_with_no_common_anchor_cannot_be_scanned_honestly_here(self):
+        # PureWindowsPath honestly represents two drives / a UNC share
+        # beside a drive letter, but scan() converts every input through
+        # Path(), and on this POSIX machine Path(PureWindowsPath(...))
+        # collapses both to anchor "" and fails .exists() -- so passing
+        # these through scan() would prove nothing. The real guard is
+        # _shares_one_root; test it directly with paths whose anchors are
+        # genuinely different, which is exactly what scan()'s guard reads.
+        c_drive = PureWindowsPath(r"C:\Archief\a.pub")
+        d_drive = PureWindowsPath(r"D:\Archief\b.pub")
+        unc_share = PureWindowsPath(r"\\server\share\c.pub")
+        self.assertFalse(wizard._shares_one_root([c_drive, d_drive]))
+        self.assertFalse(wizard._shares_one_root([c_drive, unc_share]))
+        self.assertTrue(
+            wizard._shares_one_root([c_drive, PureWindowsPath(r"C:\Archief\b.pub")])
+        )
 
 
 class DefaultDestinationTest(unittest.TestCase):
