@@ -30,7 +30,7 @@ LDLIBS   += $(shell $(PKGCONFIG) --libs $(PKGS))
 
 PYTHON ?= python3
 
-.PHONY: all clean dlls test
+.PHONY: all clean dlls test gui
 all: $(BIN)
 
 # Standard library only, matching the runtime's own constraint. The tests
@@ -51,3 +51,8 @@ UCRT_BIN ?= /ucrt64/bin
 
 clean:
 	rm -rf bin
+
+# The windowed build. Requires pyinstaller and, on macOS, a Python built
+# with Tk (brew install python-tk).
+gui:
+	$(PYTHON) -m PyInstaller pub2idml-gui.spec

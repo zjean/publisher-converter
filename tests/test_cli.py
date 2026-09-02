@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import csv
 import io
+import signal
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from pubidml import cli, convert
+from pubidml import batch, cli, convert
 
 
 def read_report(path: Path) -> list:
@@ -168,7 +169,7 @@ class ReportInjectionTest(unittest.TestCase):
             source=Path("a.pub"), output=Path("a.idml"), pages=1, text_frames=1,
             **fields,
         )
-        cli._write_report(self.report, [result])
+        batch.write_report(self.report, [result])
         return read_report(self.report)[0]
 
     def test_a_font_name_cannot_become_a_formula(self):
@@ -303,14 +304,14 @@ class DestinationTest(unittest.TestCase):
         nested.mkdir(parents=True)
         source = nested / "news.pub"
         source.write_bytes(b"x")
-        destination = cli.destination_for(source, self.work, Path("/out"))
+        destination = batch.destination_for(source, self.work, Path("/out"))
         self.assertEqual(destination, Path("/out/2024/spring/news.idml"))
 
     def test_a_single_source_file_lands_directly_in_the_output(self):
         # The source root is the file itself, so there is no tree to mirror.
         source = self.work / "news.pub"
         source.write_bytes(b"x")
-        destination = cli.destination_for(source, source, Path("/out"))
+        destination = batch.destination_for(source, source, Path("/out"))
         self.assertEqual(destination, Path("/out/news.idml"))
 
 
@@ -342,7 +343,7 @@ class DetailLineTest(unittest.TestCase):
         self.assertNotIn("wordart", self.printed(result))
 
     def test_the_count_reaches_the_csv(self):
-        self.assertIn("wordart", cli.REPORT_COLUMNS)
+        self.assertIn("wordart", batch.REPORT_COLUMNS)
 
 
 class FacingPagesFlagTest(unittest.TestCase):
@@ -419,4 +420,82 @@ class FacingDetailLineTest(unittest.TestCase):
         self.assertNotIn("facing", self.printed(result))
 
     def test_the_flag_reaches_the_csv(self):
-        self.assertIn("facing_pages", cli.REPORT_COLUMNS)
+        self.assertIn("facing_pages", batch.REPORT_COLUMNS)
+
+
+class InterruptedBatchTest(unittest.TestCase):
+    """Ctrl-C is the case the report exists for.
+
+    Somebody who stops a run of a thousand files stops it because they
+    want to see what came out, and the report is the only place that is
+    written down. An interrupted run that leaves a header row and nothing
+    else is worse than no report at all: it is a file, so it looks like an
+    answer.
+    """
+
+    def setUp(self):
+        self.work = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.source_dir = self.work / "in"
+        self.source_dir.mkdir()
+        for name in ("a.pub", "b.pub", "c.pub", "d.pub", "e.pub"):
+            (self.source_dir / name).write_bytes(b"stub")
+        self.output = self.work / "out"
+
+        original = convert.convert
+
+        def stub(source, destination, **kwargs):
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            Path(destination).write_bytes(b"idml")
+            return convert.Result(
+                source=Path(source), output=Path(destination), pages=1, text_frames=1
+            )
+
+        cli.convert.convert = stub
+        self.addCleanup(setattr, cli.convert, "convert", original)
+
+    @unittest.removeHandler
+    def test_the_report_still_lists_what_had_converted(self):
+        # The SIGINT is raised from inside the per-file print because that
+        # is a point in the batch where the main thread is demonstrably
+        # running Python. Raising it from a worker thread reproduces the
+        # bug too, but leaves the row count up to whenever the main thread
+        # next reaches an instruction boundary -- and the row count is the
+        # whole assertion here.
+        #
+        # @unittest.removeHandler swaps in the plain default SIGINT
+        # handler for the duration of this test. Without it, a suite run
+        # under --catchbreak has unittest's own handler installed, and
+        # that handler does not raise -- it sets the result's stop flag
+        # and returns, so raise_signal() here would not interrupt cli.run
+        # at all. The batch would finish normally, the assertions below
+        # would still pass, and the suite would quietly stop after this
+        # test with nothing to say that ten-odd tests never ran. The
+        # decorator keeps this test discriminating regardless of how the
+        # suite around it is invoked.
+        printed = cli._print_result
+        calls = {"n": 0}
+
+        def interrupt_on_the_third(result):
+            printed(result)
+            calls["n"] += 1
+            if calls["n"] == 3:
+                signal.raise_signal(signal.SIGINT)
+
+        cli._print_result = interrupt_on_the_third
+        self.addCleanup(setattr, cli, "_print_result", printed)
+
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = cli.run(
+                [str(self.source_dir), "-o", str(self.output), "--no-log", "-j", "1"]
+            )
+
+        rows = read_report(self.output / "conversion-report.csv")
+        self.assertEqual(
+            len(rows), 3,
+            "the interrupted run threw away the rows it had already collected",
+        )
+        self.assertEqual({r["status"] for r in rows}, {"ok"})
+        self.assertIn("Converted 3/5", out.getvalue())
+        self.assertIn("interrupted: 2 file(s) not attempted", out.getvalue())
+        self.assertEqual(code, 1)

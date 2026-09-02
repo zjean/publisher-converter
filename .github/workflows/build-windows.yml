@@ -38,6 +38,12 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    # A normal run is well under half of this. The ceiling is here because
+    # the isolation test below launches a windowed executable, and a
+    # windowed PyInstaller build that fails on import shows its traceback
+    # in a modal dialog: without a limit that is a job that sits waiting
+    # for a click nobody can give it until GitHub's own six-hour cap.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
@@ -99,22 +105,80 @@ jobs:
           pyinstaller --clean --noconfirm pub2idml.spec
           Get-Item dist\pub2idml.exe | Select-Object Name,Length
 
+      - name: Bundle the windowed build
+        shell: pwsh
+        run: |
+          pyinstaller --clean --noconfirm pub2idml-gui.spec
+          Get-Item dist\pub2idml-gui.exe | Select-Object Name,Length
+
       # The real test: no MSYS2, no Python, no repo on PATH, run from a
       # different drive location. If anything is missing from the bundle
       # this fails here rather than on a user's machine.
-      - name: Verify self-contained (PATH stripped to Windows only)
+      - name: Verify both executables are self-contained (PATH stripped to Windows only)
         shell: pwsh
         run: |
           $isolated = "C:\isolated"
           New-Item -ItemType Directory -Force -Path $isolated | Out-Null
           Copy-Item dist\pub2idml.exe $isolated\
+          Copy-Item dist\pub2idml-gui.exe $isolated\
           Copy-Item -Recurse files $isolated\files
+
+          # Copy-Item is a cmdlet: under the default ErrorActionPreference
+          # it fails non-terminatingly and never touches $LASTEXITCODE, so
+          # a missing source file would otherwise fall through silently
+          # into whatever exit code the previous native command left
+          # behind. Checked explicitly rather than relying on the copy to
+          # stop execution.
+          if (-not (Test-Path "$isolated\pub2idml.exe")) {
+            throw "pub2idml.exe is missing from the bundle - the console build produced nothing"
+          }
+          if (-not (Test-Path "$isolated\pub2idml-gui.exe")) {
+            throw "pub2idml-gui.exe is missing from the bundle - the windowed build produced nothing"
+          }
 
           $env:PATH = "C:\Windows\system32;C:\Windows"
           Push-Location $isolated
           .\pub2idml.exe --help | Select-Object -First 3
           .\pub2idml.exe files -o out --log-file run.log -v
           if ($LASTEXITCODE -ne 0) { throw "conversion exited $LASTEXITCODE" }
+
+          # PyInstaller can omit Tcl/Tk and still produce an executable
+          # that starts, so the check has to build a real widget tree.
+          #
+          # What it measured goes to pub2idml-self-test.log beside the
+          # executable, collected by the diagnostics upload below. A
+          # windowed build has no stderr, so that file is the only place
+          # the evidence can be read -- the exit code alone says a
+          # failure happened without saying what.
+          #
+          # Start-Process rather than the `&`-plus-$LASTEXITCODE idiom the
+          # rest of this file uses, and not because it reads better.
+          # pub2idml-gui.exe is linked /SUBSYSTEM:WINDOWS: PowerShell waits
+          # for a console application and returns immediately for a
+          # windowed one, so $LASTEXITCODE after `&` would be whatever the
+          # previous native command left behind -- the conversion's 0 just
+          # above -- and this check would pass green whatever the bundle
+          # does. -PassThru hands back a real process object, so the exit
+          # code is the executable's own regardless of subsystem. The
+          # bounded wait covers the other half: a windowed build that dies
+          # on import shows its traceback in a modal dialog (see
+          # disable_windowed_traceback in pub2idml-gui.spec), which without
+          # a timeout is a hang rather than a failure. Two minutes is far
+          # more than building and tearing down a widget tree needs.
+          #
+          # The next windowed check added here should copy this, not the
+          # idiom above: that one is correct for console binaries and
+          # quietly meaningless for these.
+          $gui = Start-Process -FilePath "$isolated\pub2idml-gui.exe" `
+            -ArgumentList "--self-test" -WorkingDirectory $isolated `
+            -NoNewWindow -PassThru
+          if (-not $gui.WaitForExit(120000)) {
+            $gui.Kill()
+            throw "the windowed build hung building its window"
+          }
+          if ($gui.ExitCode -ne 0) {
+            throw "the windowed build could not create its window ($($gui.ExitCode))"
+          }
           Pop-Location
 
       - name: Check the output is real
@@ -159,6 +223,10 @@ jobs:
           "$hash  pub2idml.exe" | Out-File -Encoding ascii dist\pub2idml.exe.sha256
           Write-Host "SHA256: $hash"
 
+          $guiHash = (Get-FileHash dist\pub2idml-gui.exe -Algorithm SHA256).Hash.ToLower()
+          "$guiHash  pub2idml-gui.exe" | Out-File -Encoding ascii dist\pub2idml-gui.exe.sha256
+          Write-Host "SHA256: $guiHash"
+
       - name: Upload executable
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -166,6 +234,8 @@ jobs:
           path: |
             dist/pub2idml.exe
             dist/pub2idml.exe.sha256
+            dist/pub2idml-gui.exe
+            dist/pub2idml-gui.exe.sha256
           if-no-files-found: error
 
       # Kept even when earlier steps fail: this is the diagnostic trail.
@@ -177,6 +247,7 @@ jobs:
           path: |
             C:\isolated\run.log
             C:\isolated\out\conversion-report.csv
+            C:\isolated\pub2idml-self-test.log
           if-no-files-found: warn
 
   # Publishing is a separate job purely to contain the write token. It runs
@@ -210,6 +281,8 @@ jobs:
           ls -l dist/
           test -s dist/pub2idml.exe
           test -s dist/pub2idml.exe.sha256
+          test -s dist/pub2idml-gui.exe
+          test -s dist/pub2idml-gui.exe.sha256
           cd dist
           # The checksum file is written by PowerShell, so it carries CRLF;
           # `sha256sum --check` would look for a filename ending in \r.
@@ -218,6 +291,12 @@ jobs:
           echo "expected $expected"
           echo "actual   $actual"
           test "$expected" = "$actual"
+
+          guiExpected=$(tr -d '\r' < pub2idml-gui.exe.sha256 | awk '{print $1}')
+          guiActual=$(sha256sum pub2idml-gui.exe | awk '{print $1}')
+          echo "expected $guiExpected"
+          echo "actual   $guiActual"
+          test "$guiExpected" = "$guiActual"
 
       # Every green build on main replaces a rolling prerelease, so the
       # newest executable always has a stable download URL. Build artifacts
@@ -259,6 +338,7 @@ jobs:
           fi
           gh release create latest \
             dist/pub2idml.exe dist/pub2idml.exe.sha256 \
+            dist/pub2idml-gui.exe dist/pub2idml-gui.exe.sha256 \
             --prerelease --title "Latest build (main)" --notes-file notes.md \
             --target "$COMMIT"
 
@@ -275,4 +355,5 @@ jobs:
           set -euo pipefail
           gh release create "$TAG" \
             dist/pub2idml.exe dist/pub2idml.exe.sha256 \
+            dist/pub2idml-gui.exe dist/pub2idml-gui.exe.sha256 \
             --title "pub2idml $TAG" --generate-notes

@@ -198,7 +198,7 @@ The same flags apply on macOS; only the default paths differ.
 |---|---|
 | `source` | a `.pub` file, or a folder to search (required) |
 | `-o`, `--output PATH` | output folder; created if absent. Default `converted` beside the working directory |
-| `-j`, `--jobs N` | parallel conversions. Default: one per CPU core |
+| `-j`, `--jobs N` | parallel conversions. Default: the CPU count plus four, capped at 32 — the same number Python's own thread pool would pick, computed here so the batch knows the size of the pool it built |
 | `--no-recursive` | only the given folder, do not descend into subfolders |
 | `--force` | reconvert files whose `.idml` already exists. Without it, those are skipped, so an interrupted run resumes cheaply |
 | `--report PATH` | where to write the CSV. Default `conversion-report.csv` inside the output folder |
@@ -243,6 +243,70 @@ assembled beside its destination and moved onto it only once the archive
 and its images are both whole, so a run stopped by a full disk or a
 killed process leaves nothing behind — rather than a truncated file that
 every later run would skip as already converted.
+
+### The window: pub2idml-gui.exe
+
+For people who will not open a command line, the same converter also
+ships as `pub2idml-gui.exe` — a four-step Dutch wizard, built by
+`pub2idml-gui.spec` and released alongside `pub2idml.exe`, not instead of
+it. It is a second executable rather than a second mode of the first
+because a windowed Windows executable has no stdout: a program that could
+run either way would leave the command line silent whenever someone ran
+it there.
+
+Drag a folder onto the program's icon, or open it and choose one. That
+icon drop is the only drag gesture the window supports — there is
+deliberately no drag-and-drop *inside* it, because the usual library for
+that is a compiled extension, and this project ships no third-party
+runtime dependencies for either executable. The whole tree is converted
+recursively and its folder structure recreated under the destination,
+which the wizard proposes as a sibling of what was chosen, never a folder
+inside it — a destination inside the source is refused, with an
+explanation, because a later run would otherwise convert its own output
+all over again. Files chosen across two drives, or a UNC path alongside a
+drive letter, are refused too, with a message of their own: without one
+folder both paths share, there is no tree left to mirror into a
+destination.
+
+There is nothing to configure. Code page detection, image wrapping,
+booklet detection, job count and recursion all stay on the automatic
+defaults the [Options](#options) table above documents; anyone who needs
+to change one of them wants `pub2idml.exe`.
+
+The last screen reports what happened in plain Dutch, lists any file
+that could not be read — a Dutch reason for the common failures, the
+converter's own English message with a pointer to the report for
+anything rarer, because an unrecognised diagnostic is the only clue
+whoever helps them will have — and repeats the one step no converter can
+do unattended:
+
+> Hierna: open elk .idml-bestand in Affinity en kies
+> Bestand → Opslaan als… Laat de map _images ernaast staan
+> totdat u dat gedaan heeft.
+
+The CSV report itself stays English — it is written by the same
+`batch.write_report` the command line calls, so a collection converted
+from the window and one converted from the terminal produce the same
+report format.
+
+Closing the window mid-run cancels at once rather than waiting for the
+files already converting to finish. No half-written `.idml` can result
+from that: a package is moved into place only once whole, the same
+guarantee the CLI relies on above. Two things can be left behind, both
+harmless but visible — the temporary the interrupted package was being
+built in, `.<name>.idml.XXXXXX.part`, and a partly-filled `_images`
+folder, because the pictures are written beside the destination just
+before the package is moved into place. Both belong to a file that never
+arrived, so the next run converts it again and overwrites the `_images`
+folder. The `.part` temporary is not overwritten, because each run picks
+a fresh random name for it — it sits there until deleted by hand.
+
+That run writes no CSV report at all: the report is written when the
+batch ends, and closing the window does not wait for it. A report from
+an earlier run is left where it was, describing that run rather than
+this one. The next completed run rewrites it from scratch. Starting the
+program again picks up cheaply either way — a file whose `.idml` already
+exists is skipped, not reconverted.
 
 ## Logging
 
