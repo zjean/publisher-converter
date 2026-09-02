@@ -274,9 +274,11 @@ defaults the [Options](#options) table above documents; anyone who needs
 to change one of them wants `pub2idml.exe`.
 
 The last screen reports what happened in plain Dutch, lists any file
-that could not be read with a Dutch reason in place of the converter's
-own English message, and repeats the one step no converter can do
-unattended:
+that could not be read — a Dutch reason for the common failures, the
+converter's own English message with a pointer to the report for
+anything rarer, because an unrecognised diagnostic is the only clue
+whoever helps them will have — and repeats the one step no converter can
+do unattended:
 
 > Hierna: open elk .idml-bestand in Affinity en kies
 > Bestand → Opslaan als… Laat de map _images ernaast staan
