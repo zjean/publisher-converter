@@ -229,11 +229,13 @@ class DoneStep(Step):
         self.counts.grid(row=1, column=0, sticky="w", pady=(PAD, 0))
         self.failures = tk.Text(self, height=6, width=56, wrap="word")
         self.failures.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        # The _images sentence is the one way a conversion that reports
-        # nothing wrong still loses its pictures: the folder sits beside
-        # the .idml and Affinity only takes the images in once the file
-        # is saved as its own format. This is the last screen anyone
-        # reads, so it is the only place left to say it.
+        # The pictures now travel inside the package, so this no longer
+        # has to warn about a sidecar folder going missing. What is left
+        # is the step no converter can take for the reader: a .idml is an
+        # interchange file Affinity imports rather than edits, so until
+        # they save it as their own format they have no document to come
+        # back to. This is the last screen anyone reads, so it is the
+        # only place left to say it.
         self.next_hint = ttk.Label(
             self, text=strings.STEP4_NEXT, wraplength=WRAP, justify="left"
         )

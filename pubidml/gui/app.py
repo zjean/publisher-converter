@@ -372,10 +372,9 @@ class Application(tk.Tk):
         time. It is not quite "nothing to clean up", though: killing the
         daemon mid-write can leave that temporary, .<name>.idml.XXXXXX.part,
         beside the output. Windows does not hide a leading dot, so this
-        audience will see it and wonder. The images are the other half:
-        IdmlWriter.write fills _images beside the destination before the
-        move, so a kill mid-write can leave that folder half-populated
-        next to a package that never arrived.
+        audience will see it and wonder. That temporary is now the whole
+        of it: the pictures live inside the package, so a kill mid-write
+        can no longer leave a half-filled image folder behind it.
 
         And the report is lost outright, not just a row of it:
         write_report runs in the worker's finally, the worker is a daemon
