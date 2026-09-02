@@ -14,7 +14,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from pubidml import cli, convert
+from pubidml import batch, cli, convert
 
 
 def read_report(path: Path) -> list:
@@ -168,7 +168,7 @@ class ReportInjectionTest(unittest.TestCase):
             source=Path("a.pub"), output=Path("a.idml"), pages=1, text_frames=1,
             **fields,
         )
-        cli._write_report(self.report, [result])
+        batch.write_report(self.report, [result])
         return read_report(self.report)[0]
 
     def test_a_font_name_cannot_become_a_formula(self):

@@ -10,49 +10,24 @@ from __future__ import annotations
 
 import argparse
 import codecs
-import concurrent.futures
-import csv
 import sys
 from pathlib import Path
 from typing import List
 
-from . import convert, logsetup
+from . import batch, convert, logsetup
 
-REPORT_COLUMNS = [
-    "source",
-    "output",
-    "status",
-    "pages",
-    "text_frames",
-    "images",
-    "shapes",
-    "characters",
-    "wordart",
-    "facing_pages",
-    "fonts",
-    "warnings",
-    "error",
-]
+# Kept here as thin delegations, same as find_sources below: batch.py owns
+# the logic now, but both names are part of this module's existing surface
+# and other code (and tests) still reach them through cli.
+REPORT_COLUMNS = batch.REPORT_COLUMNS
 
 
 def find_sources(root: Path, recursive: bool) -> List[Path]:
-    if root.is_file():
-        return [root]
-    pattern = "**/*.pub" if recursive else "*.pub"
-    # Publisher templates use .pubz/.pubx variants; ignore Office lock files.
-    return sorted(
-        path
-        for path in root.glob(pattern)
-        if path.is_file() and not path.name.startswith("~$")
-    )
+    return batch.find_sources(root, recursive)
 
 
 def destination_for(source: Path, source_root: Path, output_root: Path) -> Path:
-    if source_root.is_file():
-        relative = Path(source.name)
-    else:
-        relative = source.relative_to(source_root)
-    return (output_root / relative).with_suffix(".idml")
+    return batch.destination_for(source, source_root, output_root)
 
 
 def _force_utf8_console() -> None:
@@ -71,16 +46,6 @@ def _force_utf8_console() -> None:
             # Not a reconfigurable text stream (or absent in a windowed
             # build); printing is best-effort from here.
             pass
-
-
-def _status(result: convert.Result) -> str:
-    if not result.ok:
-        return "failed"
-    if result.skipped:
-        return "skipped"
-    if result.needs_review:
-        return "review"
-    return "ok"
 
 
 def run(argv=None) -> int:
@@ -203,50 +168,26 @@ def run(argv=None) -> int:
     output_root = args.output
     report_path = args.report or (output_root / "conversion-report.csv")
 
-    jobs = []
-    # Skipped files are carried as results, not just counted, so that the
-    # report keeps describing the whole tree that was walked rather than
-    # only the part this particular run happened to redo.
-    results: List[convert.Result] = []
-    for source in sources:
-        destination = destination_for(source, args.source, output_root)
-        if destination.exists() and not args.force:
-            results.append(convert.Result(
-                source=source, output=destination, skipped=True
-            ))
-            continue
-        jobs.append((source, destination))
-
+    options = batch.Options(
+        codepage=codepage,
+        wrap_images=not args.no_image_wrap,
+        facing_pages=facing_pages,
+    )
+    jobs, results = batch.plan(sources, args.source, output_root, args.force)
     skipped = len(results)
     interrupted = False
+
+    def announce(result):
+        if not args.quiet:
+            _print_result(result)
+
     try:
-        if jobs:
-            workers = args.jobs if args.jobs > 0 else None
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {
-                    pool.submit(
-                        convert.convert, source, destination,
-                        codepage=codepage, wrap_images=not args.no_image_wrap,
-                        facing_pages=facing_pages,
-                    ): source
-                    for source, destination in jobs
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    source = futures[future]
-                    try:
-                        result = future.result()
-                    except BaseException as exc:
-                        # convert.convert catches its own failures, so this is
-                        # something it could not: record it as a failed row
-                        # rather than let it discard the whole batch.
-                        log.exception("worker died on %s", source)
-                        result = convert.Result(
-                            source=source,
-                            error=f"worker died: {exc.__class__.__name__}: {exc}",
-                        )
-                    results.append(result)
-                    if not args.quiet:
-                        _print_result(result)
+        results += batch.run_batch(
+            jobs,
+            options,
+            workers=args.jobs if args.jobs > 0 else None,
+            on_result=announce,
+        )
     except KeyboardInterrupt:
         interrupted = True
         log.warning(
@@ -258,15 +199,15 @@ def run(argv=None) -> int:
         # batch still leaves a triage list of what did convert.
         results.sort(key=lambda r: str(r.source))
         try:
-            _write_report(report_path, results)
+            batch.write_report(report_path, results)
             log.info("report written to %s", report_path)
         except OSError as exc:
             log.error("could not write report to %s: %s", report_path, exc)
             print(f"Could not write report to {report_path}: {exc}", file=sys.stderr)
 
-    ok = sum(1 for r in results if _status(r) == "ok")
-    review = sum(1 for r in results if _status(r) == "review")
-    failed = sum(1 for r in results if _status(r) == "failed")
+    ok = sum(1 for r in results if batch.status_of(r) == "ok")
+    review = sum(1 for r in results if batch.status_of(r) == "review")
+    failed = sum(1 for r in results if batch.status_of(r) == "failed")
 
     print()
     print(f"Converted {ok + review}/{len(jobs)} file(s) into {output_root}")
@@ -295,7 +236,7 @@ def run(argv=None) -> int:
 
 
 def _print_result(result: convert.Result) -> None:
-    status = _status(result)
+    status = batch.status_of(result)
     marker = {
         "ok": "  ok  ", "review": "review", "failed": "FAILED", "skipped": " skip ",
     }[status]
@@ -314,46 +255,6 @@ def _print_result(result: convert.Result) -> None:
     print(f"[{marker}] {name}: {detail}")
     for warning in result.warnings:
         print(f"           ! {warning}")
-
-
-def _csv_safe(value: str) -> str:
-    """A cell a spreadsheet cannot mistake for a formula.
-
-    Font names, locale tags and libmspub's own diagnostics all come out of
-    the .pub verbatim, and the report exists to be opened in Excel or
-    LibreOffice -- both of which read a leading '=', '+', '-' or '@' as
-    code rather than text. csv quoting does not help: it keeps the file
-    parseable, and the spreadsheet still evaluates what it parses.
-    """
-    if value and value[0] in "=+-@\t\r":
-        return "'" + value
-    return value
-
-
-def _write_report(path: Path, results: List[convert.Result]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(REPORT_COLUMNS)
-        for result in results:
-            writer.writerow(
-                [
-                    _csv_safe(str(result.source)),
-                    _csv_safe(str(result.output) if result.output else ""),
-                    _status(result),
-                    result.pages,
-                    result.text_frames,
-                    result.images,
-                    result.shapes,
-                    result.characters,
-                    result.wordart,
-                    ("detected" if result.facing_detected
-                     else "yes" if result.facing_pages else "no"),
-                    _csv_safe("; ".join(result.fonts)),
-                    _csv_safe("; ".join(result.warnings)),
-                    _csv_safe(result.error or ""),
-                ]
-            )
 
 
 def main() -> None:
