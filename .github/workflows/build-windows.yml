@@ -145,6 +145,12 @@ jobs:
           # PyInstaller can omit Tcl/Tk and still produce an executable
           # that starts, so the check has to build a real widget tree.
           #
+          # What it measured goes to pub2idml-self-test.log beside the
+          # executable, collected by the diagnostics upload below. A
+          # windowed build has no stderr, so that file is the only place
+          # the evidence can be read -- the exit code alone says a
+          # failure happened without saying what.
+          #
           # Start-Process rather than the `&`-plus-$LASTEXITCODE idiom the
           # rest of this file uses, and not because it reads better.
           # pub2idml-gui.exe is linked /SUBSYSTEM:WINDOWS: PowerShell waits
@@ -241,6 +247,7 @@ jobs:
           path: |
             C:\isolated\run.log
             C:\isolated\out\conversion-report.csv
+            C:\isolated\pub2idml-self-test.log
           if-no-files-found: warn
 
   # Publishing is a separate job purely to contain the write token. It runs

@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from pubidml import convert
+from pubidml import batch, convert
 from pubidml.gui import explain
 
 
@@ -84,6 +84,11 @@ class SummaryTest(unittest.TestCase):
             text_frames=1, warnings=["iets"],
         )
 
+    def _skipped(self):
+        return convert.Result(
+            source=Path("d.pub"), output=Path("d.idml"), skipped=True
+        )
+
     def test_the_counts_match_the_statuses(self):
         counts = explain.summary(
             [self._ok(), self._ok(), self._failed(), self._review()]
@@ -92,6 +97,27 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(counts.failed, 1)
         self.assertEqual(counts.review, 1)
         self.assertEqual(counts.total, 4)
+
+    def test_every_status_batch_can_report_is_a_field_on_counts(self):
+        # summary() keys setattr on status_of's return value, so the two
+        # vocabularies have to stay identical: a status added to
+        # batch.status_of without a matching Counts field would raise
+        # AttributeError in front of a user, on the last screen of the
+        # wizard. This is the assertion that was missing.
+        from dataclasses import fields
+        statuses = {
+            batch.status_of(result)
+            for result in (
+                self._ok(), self._failed(), self._review(), self._skipped()
+            )
+        }
+        self.assertEqual(statuses, {"ok", "failed", "review", "skipped"})
+        names = {field.name for field in fields(explain.Counts)}
+        self.assertTrue(
+            statuses <= names,
+            f"status_of can return {statuses - names}, which Counts has no "
+            f"field for",
+        )
 
     def test_an_empty_batch_counts_nothing_rather_than_dividing_by_zero(self):
         counts = explain.summary([])

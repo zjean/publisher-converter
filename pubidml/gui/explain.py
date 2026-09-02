@@ -96,11 +96,20 @@ def failure_line(result: convert.Result) -> str:
 
 
 def summary(results: List[convert.Result]) -> Counts:
+    """How many results landed in each of batch.status_of's four buckets.
+
+    total counts the results in hand, which is not the size of the batch:
+    a cancelled run hands over what arrived. A caller writing a "x of y"
+    line wants the number of files asked for, not this.
+
+    The invariant this loop rests on: every string batch.status_of can
+    return is the name of a field on Counts. A fifth status would raise
+    AttributeError right here rather than being quietly dropped, which is
+    the failure worth having -- and test_gui_explain asserts the
+    correspondence so it is not discovered in front of a user.
+    """
     counts = Counts(total=len(results))
     for result in results:
-        setattr(
-            counts,
-            batch.status_of(result),
-            getattr(counts, batch.status_of(result)) + 1,
-        )
+        status = batch.status_of(result)
+        setattr(counts, status, getattr(counts, status) + 1)
     return counts

@@ -239,33 +239,56 @@ class DoneStep(Step):
         )
         self.next_hint.grid(row=3, column=0, sticky="w", pady=(PAD, PAD))
 
+        # Held rather than dropped: refresh() disables the two that open
+        # something when there is nothing there to open.
         buttons = ttk.Frame(self)
         buttons.grid(row=4, column=0, sticky="w")
-        ttk.Button(
+        self.open_folder_button = ttk.Button(
             buttons,
             text=strings.STEP4_OPEN_FOLDER,
             command=self.shell.open_output,
-        ).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(
+        )
+        self.open_folder_button.grid(row=0, column=0, padx=(0, 8))
+        self.open_report_button = ttk.Button(
             buttons,
             text=strings.STEP4_OPEN_REPORT,
             command=self.shell.open_report,
-        ).grid(row=0, column=1, padx=(0, 8))
+        )
+        self.open_report_button.grid(row=0, column=1, padx=(0, 8))
         ttk.Button(
             buttons, text=strings.STEP4_AGAIN, command=self.shell.restart
         ).grid(row=0, column=2)
+
+        # Below the buttons, so it reads as an explanation of the one
+        # that just went grey. Away until refresh() finds no report.
+        self.no_report = ttk.Label(
+            self, text=strings.STEP4_NO_REPORT, wraplength=WRAP,
+            justify="left",
+        )
+        self.no_report.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self.no_report.grid_remove()
 
     def refresh(self) -> None:
         results = self.shell.run.results if self.shell.run else []
         counts = explain.summary(results)
         converted = counts.ok + counts.review
+        # The denominator is what was asked for, not what came back.
+        # counts.total counts the results that arrived, so a 145-file
+        # batch stopped after ten read "Gestopt -- 10 van de 10
+        # bestanden": a cancelled run described as a finished one, to
+        # someone who has nobody to ask. run.total is the number of files
+        # this run set out to convert and counts.skipped the ones it
+        # passed over as already converted; on a clean run the two
+        # together are exactly counts.total, so the good path is
+        # unchanged and both bad paths become true.
+        asked = (self.shell.run.total if self.shell.run else 0) + counts.skipped
         template = (
             strings.STEP4_TITLE_CANCELLED
             if self.shell.run and self.shell.run.cancelled
             else strings.STEP4_TITLE
         )
         self.heading.configure(text=template.format(
-            done=converted, total=counts.total
+            done=converted, total=asked
         ))
 
         lines = [strings.STEP4_OK.format(n=counts.ok)]
@@ -290,3 +313,24 @@ class DoneStep(Step):
             self.failures.grid_remove()
         else:
             self.failures.grid()
+
+        # A button that opens nothing looks like a broken program, which
+        # is why the Next button on step 2 is disabled rather than left
+        # to refuse silently; these two were the exception. The report is
+        # missing exactly when the run had trouble writing it -- the case
+        # someone most wants explained -- so that one also says so.
+        destination = self.shell.destination
+        report = self.shell.report_path
+        self.open_folder_button.configure(
+            state="normal"
+            if destination is not None and Path(destination).exists()
+            else "disabled"
+        )
+        has_report = report is not None and Path(report).exists()
+        self.open_report_button.configure(
+            state="normal" if has_report else "disabled"
+        )
+        if has_report:
+            self.no_report.grid_remove()
+        else:
+            self.no_report.grid()

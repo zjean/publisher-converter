@@ -8,8 +8,10 @@ turns them on.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,12 +21,18 @@ try:
     import tkinter
     _root = tkinter.Tk()
     _root.destroy()
+    _WHY = ""
 except Exception as exc:            # ImportError, or TclError with no display
     tkinter = None
     _WHY = str(exc)
 
+# Carried into the skip message rather than dropped: "no usable tkinter"
+# in a CI log leaves the reader to guess between a Python built without
+# _tkinter and a runner with no display, and those have different fixes.
+_NO_TK = f"no usable tkinter: {_WHY}"
 
-@unittest.skipIf(tkinter is None, "no usable tkinter on this machine")
+
+@unittest.skipIf(tkinter is None, _NO_TK)
 class WindowTest(unittest.TestCase):
     def test_the_window_builds_and_tears_down(self):
         # This is what --self-test runs in CI: it is the check that
@@ -74,7 +82,7 @@ class _ApplicationCase(unittest.TestCase):
         return folder
 
 
-@unittest.skipIf(tkinter is None, "no usable tkinter on this machine")
+@unittest.skipIf(tkinter is None, _NO_TK)
 class ChooseStepTest(_ApplicationCase):
     def test_a_folder_of_pub_files_is_counted_and_lets_the_user_on(self):
         from pubidml.gui import strings, wizard
@@ -121,7 +129,7 @@ class ChooseStepTest(_ApplicationCase):
         self.assertEqual(str(self.application.next_button["state"]), "disabled")
 
 
-@unittest.skipIf(tkinter is None, "no usable tkinter on this machine")
+@unittest.skipIf(tkinter is None, _NO_TK)
 class NavigationTest(_ApplicationCase):
     def test_a_dropped_folder_arrives_already_on_step_two(self):
         from pubidml.gui import app, wizard
@@ -286,7 +294,7 @@ class NavigationTest(_ApplicationCase):
         self.assertEqual(self.application.step, wizard.DESTINATION)
 
 
-@unittest.skipIf(tkinter is None, "no usable tkinter on this machine")
+@unittest.skipIf(tkinter is None, _NO_TK)
 class DestinationStepTest(_ApplicationCase):
     def test_a_destination_inside_the_source_is_explained_and_refused(self):
         from pubidml.gui import strings, wizard
@@ -333,7 +341,7 @@ class _StubRun:
         self.cancel_calls += 1
 
 
-@unittest.skipIf(tkinter is None, "no usable tkinter on this machine")
+@unittest.skipIf(tkinter is None, _NO_TK)
 class DrainTest(_ApplicationCase):
     def test_a_finished_run_is_polled_once_more_before_step_four(self):
         # Run.results is complete only one poll past finished: the flag
@@ -464,7 +472,133 @@ class DrainTest(_ApplicationCase):
         )
 
 
-@unittest.skipIf(tkinter is None, "no usable tkinter on this machine")
+@unittest.skipIf(tkinter is None, _NO_TK)
+class SelfTestEvidenceTest(unittest.TestCase):
+    """--self-test has to leave evidence a windowed build can produce.
+
+    The build that runs it is console=False: there is no stdout, and
+    sys.stderr is None rather than a sink, so a print() of the diagnostic
+    raised instead of quietly going nowhere -- and the switch returns
+    before the normal logging setup, so there was no log either. What
+    reached CI was a red timeout with nothing in it.
+    """
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.work, True)
+        # The file handler this test's main() attaches would otherwise
+        # outlive it, holding a deleted temporary open -- which arrives
+        # as a ResourceWarning in another test's output.
+        self.addCleanup(self._detach_log_handlers)
+        # main() installs an excepthook, and hooks stack.
+        self.addCleanup(setattr, sys, "excepthook", sys.excepthook)
+
+    @staticmethod
+    def _detach_log_handlers():
+        logger = logging.getLogger("pubidml")
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
+
+    class _Frame:
+        def __init__(self, width, height):
+            self._size = (width, height)
+
+        def winfo_reqwidth(self):
+            return self._size[0]
+
+        def winfo_reqheight(self):
+            return self._size[1]
+
+    def _stand_in_window(self, sizes):
+        """A window that reports the sizes this test wants measured.
+
+        A real Tk frame full of labels cannot be made to report 1x1, so
+        the failure branch is unreachable with the real thing -- and the
+        failure branch is the one whose evidence went missing.
+        """
+        frames = {step: self._Frame(*size) for step, size in sizes.items()}
+
+        class _Window:
+            def __init__(self):
+                self.steps = dict(frames)
+
+            def withdraw(self):
+                pass
+
+            def show(self, step):
+                pass
+
+            def update_idletasks(self):
+                pass
+
+            def destroy(self):
+                pass
+
+        return _Window
+
+    def test_an_unmeasured_step_exits_one_with_readable_evidence(self):
+        from pubidml.gui import app, wizard
+        sizes = {
+            wizard.CHOOSE: (420, 300),
+            wizard.DESTINATION: (420, 300),
+            wizard.CONVERTING: (420, 300),
+            wizard.DONE: (1, 1),
+        }
+        with mock.patch.object(app, "Application", self._stand_in_window(sizes)), \
+                mock.patch.object(app.sys, "stderr", None):
+            with self.assertLogs("pubidml.gui", level="ERROR") as captured:
+                code = app.self_test()
+        self.assertEqual(code, 1)
+        self.assertIn("done (1x1)", "\n".join(captured.output))
+
+    def test_a_measured_window_records_what_it_saw(self):
+        from pubidml.gui import app, wizard
+        sizes = {step: (420, 300) for step in (
+            wizard.CHOOSE, wizard.DESTINATION, wizard.CONVERTING, wizard.DONE
+        )}
+        with mock.patch.object(app, "Application", self._stand_in_window(sizes)):
+            with self.assertLogs("pubidml.gui", level="INFO") as captured:
+                code = app.self_test()
+        self.assertEqual(code, 0)
+        line = "\n".join(captured.output)
+        for name in ("choose", "destination", "converting", "done"):
+            self.assertIn(name, line)
+
+    def test_the_evidence_file_sits_beside_a_frozen_executable(self):
+        # Not the per-user log folder the run logs use: the workflow has
+        # to collect this file, and it cannot guess a timestamped name
+        # under %LOCALAPPDATA%.
+        from pubidml.gui import app
+        with mock.patch.object(app.sys, "frozen", True, create=True), \
+                mock.patch.object(
+                    app.sys, "executable", os.path.join("opt", "gui.exe")):
+            self.assertEqual(
+                app.self_test_log_path(),
+                Path("opt") / app.SELF_TEST_LOG_NAME,
+            )
+
+    def test_the_switch_writes_that_file_before_it_returns(self):
+        # End to end through main(), which is where the ordering matters:
+        # the branch used to return before logging was configured at all.
+        from pubidml.gui import app
+        original = os.getcwd()
+        os.chdir(self.work)
+        try:
+            code = app.main(["--self-test"])
+        finally:
+            os.chdir(original)
+        self.assertEqual(code, 0)
+        written = (self.work / app.SELF_TEST_LOG_NAME).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("self-test:", written)
+        # The environment banner too: which build produced this evidence
+        # is the first question asked of it.
+        self.assertIn("frozen bundle:", written)
+
+
+@unittest.skipIf(tkinter is None, _NO_TK)
 class DoneStepTest(_ApplicationCase):
     def test_step_four_says_to_keep_the_images_folder(self):
         # The one way a conversion that reports nothing wrong still loses
@@ -498,3 +632,97 @@ class DoneStepTest(_ApplicationCase):
                 strings.STEP4_FAILED.format(n=1),
             ]),
         )
+
+    def _converted(self, name):
+        from pubidml import convert
+        return convert.Result(
+            source=Path(name), output=Path(name).with_suffix(".idml"),
+            pages=1, text_frames=1,
+        )
+
+    def test_a_stopped_run_counts_the_files_it_was_asked_for(self):
+        # The heading's denominator has to be the size of the job, not
+        # the number of results that came back: a 145-file batch stopped
+        # after ten used to read "Gestopt -- 10 van de 10 bestanden",
+        # which tells someone with nobody to ask that the work is done.
+        from pubidml.gui import strings, wizard
+        self.application.run = _StubRun(
+            results=[self._converted(f"{i}.pub") for i in range(10)],
+            cancelled=True, total=145,
+        )
+        self.application.show(wizard.DONE)
+        self.assertEqual(
+            self.application.steps[wizard.DONE].heading.cget("text"),
+            strings.STEP4_TITLE_CANCELLED.format(done=10, total=145),
+        )
+
+    def test_a_run_that_failed_halfway_counts_the_same_way(self):
+        # The failure path reaches step 4 as well (the run died, or only
+        # the report could not be written), and the same arithmetic
+        # applies there.
+        from pubidml.gui import strings, wizard
+        self.application.run = _StubRun(
+            failure=RuntimeError("thread died"),
+            results=[self._converted("0.pub")], total=8,
+        )
+        self.application.show(wizard.DONE)
+        self.assertEqual(
+            self.application.steps[wizard.DONE].heading.cget("text"),
+            strings.STEP4_TITLE.format(done=1, total=8),
+        )
+
+    def test_a_clean_run_still_counts_every_file_including_the_skipped(self):
+        # The other side of the fix: files passed over as already
+        # converted are not jobs, so they are in the results and not in
+        # run.total. Adding them back is what keeps a finished run's
+        # heading agreeing with the lines beneath it.
+        from pubidml import convert
+        from pubidml.gui import strings, wizard
+        skipped = [
+            convert.Result(
+                source=Path(f"oud{i}.pub"),
+                output=Path(f"oud{i}.idml"), skipped=True,
+            )
+            for i in range(2)
+        ]
+        self.application.run = _StubRun(
+            results=[self._converted("0.pub"), self._converted("1.pub")]
+            + skipped,
+            total=2,
+        )
+        self.application.show(wizard.DONE)
+        self.assertEqual(
+            self.application.steps[wizard.DONE].heading.cget("text"),
+            strings.STEP4_TITLE.format(done=2, total=4),
+        )
+
+    def test_the_report_button_is_dead_only_when_there_is_no_report(self):
+        # A button that opens nothing reads as a broken program, and the
+        # missing-report case is exactly the case someone needs
+        # explained. Both states are asserted, so the fix cannot degrade
+        # into a button that is always grey.
+        from pubidml.gui import app, strings, wizard
+        self.application.destination = self.work / "omgezet"
+        self.application.destination.mkdir()
+        self.application.show(wizard.DONE)
+        step = self.application.steps[wizard.DONE]
+        self.assertEqual(str(step.open_report_button["state"]), "disabled")
+        self.assertEqual(str(step.open_folder_button["state"]), "normal")
+        self.assertTrue(step.no_report.winfo_ismapped()
+                        or step.no_report.winfo_manager() == "grid")
+        self.assertEqual(step.no_report.cget("text"), strings.STEP4_NO_REPORT)
+
+        (self.application.destination / app.REPORT_NAME).write_text(
+            "source\n", encoding="utf-8"
+        )
+        step.refresh()
+        self.assertEqual(str(step.open_report_button["state"]), "normal")
+        self.assertEqual(step.no_report.winfo_manager(), "")
+
+    def test_the_folder_button_is_dead_when_nothing_was_written(self):
+        # Reachable: a run whose destination could not be created at all.
+        from pubidml.gui import wizard
+        self.application.destination = self.work / "bestaat-niet"
+        self.application.show(wizard.DONE)
+        step = self.application.steps[wizard.DONE]
+        self.assertEqual(str(step.open_folder_button["state"]), "disabled")

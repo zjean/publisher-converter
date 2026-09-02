@@ -64,6 +64,13 @@ STEP4_NEXT = (
 STEP4_OPEN_FOLDER = "Map openen"
 STEP4_OPEN_REPORT = "Rapport openen"
 STEP4_AGAIN = "Nog een map omzetten"
+# Shown in place of the report button when there is no report to open.
+# Without it the button would simply do nothing when pressed, which is
+# the one thing this window tries never to do.
+STEP4_NO_REPORT = (
+    "Er is geen rapport geschreven. Kijk in het logbestand\n"
+    "wat er misging."
+)
 
 # --- Navigation ------------------------------------------------------
 BACK = "Vorige"

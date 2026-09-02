@@ -77,10 +77,18 @@ def configure(log_file: Optional[Path] = None, verbose: bool = False) -> Optiona
 
     # Warnings and errors also reach the terminal; routine progress does
     # not, because the CLI already prints a readable per-file summary.
-    console = logging.StreamHandler(sys.stderr)
-    console.setLevel(logging.WARNING)
-    console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-    logger.addHandler(console)
+    #
+    # Only where there is a terminal to reach. A windowed PyInstaller
+    # build (console=False) has sys.stderr set to None, and a
+    # StreamHandler holding None does not raise -- it drops each record
+    # through logging's own error path instead, which looks exactly like
+    # a handler that worked. The file below is the only channel there, so
+    # don't attach one that pretends otherwise.
+    if sys.stderr is not None:
+        console = logging.StreamHandler(sys.stderr)
+        console.setLevel(logging.WARNING)
+        console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        logger.addHandler(console)
 
     if log_file is None:
         directory = default_log_dir()

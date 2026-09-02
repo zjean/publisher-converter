@@ -33,6 +33,11 @@ REPORT_NAME = "conversion-report.csv"
 #: widest step actually asks for.
 MIN_WIDTH, MIN_HEIGHT = 560, 460
 
+#: Where --self-test writes what it measured. Named rather than
+#: timestamped like the run logs, because a CI workflow has to be able to
+#: collect it without guessing a filename.
+SELF_TEST_LOG_NAME = "pub2idml-self-test.log"
+
 
 class Application(tk.Tk):
     def __init__(
@@ -184,12 +189,26 @@ class Application(tk.Tk):
     def open_output(self) -> None:
         self._reveal(self.destination)
 
-    def open_report(self) -> None:
+    @property
+    def report_path(self) -> Optional[Path]:
+        """Where this run's report would be, if a destination is chosen.
+
+        A property rather than a constant the steps read for themselves:
+        REPORT_NAME lives here, and steps.py importing this module back
+        would close an import cycle.
+        """
         if self.destination is None:
-            return
-        self._reveal(self.destination / REPORT_NAME)
+            return None
+        return self.destination / REPORT_NAME
+
+    def open_report(self) -> None:
+        self._reveal(self.report_path)
 
     def _reveal(self, path: Optional[Path]) -> None:
+        # A backstop, not the guard the user sees: DoneStep.refresh
+        # disables the buttons that would land here with nothing to
+        # open, so a silent return means only that the file went away
+        # between the refresh and the click.
         if path is None or not Path(path).exists():
             return
         try:
@@ -353,13 +372,36 @@ class Application(tk.Tk):
         time. It is not quite "nothing to clean up", though: killing the
         daemon mid-write can leave that temporary, .<name>.idml.XXXXXX.part,
         beside the output. Windows does not hide a leading dot, so this
-        audience will see it and wonder. Also lost is the report row for
-        whatever was still in flight, which the next run rewrites anyway.
+        audience will see it and wonder. The images are the other half:
+        IdmlWriter.write fills _images beside the destination before the
+        move, so a kill mid-write can leave that folder half-populated
+        next to a package that never arrived.
+
+        And the report is lost outright, not just a row of it:
+        write_report runs in the worker's finally, the worker is a daemon
+        and dies at interpreter shutdown, so this run writes no CSV at
+        all. Any earlier run's report is left sitting there, describing a
+        batch that is no longer what is in the folder. The next completed
+        run rewrites it from scratch.
         """
         if self.run is not None and not self.run.finished:
             self.run.cancel()
         self._cancel_drain()
         self.destroy()
+
+
+def self_test_log_path() -> Path:
+    """The file --self-test's evidence can be read back from.
+
+    Beside the executable, not in the per-user log folder the run logs
+    go to: this switch exists to be run by CI in a directory it controls,
+    and a timestamped name under %LOCALAPPDATA% is a path the workflow
+    would have to guess at. Running from a checkout, the working
+    directory is the equivalent of "beside the executable".
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent / SELF_TEST_LOG_NAME
+    return Path.cwd() / SELF_TEST_LOG_NAME
 
 
 def self_test() -> int:
@@ -370,6 +412,12 @@ def self_test() -> int:
     starts, so the check has to reach as far as a real widget tree -- and
     as far as all four steps, since a frame is only actually laid out once
     something raises it.
+
+    Everything it finds goes to the log rather than to stderr. The build
+    that runs this is the windowed one, which has no stderr at all --
+    printing to it would raise, and a check whose evidence cannot be read
+    is a check that only says something failed. main() points logging at
+    self_test_log_path() before calling here.
     """
     application = Application()
     application.withdraw()
@@ -394,29 +442,57 @@ def self_test() -> int:
         wizard.CONVERTING: "converting",
         wizard.DONE: "done",
     }
-    unmeasured = [
+    measured = sorted(
         (step, frame.winfo_reqwidth(), frame.winfo_reqheight())
         for step, frame in application.steps.items()
-        if frame.winfo_reqwidth() <= 1 or frame.winfo_reqheight() <= 1
-    ]
+    )
     application.destroy()
-    if unmeasured:
-        detail = ", ".join(
+
+    def described(rows) -> str:
+        return ", ".join(
             "%s (%dx%d)" % (step_names.get(step, step), width, height)
-            for step, width, height in sorted(unmeasured)
+            for step, width, height in rows
         )
-        print(
+
+    log = logsetup.get_logger("gui")
+    unmeasured = [row for row in measured if row[1] <= 1 or row[2] <= 1]
+    if unmeasured:
+        log.error(
             "self-test: steps [%s] reported no requested size; the window "
-            "would fall back to its minimum" % detail,
-            file=sys.stderr,
+            "would fall back to its minimum (%dx%d)",
+            described(unmeasured), MIN_WIDTH, MIN_HEIGHT,
         )
         return 1
+    # Logged on the way out too, not only on failure: the point of the
+    # check is that someone reading the CI artifact afterwards can see
+    # what was measured, rather than trusting a green step.
+    log.info("self-test: all four steps measured [%s]", described(measured))
     return 0
 
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--self-test" in argv:
+        # Logging first, because this branch returns before the normal
+        # setup below and the diagnostic is the whole reason the switch
+        # exists. The build that runs it is console=False: there is no
+        # stdout, and sys.stderr is None rather than a sink, so printing
+        # the evidence would raise instead of quietly going nowhere. A
+        # named file beside the executable is a channel a windowed build
+        # still has, and one the workflow can collect.
+        if logsetup.configure(self_test_log_path(), verbose=False) is None:
+            # Beside the executable is not always writable -- an
+            # installed copy under Program Files is not -- so fall back
+            # to the per-user folder every other run logs to rather than
+            # losing the evidence altogether.
+            logsetup.configure(None, verbose=False)
+        # A missing Tcl/Tk is the failure this switch exists to catch,
+        # and it arrives as an exception out of Application(). Without
+        # the hook that traceback goes to the same absent stderr; with
+        # it, the log says which import died and the process still exits
+        # non-zero.
+        logsetup.install_excepthook()
+        logsetup.log_environment(convert.PUBDUMP)
         return self_test()
 
     log_path = logsetup.configure(None, verbose=False)
