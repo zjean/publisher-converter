@@ -303,14 +303,14 @@ class DestinationTest(unittest.TestCase):
         nested.mkdir(parents=True)
         source = nested / "news.pub"
         source.write_bytes(b"x")
-        destination = cli.destination_for(source, self.work, Path("/out"))
+        destination = batch.destination_for(source, self.work, Path("/out"))
         self.assertEqual(destination, Path("/out/2024/spring/news.idml"))
 
     def test_a_single_source_file_lands_directly_in_the_output(self):
         # The source root is the file itself, so there is no tree to mirror.
         source = self.work / "news.pub"
         source.write_bytes(b"x")
-        destination = cli.destination_for(source, source, Path("/out"))
+        destination = batch.destination_for(source, source, Path("/out"))
         self.assertEqual(destination, Path("/out/news.idml"))
 
 
@@ -342,7 +342,7 @@ class DetailLineTest(unittest.TestCase):
         self.assertNotIn("wordart", self.printed(result))
 
     def test_the_count_reaches_the_csv(self):
-        self.assertIn("wordart", cli.REPORT_COLUMNS)
+        self.assertIn("wordart", batch.REPORT_COLUMNS)
 
 
 class FacingPagesFlagTest(unittest.TestCase):
@@ -419,4 +419,4 @@ class FacingDetailLineTest(unittest.TestCase):
         self.assertNotIn("facing", self.printed(result))
 
     def test_the_flag_reaches_the_csv(self):
-        self.assertIn("facing_pages", cli.REPORT_COLUMNS)
+        self.assertIn("facing_pages", batch.REPORT_COLUMNS)

@@ -16,18 +16,11 @@ from typing import List
 
 from . import batch, convert, logsetup
 
-# Kept here as thin delegations, same as find_sources below: batch.py owns
-# the logic now, but both names are part of this module's existing surface
-# and other code (and tests) still reach them through cli.
-REPORT_COLUMNS = batch.REPORT_COLUMNS
 
-
+# A thin delegation: batch.py owns the glob and the lock-file filter, but
+# run() below still calls this by its own name.
 def find_sources(root: Path, recursive: bool) -> List[Path]:
     return batch.find_sources(root, recursive)
-
-
-def destination_for(source: Path, source_root: Path, output_root: Path) -> Path:
-    return batch.destination_for(source, source_root, output_root)
 
 
 def _force_utf8_console() -> None:
