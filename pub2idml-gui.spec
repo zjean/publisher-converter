@@ -1,6 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for the windowed build.
 
+A windowed executable has no stdout, so a single dual-mode binary would
+leave every command-line invocation silent -- which is why this is a
+second executable rather than a mode of the first.
+
 The same binaries as the console build, with two differences that matter.
 console=False, because a windowed Windows executable that keeps a console
 flashes a black box on every launch. And tkinter is not excluded -- it is
