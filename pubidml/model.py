@@ -198,6 +198,12 @@ class Span:
 
     text: str = ""
     font: Optional[str] = None
+    #: The style within the family to set the run in, where naming it is
+    #: the only way to reach the face: a family whose weights are styles
+    #: rather than families of their own has a 'Light' that bold and italic
+    #: between them cannot ask for. Left None wherever the two flags below
+    #: say it all, which is almost everywhere -- `convert` fills it in.
+    font_style: Optional[str] = None
     size_pt: Optional[float] = None
     color: Optional[Color] = None
     bold: bool = False
@@ -224,10 +230,15 @@ class Span:
     #: WordArt condenses its glyphs to fit the band, and this is how that
     #: reaches IDML rather than as a smaller point size.
     horizontal_scale: Optional[float] = None
+    #: Forward slant in degrees, for a run set in italic by a family that
+    #: has no italic face. Publisher shears the glyphs rather than leaving
+    #: them upright, and this is that shear.
+    skew: Optional[float] = None
 
     def format_key(self) -> tuple:
         return (
             self.font,
+            self.font_style,
             self.size_pt,
             self.color,
             self.bold,
@@ -242,6 +253,7 @@ class Span:
             self.tracking,
             self.language,
             self.horizontal_scale,
+            self.skew,
         )
 
 

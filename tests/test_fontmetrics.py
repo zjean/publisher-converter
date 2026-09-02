@@ -33,8 +33,14 @@ def _table_directory(tables):
     return header + records + body
 
 
-def name_table(family, subfamily, platform=3, language=0x0409):
+def name_table(family, subfamily, platform=3, language=0x0409,
+               postscript=None, typo_family=None, typo_subfamily=None):
+    # 16 and 17 only where the caller asks for them: a face that needs no
+    # split between the two namings leaves them out, and most do.
     entries = [(1, family), (2, subfamily)]
+    for nid, value in ((6, postscript), (16, typo_family), (17, typo_subfamily)):
+        if value is not None:
+            entries.append((nid, value))
     storage, records = b"", b""
     for nid, value in entries:
         raw = value.encode("mac-roman") if platform == 1 else value.encode("utf-16-be")
@@ -54,8 +60,18 @@ def head_table(upem, long_loca):
     )
 
 
-def hhea_table(num_h_metrics):
-    return b"\x00" * 34 + struct.pack(">H", num_h_metrics)
+def hhea_table(num_h_metrics, ascender=800, descender=-200, line_gap=0):
+    return (
+        b"\x00" * 4
+        + struct.pack(">hhh", ascender, descender, line_gap)
+        + b"\x00" * 24
+        + struct.pack(">H", num_h_metrics)
+    )
+
+
+def os2_table(win_ascent=900, win_descent=300):
+    """Only as far as usWinDescent, which is all `_win_metrics` reads."""
+    return b"\x00" * 74 + struct.pack(">HH", win_ascent, win_descent) + b"\x00" * 4
 
 
 def maxp_table(num_glyphs):
@@ -111,24 +127,39 @@ def glyf_and_loca(boxes, long_loca=True):
 
 
 def build_font(family="Test Sans", subfamily="Regular", upem=1000,
-               glyphs=None, long_loca=True, cmap_format=4, platform=3):
-    """glyphs: {char: (advance, (xMin, yMin, xMax, yMax))}, glyph ids from 1."""
+               glyphs=None, long_loca=True, cmap_format=4, platform=3,
+               postscript=None, typo_family=None, typo_subfamily=None,
+               win_ascent=900, win_descent=300, ascender=800, descender=-200,
+               line_gap=0, os2=True):
+    """glyphs: {char: (advance, (xMin, yMin, xMax, yMax))}, glyph ids from 1.
+
+    `os2=False` builds a face with no OS/2 table at all, which is the shape
+    a line's height cannot be read from.
+    """
     glyphs = {"A": (600, (50, 0, 550, 700))} if glyphs is None else glyphs
     chars = sorted(glyphs)
     mapping = {ord(c): i + 1 for i, c in enumerate(chars)}
     advances = [0] + [glyphs[c][0] for c in chars]
     boxes = [None] + [glyphs[c][1] for c in chars]
     glyf, loca = glyf_and_loca(boxes, long_loca)
-    return _table_directory({
+    tables = {
         "head": head_table(upem, long_loca),
-        "name": name_table(family, subfamily, platform),
+        "name": name_table(
+            family, subfamily, platform,
+            postscript=postscript,
+            typo_family=typo_family,
+            typo_subfamily=typo_subfamily,
+        ),
         "maxp": maxp_table(len(advances)),
-        "hhea": hhea_table(len(advances)),
+        "hhea": hhea_table(len(advances), ascender, descender, line_gap),
         "hmtx": hmtx_table(advances),
         "cmap": cmap_table(mapping, cmap_format),
         "loca": loca,
         "glyf": glyf,
-    })
+    }
+    if os2:
+        tables["OS/2"] = os2_table(win_ascent, win_descent)
+    return _table_directory(tables)
 
 
 def _rebase(font, delta):
@@ -334,6 +365,244 @@ class FontIndexTest(unittest.TestCase):
             self.assertIsNone(
                 fontmetrics.find_face("Kerk Display", bold=False, italic=False)
             )
+
+
+class LineMetricsTest(unittest.TestCase):
+    """One line of a face: what Publisher calls a "space" of line spacing."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        patch = mock.patch.object(
+            fontmetrics, "font_directories", lambda: [self.root]
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        fontmetrics.reset_index()
+        self.addCleanup(fontmetrics.reset_index)
+
+    def write(self, name, **kwargs):
+        (self.root / name).write_bytes(build_font(**kwargs))
+
+    def test_a_line_is_the_win_metrics_added_up(self):
+        # GDI's tmHeight, which is what a GDI application stacks lines by.
+        self.write("kerk.ttf", family="Kerk", upem=1000,
+                   win_ascent=900, win_descent=300)
+        metrics = fontmetrics.line_metrics("Kerk", False, False)
+        self.assertAlmostEqual(metrics.height, 1.2)
+        self.assertAlmostEqual(metrics.ascent, 0.9)
+
+    def test_the_line_gap_the_win_metrics_have_not_taken_up_is_added(self):
+        # hhea spans 1000 units, the win metrics 1200, and the gap is 300:
+        # 200 of the gap is already inside the win metrics, so 100 is left.
+        self.write("kerk.ttf", family="Kerk", upem=1000,
+                   win_ascent=900, win_descent=300,
+                   ascender=800, descender=-200, line_gap=300)
+        metrics = fontmetrics.line_metrics("Kerk", False, False)
+        self.assertAlmostEqual(metrics.height, 1.3)
+
+    def test_a_gap_the_win_metrics_already_cover_adds_nothing(self):
+        # Calibri's shape: its gap is exactly what its win metrics add over
+        # its hhea pair, so GDI reports no external leading at all.
+        self.write("kerk.ttf", family="Kerk", upem=1000,
+                   win_ascent=900, win_descent=300,
+                   ascender=800, descender=-200, line_gap=200)
+        metrics = fontmetrics.line_metrics("Kerk", False, False)
+        self.assertAlmostEqual(metrics.height, 1.2)
+
+    def test_the_external_leading_never_goes_negative(self):
+        self.write("kerk.ttf", family="Kerk", upem=1000,
+                   win_ascent=900, win_descent=300,
+                   ascender=700, descender=-100, line_gap=0)
+        metrics = fontmetrics.line_metrics("Kerk", False, False)
+        self.assertAlmostEqual(metrics.height, 1.2)
+
+    def test_a_face_with_no_os2_table_has_no_line_to_read(self):
+        # The caller falls back to 120% for these, which is all it can do.
+        self.write("kerk.ttf", family="Kerk", os2=False)
+        self.assertIsNone(fontmetrics.line_metrics("Kerk", False, False))
+
+    def test_a_font_this_machine_lacks_has_no_line_to_read(self):
+        self.write("kerk.ttf", family="Kerk")
+        self.assertIsNone(fontmetrics.line_metrics("Pristina", False, False))
+
+    def test_no_font_named_at_all_has_no_line_to_read(self):
+        self.assertIsNone(fontmetrics.line_metrics(None, False, False))
+
+    def test_the_bold_face_is_measured_when_bold_is_asked_for(self):
+        self.write("plain.ttf", family="Kerk", subfamily="Regular",
+                   win_ascent=900, win_descent=300)
+        self.write("bold.ttf", family="Kerk", subfamily="Bold",
+                   win_ascent=1000, win_descent=300)
+        self.assertAlmostEqual(
+            fontmetrics.line_metrics("Kerk", True, False).height, 1.3)
+
+    def test_resetting_the_index_forgets_the_measurements_too(self):
+        self.write("kerk.ttf", family="Kerk", win_ascent=900, win_descent=300)
+        self.assertAlmostEqual(fontmetrics.line_metrics("Kerk", False, False).height, 1.2)
+        (self.root / "kerk.ttf").write_bytes(
+            build_font(family="Kerk", win_ascent=1100, win_descent=300))
+        fontmetrics.reset_index()
+        self.assertAlmostEqual(fontmetrics.line_metrics("Kerk", False, False).height, 1.4)
+
+
+class NamingTest(unittest.TestCase):
+    """What to call a face, for a reader that indexes by typographic name.
+
+    The case throughout is Calibri Light, which is a family of its own in
+    the legacy naming Publisher writes and the 'Light' style of 'Calibri'
+    everywhere else. Passing Publisher's name through is what leaves
+    Affinity reporting a font it has installed as missing.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        patch = mock.patch.object(
+            fontmetrics, "font_directories", lambda: [self.root]
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        fontmetrics.reset_index()
+        self.addCleanup(fontmetrics.reset_index)
+
+    def write(self, name, **kwargs):
+        (self.root / name).write_bytes(build_font(**kwargs))
+
+    def light(self, subfamily="Regular", typo_subfamily="Light", **kwargs):
+        """A face named the way Calibri Light names itself."""
+        return dict(
+            family="Kerk Light", subfamily=subfamily,
+            typo_family="Kerk", typo_subfamily=typo_subfamily,
+            postscript="Kerk-Light", **kwargs,
+        )
+
+    def test_a_face_states_both_of_its_namings(self):
+        self.write("light.ttf", **self.light())
+        face = fontmetrics.find_face("Kerk Light", bold=False, italic=False)
+        self.assertEqual(face.family, "Kerk Light")
+        self.assertEqual(face.typo_family, "Kerk")
+        self.assertEqual(face.typo_subfamily, "Light")
+        self.assertEqual(face.postscript, "Kerk-Light")
+
+    def test_a_face_that_needs_no_split_states_only_the_legacy_naming(self):
+        self.write("plain.ttf", family="Kerk", subfamily="Regular")
+        face = fontmetrics.find_face("Kerk", bold=False, italic=False)
+        self.assertIsNone(face.typo_family)
+        self.assertIsNone(face.typo_subfamily)
+
+    def test_a_folded_family_is_named_by_family_and_style(self):
+        self.write("light.ttf", **self.light())
+        naming = fontmetrics.naming("Kerk Light", bold=False, italic=False)
+        self.assertEqual(naming.family, "Kerk")
+        self.assertEqual(naming.style, "Light")
+        self.assertEqual(naming.postscript, "Kerk-Light")
+        self.assertTrue(naming.folded)
+
+    def test_the_italic_of_a_folded_family_keeps_its_own_style_name(self):
+        self.write("light.ttf", **self.light())
+        self.write("lightitalic.ttf", **self.light(
+            subfamily="Italic", typo_subfamily="Light Italic"
+        ))
+        naming = fontmetrics.naming("Kerk Light", bold=False, italic=True)
+        self.assertEqual((naming.family, naming.style), ("Kerk", "Light Italic"))
+
+    def test_a_family_that_needs_no_folding_is_left_alone(self):
+        self.write("plain.ttf", family="Kerk", subfamily="Regular",
+                   postscript="Kerk-Regular")
+        naming = fontmetrics.naming("Kerk", bold=False, italic=False)
+        self.assertEqual((naming.family, naming.style), ("Kerk", "Regular"))
+        self.assertEqual(naming.postscript, "Kerk-Regular")
+        self.assertFalse(naming.folded)
+        self.assertFalse(naming.faux_bold)
+
+    def test_a_font_this_machine_lacks_is_not_named_at_all(self):
+        # None means unverifiable, not wrong: the file's own name is very
+        # likely right on the machine that has the font.
+        self.write("plain.ttf", family="Kerk")
+        self.assertIsNone(fontmetrics.naming("Pristina", bold=False, italic=False))
+
+    def test_bold_on_a_folded_weight_is_a_face_that_was_never_drawn(self):
+        # Calibri Light Bold is in no Calibri release, so Publisher strokes
+        # the outline instead of setting the run in a bold face.
+        self.write("light.ttf", **self.light())
+        naming = fontmetrics.naming("Kerk Light", bold=True, italic=False)
+        self.assertEqual((naming.family, naming.style), ("Kerk", "Light"))
+        self.assertTrue(naming.faux_bold)
+
+    def test_a_bold_missing_only_here_is_not_treated_as_undrawn(self):
+        # The family did not fold, so the bold is absent from this machine
+        # rather than from the design, and saying so is the report's job.
+        self.write("plain.ttf", family="Kerk", subfamily="Regular")
+        naming = fontmetrics.naming("Kerk", bold=True, italic=False)
+        self.assertFalse(naming.faux_bold)
+
+    def test_a_real_bold_of_a_folded_family_is_not_stroked(self):
+        self.write("light.ttf", **self.light())
+        self.write("bold.ttf", family="Kerk Light", subfamily="Bold",
+                   typo_family="Kerk", typo_subfamily="Light Bold")
+        naming = fontmetrics.naming("Kerk Light", bold=True, italic=False)
+        self.assertEqual(naming.style, "Light Bold")
+        self.assertFalse(naming.faux_bold)
+
+    def test_italic_on_a_family_with_none_is_a_slant_to_be_drawn(self):
+        # Blackadder ITC, Segoe Script and Mystical Woods each ship one
+        # slant, and Publisher's PDF shears all three rather than
+        # substituting a face.
+        self.write("plain.ttf", family="Kerk Script", subfamily="Regular")
+        naming = fontmetrics.naming("Kerk Script", bold=False, italic=True)
+        self.assertEqual(naming.style, "Regular")
+        self.assertTrue(naming.faux_italic)
+
+    def test_a_family_with_a_real_italic_is_not_sheared(self):
+        self.write("plain.ttf", family="Kerk", subfamily="Regular")
+        self.write("italic.ttf", family="Kerk", subfamily="Italic")
+        naming = fontmetrics.naming("Kerk", bold=False, italic=True)
+        self.assertEqual(naming.style, "Italic")
+        self.assertFalse(naming.faux_italic)
+
+    def test_an_oblique_counts_as_the_italic_it_is(self):
+        self.write("oblique.ttf", family="Kerk", subfamily="Oblique")
+        naming = fontmetrics.naming("Kerk", bold=False, italic=True)
+        self.assertFalse(naming.faux_italic)
+
+    def test_the_italic_of_a_folded_weight_is_not_sheared_as_well(self):
+        self.write("light.ttf", **self.light())
+        self.write("lightitalic.ttf", **self.light(
+            subfamily="Italic", typo_subfamily="Light Italic"
+        ))
+        naming = fontmetrics.naming("Kerk Light", bold=False, italic=True)
+        self.assertFalse(naming.faux_italic)
+
+    def test_an_upright_run_is_never_sheared(self):
+        self.write("plain.ttf", family="Kerk Script", subfamily="Regular")
+        naming = fontmetrics.naming("Kerk Script", bold=False, italic=False)
+        self.assertFalse(naming.faux_italic)
+
+    def test_a_face_is_found_by_either_of_its_namings(self):
+        self.write("light.ttf", **self.light())
+        self.assertIsNotNone(fontmetrics.find_face("Kerk Light", False, False))
+        self.assertIsNotNone(fontmetrics.find_face("Kerk", False, False))
+
+    def test_asking_by_the_typographic_name_needs_no_renaming(self):
+        self.write("light.ttf", **self.light())
+        naming = fontmetrics.naming("Kerk", bold=False, italic=False)
+        self.assertEqual(naming.family, "Kerk")
+        self.assertFalse(naming.folded)
+
+    def test_the_pair_a_font_states_outright_wins_over_a_recovered_one(self):
+        # Both files claim the 'Kerk'/'Regular' slot -- one by its own
+        # legacy names, one only through its typographic pair. The face
+        # that states it is the face that has to answer for it.
+        self.write("plain.ttf", family="Kerk", subfamily="Regular",
+                   postscript="Kerk-Regular")
+        self.write("odd.ttf", family="Kerk Oddity", subfamily="Bold",
+                   typo_family="Kerk", typo_subfamily="Regular",
+                   postscript="Kerk-Oddity")
+        face = fontmetrics.find_face("Kerk", bold=False, italic=False)
+        self.assertEqual(face.postscript, "Kerk-Regular")
 
 
 class TierTest(unittest.TestCase):

@@ -9,6 +9,7 @@ import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from pubidml import convert, fontmetrics, model, pubfile
 
@@ -901,6 +902,221 @@ class UnnamedLanguageTest(unittest.TestCase):
         document = self.document(None)
         convert._check_unnamed_languages(document)
         self.assertEqual(document.warnings, [])
+
+
+class InstalledFontNameTest(unittest.TestCase):
+    """Naming a run's font the way its reader indexes it.
+
+    Publisher writes the legacy family name, where an extra weight has to
+    be a family of its own -- 'Calibri Light'. Affinity and macOS name the
+    same file 'Calibri' + the 'Light' style, and there is no family called
+    'Calibri Light' for the file's own name to reach.
+    """
+
+    def document(self, *spans) -> model.Document:
+        frame = model.TextFrame(x=0.0, y=0.0, width=200.0, height=100.0)
+        paragraph = model.Paragraph()
+        paragraph.spans.extend(spans)
+        frame.story.paragraphs.append(paragraph)
+        page = model.Page(width=612.0, height=792.0)
+        page.items.append(frame)
+        return model.Document(pages=[page])
+
+    def naming(self, table):
+        """A stand-in for fontmetrics.naming, keyed by (family, bold)."""
+        def naming(family, bold, italic):
+            return table.get((family, bold))
+        return mock.patch.object(convert.fontmetrics, "naming", naming)
+
+    FOLDED = fontmetrics.Naming(
+        family="Kerk", style="Light", postscript="Kerk-Light", folded=True
+    )
+    FOLDED_BOLD = fontmetrics.Naming(
+        family="Kerk", style="Light", postscript="Kerk-Light",
+        faux_bold=True, folded=True,
+    )
+    PLAIN = fontmetrics.Naming(
+        family="Kerk", style="Regular", postscript="Kerk-Regular"
+    )
+
+    def test_a_folded_family_is_rewritten_to_family_and_style(self):
+        span = model.Span(text="colophon", font="Kerk Light", size_pt=8.0)
+        document = self.document(span)
+        with self.naming({("Kerk Light", False): self.FOLDED}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(span.font, "Kerk")
+        self.assertEqual(span.font_style, "Light")
+
+    def test_the_rename_is_reported_as_family_and_style_apart(self):
+        # Joined up they spell the name being replaced, and the note then
+        # reads as though nothing had happened.
+        span = model.Span(text="colophon", font="Kerk Light", size_pt=8.0)
+        document = self.document(span)
+        with self.naming({("Kerk Light", False): self.FOLDED}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("'Kerk Light' as the 'Light' style of 'Kerk'",
+                      document.warnings[0])
+
+    def test_a_family_that_needs_no_folding_is_left_untouched(self):
+        span = model.Span(text="body", font="Kerk", size_pt=10.0)
+        document = self.document(span)
+        with self.naming({("Kerk", False): self.PLAIN}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(span.font, "Kerk")
+        self.assertIsNone(span.font_style)
+        self.assertEqual(document.warnings, [])
+
+    def test_a_font_this_machine_lacks_keeps_the_name_the_file_states(self):
+        span = model.Span(text="body", font="Aptos", size_pt=10.0)
+        document = self.document(span)
+        with self.naming({}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(span.font, "Aptos")
+        self.assertIsNone(span.font_style)
+        self.assertEqual(document.warnings, [])
+
+    def test_bold_on_a_folded_weight_is_stroked_the_way_publisher_draws_it(self):
+        span = model.Span(text="Predikant:", font="Kerk Light", size_pt=8.04,
+                          bold=True)
+        document = self.document(span)
+        with self.naming({("Kerk Light", True): self.FOLDED_BOLD}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(span.font_style, "Light")
+        self.assertEqual(span.stroke, (0, 0, 0))
+        # The reference PDF strokes 0.22971 pt on 8.04 pt text, itself a
+        # rounded number, so this is checked to the places it states.
+        self.assertAlmostEqual(span.stroke_width, 0.22971, places=4)
+
+    def test_the_stroke_takes_the_colour_the_run_is_set_in(self):
+        span = model.Span(text="Scriba:", font="Kerk Light", size_pt=8.04,
+                          bold=True, color=(0x1F, 0x3B, 0x73))
+        document = self.document(span)
+        with self.naming({("Kerk Light", True): self.FOLDED_BOLD}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(span.stroke, (0x1F, 0x3B, 0x73))
+
+    def test_a_stroke_the_run_already_carries_is_not_overwritten(self):
+        # A value the document states outright is not this pass's to replace.
+        span = model.Span(text="Kerkbode", font="Kerk Light", size_pt=40.0,
+                          bold=True, stroke=(0xFF, 0x00, 0x00), stroke_width=2.0)
+        document = self.document(span)
+        with self.naming({("Kerk Light", True): self.FOLDED_BOLD}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(span.stroke, (0xFF, 0x00, 0x00))
+        self.assertEqual(span.stroke_width, 2.0)
+
+    def test_the_stroked_runs_are_counted_in_their_own_note(self):
+        spans = [
+            model.Span(text="Predikant:", font="Kerk Light", size_pt=8.04, bold=True),
+            model.Span(text="Scriba:", font="Kerk Light", size_pt=8.04, bold=True),
+            model.Span(text=" plain", font="Kerk Light", size_pt=8.04),
+        ]
+        document = self.document(*spans)
+        with self.naming({("Kerk Light", True): self.FOLDED_BOLD,
+                          ("Kerk Light", False): self.FOLDED}):
+            convert._name_fonts_as_installed(document)
+        stroked = [note for note in document.warnings if "no bold" in note]
+        self.assertEqual(len(stroked), 1)
+        self.assertIn("2 bold run(s)", stroked[0])
+
+    def test_a_bold_missing_only_here_is_reported_rather_than_stroked(self):
+        # The family did not fold, so the bold is absent from this machine
+        # rather than from the design, and Affinity may well have it.
+        span = model.Span(text="label", font="Kerk", size_pt=8.0, bold=True)
+        document = self.document(span)
+        with self.naming({("Kerk", True): self.PLAIN}):
+            convert._name_fonts_as_installed(document)
+        self.assertIsNone(span.stroke)
+        self.assertTrue(span.bold)
+
+    def test_the_file_s_own_statement_of_bold_is_kept(self):
+        # `bold` says what Publisher set; `font_style` says what to set it
+        # in. Losing the first would lose the only record of the intent.
+        span = model.Span(text="Predikant:", font="Kerk Light", size_pt=8.04,
+                          bold=True)
+        document = self.document(span)
+        with self.naming({("Kerk Light", True): self.FOLDED_BOLD}):
+            convert._name_fonts_as_installed(document)
+        self.assertTrue(span.bold)
+
+    SHEARED = fontmetrics.Naming(
+        family="Kerk Script", style="Regular", postscript="KerkScript",
+        faux_italic=True,
+    )
+
+    def test_italic_on_a_family_with_none_is_sheared(self):
+        span = model.Span(text="Uw Woord", font="Kerk Script", size_pt=14.0,
+                          italic=True)
+        document = self.document(span)
+        with self.naming({("Kerk Script", False): self.SHEARED}):
+            convert._name_fonts_as_installed(document)
+        # A third of a unit, which is what the reference PDF shears.
+        self.assertAlmostEqual(span.skew, 18.4349, places=4)
+        self.assertEqual(span.font_style, "Regular")
+
+    def test_a_sheared_run_is_not_left_asking_for_an_italic_face(self):
+        # 'Italic' on a family that ships none reaches nothing; the upright
+        # face plus the shear is the whole of what Publisher drew.
+        span = model.Span(text="Uw Woord", font="Kerk Script", size_pt=14.0,
+                          italic=True)
+        document = self.document(span)
+        with self.naming({("Kerk Script", False): self.SHEARED}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(span.font_style, "Regular")
+        self.assertTrue(span.italic)
+
+    def test_a_family_needing_no_shear_keeps_its_font_style_unstated(self):
+        real_italic = fontmetrics.Naming(
+            family="Kerk", style="Italic", postscript="Kerk-Italic"
+        )
+        span = model.Span(text="quote", font="Kerk", size_pt=10.0, italic=True)
+        document = self.document(span)
+        with self.naming({("Kerk", False): real_italic}):
+            convert._name_fonts_as_installed(document)
+        self.assertIsNone(span.font_style)
+        self.assertIsNone(span.skew)
+
+    def test_a_skew_the_run_already_carries_is_not_overwritten(self):
+        span = model.Span(text="Kerkbode", font="Kerk Script", size_pt=40.0,
+                          italic=True, skew=30.0)
+        document = self.document(span)
+        with self.naming({("Kerk Script", False): self.SHEARED}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(span.skew, 30.0)
+
+    def test_the_sheared_runs_are_counted_in_their_own_note(self):
+        spans = [
+            model.Span(text="Uw Woord", font="Kerk Script", size_pt=14.0, italic=True),
+            model.Span(text="is een lamp", font="Kerk Script", size_pt=14.0, italic=True),
+        ]
+        document = self.document(*spans)
+        with self.naming({("Kerk Script", False): self.SHEARED}):
+            convert._name_fonts_as_installed(document)
+        sheared = [note for note in document.warnings if "no italic" in note]
+        self.assertEqual(len(sheared), 1)
+        self.assertIn("2 italic run(s)", sheared[0])
+
+    def test_a_shear_alone_does_not_rename_the_family(self):
+        # Blackadder ITC needs no folding; only its slant has to be drawn.
+        span = model.Span(text="quote", font="Kerk Script", size_pt=14.0,
+                          italic=True)
+        document = self.document(span)
+        with self.naming({("Kerk Script", False): self.SHEARED}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(span.font, "Kerk Script")
+        self.assertEqual([n for n in document.warnings if "renamed" in n], [])
+
+    def test_the_document_no_longer_lists_a_family_that_does_not_exist(self):
+        spans = [
+            model.Span(text="body", font="Kerk", size_pt=10.0),
+            model.Span(text="colophon", font="Kerk Light", size_pt=8.0),
+        ]
+        document = self.document(*spans)
+        with self.naming({("Kerk", False): self.PLAIN,
+                          ("Kerk Light", False): self.FOLDED}):
+            convert._name_fonts_as_installed(document)
+        self.assertEqual(document.fonts, ["Kerk"])
 
 
 if __name__ == "__main__":

@@ -163,7 +163,59 @@ def _cmap_lookup(buf: bytes, offset: int) -> Dict[int, int]:
     raise FontError("no readable unicode cmap")
 
 
+# A face carries two family names, and which one a program reads decides
+# whether it can find the font at all. IDs 1 and 2 are the legacy pair,
+# where a family holds at most four styles, so anything outside regular /
+# bold / italic / bold-italic has to be split off into a family of its own
+# -- 'Calibri Light'. IDs 16 and 17 are the typographic pair, which has no
+# such limit and calls the same file the 'Light' style of 'Calibri'. A face
+# that needs the split states both; one that does not leaves 16 and 17 out.
 _NAME_FAMILY, _NAME_SUBFAMILY = 1, 2
+_NAME_POSTSCRIPT = 6
+_NAME_TYPO_FAMILY, _NAME_TYPO_SUBFAMILY = 16, 17
+
+
+def _win_metrics(buf: bytes, tables: Dict[str, Tuple[int, int]]):
+    """usWinAscent and usWinDescent, or (None, None) where unreadable.
+
+    These two are what Windows adds up to make a line: GDI reports their
+    sum as `tmHeight`. They sit at a fixed offset in every OS/2 version,
+    but the table itself is optional and old ones are short, so both the
+    presence and the length are checked.
+    """
+    found = tables.get("OS/2")
+    if not found:
+        return None, None
+    offset, length = found
+    if length < 78 or offset + 78 > len(buf):
+        return None, None
+    ascent, descent = struct.unpack_from(">HH", buf, offset + 74)
+    if not ascent + descent:
+        return None, None
+    return ascent, descent
+
+
+def _external_leading(buf: bytes, tables: Dict[str, Tuple[int, int]],
+                      win_height: int) -> int:
+    """GDI's `tmExternalLeading` -- the gap it adds outside the line box.
+
+    GDI does not simply pass `hhea`'s line gap through: it gives back
+    whatever of the gap the win metrics have not already swallowed, which
+    is `lineGap - ((usWinAscent + usWinDescent) - (ascender - descender))`,
+    floored at zero. Calibri's comes out at exactly nothing -- its gap of
+    452 units is precisely what its win metrics add over its `hhea` pair --
+    which is why the corpus, being almost all Calibri, cannot tell this
+    term from its absence. Times New Roman's is 87 units, and including it
+    is what puts 12pt of it on the 13.8pt line Word has always set it on.
+    """
+    found = tables.get("hhea")
+    if not found:
+        return 0
+    offset, length = found
+    if length < 12 or offset + 12 > len(buf):
+        return 0
+    ascender, descender, line_gap = struct.unpack_from(">hhh", buf, offset + 4)
+    return max(0, line_gap - (win_height - (ascender - descender)))
 
 
 class Face:
@@ -183,6 +235,16 @@ class Face:
         names = _read_names(buf, self.tables["name"][0])
         self.family = names.get(_NAME_FAMILY)
         self.subfamily = names.get(_NAME_SUBFAMILY) or "Regular"
+        self.postscript = names.get(_NAME_POSTSCRIPT)
+        self.win_ascent, self.win_descent = _win_metrics(buf, self.tables)
+        self.external_leading = (
+            0 if self.win_ascent is None
+            else _external_leading(buf, self.tables, self.win_ascent + self.win_descent)
+        )
+        # Left as None where the face states no split, which is most of
+        # them: absent means 'the legacy names are the whole story'.
+        self.typo_family = names.get(_NAME_TYPO_FAMILY)
+        self.typo_subfamily = names.get(_NAME_TYPO_SUBFAMILY)
         self._num_h_metrics = struct.unpack_from(
             ">H", buf, self.tables["hhea"][0] + 34
         )[0]
@@ -320,6 +382,8 @@ def reset_index() -> None:
     """Forget the installed fonts, so the next lookup walks the disk again."""
     global _index
     _index = None
+    _namings.clear()
+    _line_metrics.clear()
 
 
 def _build_index() -> Dict[str, Dict[str, Tuple[Path, int]]]:
@@ -329,7 +393,15 @@ def _build_index() -> Dict[str, Dict[str, Tuple[Path, int]]]:
     over a few hundred files has to be cheap, and the glyph tables are
     read later, for the one font a headline actually names.
     """
-    found: Dict[str, Dict[str, Tuple[Path, int]]] = {}
+    # A face goes in under both of its namings, so it is found by whichever
+    # one the caller has: Publisher states the legacy pair and a reader
+    # lists the typographic one. But every legacy pair is claimed before
+    # any typographic pair is, in two passes rather than one, because the
+    # files are walked in name order and a single pass would let a font
+    # claim a slot with its recovered name before the font whose own legacy
+    # names *are* that slot is even read.
+    legacy: List[Tuple[str, str, Path, int]] = []
+    typographic: List[Tuple[str, str, Path, int]] = []
     for directory in font_directories():
         if not directory.is_dir():
             continue
@@ -342,10 +414,20 @@ def _build_index() -> Dict[str, Dict[str, Tuple[Path, int]]]:
             except (OSError, FontError, struct.error, ValueError):
                 continue
             for position, face in enumerate(members):
-                if not face.family:
-                    continue
-                by_style = found.setdefault(face.family.casefold(), {})
-                by_style.setdefault(face.subfamily.casefold(), (path, position))
+                if face.family:
+                    legacy.append(
+                        (face.family, face.subfamily, path, position)
+                    )
+                if face.typo_family:
+                    typographic.append(
+                        (face.typo_family, face.typo_subfamily or face.subfamily,
+                         path, position)
+                    )
+
+    found: Dict[str, Dict[str, Tuple[Path, int]]] = {}
+    for family, subfamily, path, position in legacy + typographic:
+        by_style = found.setdefault(family.casefold(), {})
+        by_style.setdefault(subfamily.casefold(), (path, position))
     return found
 
 
@@ -393,6 +475,151 @@ def find_face(family: str, bold: bool, italic: bool) -> Optional[Face]:
         return faces(path.read_bytes())[position]
     except (OSError, FontError, struct.error, IndexError):
         return None
+
+
+@dataclass(frozen=True)
+class Naming:
+    """What to call a face, for a reader that indexes by typographic name.
+
+    Publisher is a GDI application and names a run's font by the legacy
+    family alone, so it writes 'Calibri Light' + bold. Affinity and macOS
+    index by the typographic family, where that file is 'Calibri' + the
+    'Light' style and no family called 'Calibri Light' exists at all --
+    which is what a reader means when it reports the font as missing.
+    """
+
+    #: The family a reader lists the face under.
+    family: str
+    #: The style within that family, as the face names it ('Light Italic').
+    style: str
+    #: The face's own PostScript name, read from the file rather than
+    #: guessed by squeezing the spaces out of the family.
+    postscript: str
+    #: True where the run asked for bold, the family folded into a weight,
+    #: and no bold of that weight exists to set it in. Publisher draws
+    #: those by stroking the outline; see `_FAUX_BOLD_EM` in `convert`.
+    faux_bold: bool = False
+    #: True where the run asked for italic and the family has no italic at
+    #: all. Publisher draws those by shearing the glyphs; see
+    #: `_FAUX_ITALIC_DEGREES` in `convert`.
+    faux_italic: bool = False
+    #: True where this is not the name that was asked for, i.e. where
+    #: passing the file's own name through is what loses the font.
+    folded: bool = False
+
+
+_namings: Dict[Tuple[str, bool, bool], Optional[Naming]] = {}
+
+
+def naming(family: str, bold: bool, italic: bool) -> Optional[Naming]:
+    """How a reader names the face this file asks for, or None if absent.
+
+    None means the font is not installed here, which is not the same as
+    the name being wrong: a name that cannot be checked is passed through
+    as the file states it, because on the machine that has the font it is
+    very likely right.
+    """
+    if not family:
+        return None
+    key = (family.casefold(), bold, italic)
+    if key not in _namings:
+        _namings[key] = _resolve_naming(family, bold, italic)
+    return _namings[key]
+
+
+def _resolve_naming(family: str, bold: bool, italic: bool) -> Optional[Naming]:
+    face = find_face(family, bold, italic)
+    if face is None or not face.family:
+        return None
+    typographic = face.typo_family or face.family
+    style = face.typo_subfamily or face.subfamily
+    # Against the name asked for, not against the face's other name: asking
+    # by the typographic name already is not a name in need of changing.
+    folded = typographic.casefold() != family.casefold()
+    return Naming(
+        family=typographic,
+        style=style,
+        postscript=face.postscript or typographic.replace(" ", ""),
+        # A family that folded has its weight in the style name, so bold on
+        # top of it is a face that was never drawn -- Calibri Light Bold
+        # does not exist in any Calibri release. Where the names agree the
+        # missing bold is only missing here, on this machine, and saying so
+        # is the report's job rather than something to paint over.
+        faux_bold=bold and folded and "bold" not in style.casefold(),
+        # No such caution is needed for the italic: where the corpus asks
+        # for one the family has none anywhere -- Blackadder ITC, Segoe
+        # Script and Mystical Woods each ship a single slant -- and
+        # Publisher's own PDF shears all three rather than substituting.
+        faux_italic=italic and not _is_italic(style),
+        folded=folded,
+    )
+
+
+def _is_italic(style: str) -> bool:
+    folded = style.casefold()
+    return "italic" in folded or "oblique" in folded
+
+
+@dataclass(frozen=True)
+class LineMetrics:
+    """What one line of a face measures, in ems, and where its baseline sits.
+
+    Publisher is a GDI application, and one "space" of its line spacing is
+    the line GDI reports for the face -- `tmHeight` plus
+    `tmExternalLeading`, which is usWinAscent + usWinDescent + whatever of
+    the font's line gap those two have not already taken up. It is not the
+    flat 120% of the type size that InDesign and Affinity both call Auto.
+
+    Calibri's is 1.2207 em, so every line of it is 1.7% tighter in Affinity
+    than Publisher drew it, and a column of forty accumulates half a line
+    of the difference. Measured against Publisher's own PDFs, which agree
+    with this to a hundredth of a point in every case the corpus offers:
+
+    | set as                              | Publisher | 1.2 em |  this |
+    |-------------------------------------|-----------|--------|-------|
+    | 0.85 sp, 10.0008pt Calibri (1336)   |     10.38 |  10.20 | 10.38 |
+    | 0.90 sp, 10.0008pt Calibri (1337)   |     11.00 |  10.80 | 10.99 |
+    | 0.90 sp, 7.9992pt Calibri Light     |      8.80 |   8.64 |  8.79 |
+    | 1 sp, 10.0008pt Calibri (1337 p30)  |     12.20 |  12.00 | 12.21 |
+
+    Every one of those is Calibri, because every multi-line paragraph the
+    corpus sets is: its Arial and Times New Roman are table cells, whose
+    baselines are a row height rather than a leading, and its Segoe Script
+    and Monotype Corsiva are headlines. So the *rule* is measured and the
+    *reach* of it is inferred -- from GDI being what Publisher asks, and
+    from the same rule putting 12pt Times New Roman on the 13.8pt line Word
+    has always set it on. Worth a look on the first non-Calibri paragraph
+    to come through with a stated line spacing.
+    """
+
+    #: Baseline to baseline for one space of spacing.
+    height: float
+    #: Frame top to the first baseline, for one space of spacing. Publisher
+    #: stacks each line as a box of `height` and hangs the baseline this far
+    #: into it, which is why its first baseline moves with the line spacing.
+    #: Nothing writes this yet -- see `backlog.md` on the first baseline.
+    ascent: float
+
+
+def line_metrics(family: Optional[str], bold: bool, italic: bool) -> Optional[LineMetrics]:
+    """One line of the face this run is set in, or None if it cannot be read."""
+    key = ((family or "").casefold(), bold, italic)
+    if key not in _line_metrics:
+        _line_metrics[key] = _resolve_line_metrics(family, bold, italic)
+    return _line_metrics[key]
+
+
+def _resolve_line_metrics(family, bold, italic) -> Optional[LineMetrics]:
+    if not family:
+        return None
+    face = find_face(family, bold, italic)
+    if face is None or face.win_ascent is None:
+        return None
+    total = face.win_ascent + face.win_descent + face.external_leading
+    return LineMetrics(height=total / face.upem, ascent=face.win_ascent / face.upem)
+
+
+_line_metrics: Dict[Tuple[str, bool, bool], Optional[LineMetrics]] = {}
 
 
 # What a headline face averages, for a font this machine cannot read.

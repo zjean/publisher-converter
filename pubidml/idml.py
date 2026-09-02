@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional
 from urllib.parse import quote
 
-from . import imagemeta, model
+from . import fontmetrics, imagemeta, model
 from .units import PT_PER_INCH, fmt
 
 IDPKG = "http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"
@@ -126,11 +126,17 @@ def _language_name(locale: Optional[str]) -> Optional[str]:
     found = _LANGUAGES.get(locale) or _LANGUAGES.get(locale.split("-")[0])
     return found[0] if found else None
 
-# InDesign's Auto leading is 120% of the type size, and that is also what
-# Publisher calls one "space" of line spacing. Equating the two is what
-# makes the most common case right by construction: libmspub omits the
-# property entirely at 1 sp, so single-spaced text is written with no
-# leading at all and picks up Auto -- the same 120%.
+# What one "space" of Publisher line spacing measures, as a multiple of the
+# type size, for a font this machine cannot read.
+#
+# 120% is InDesign's and Affinity's Auto leading, and it used to stand in
+# for Publisher's space as well. It is not: Publisher is a GDI application
+# and its space is GDI's `tmHeight`, the font's own usWinAscent plus
+# usWinDescent, which for Calibri is 1.2207 em. Measured off Publisher's
+# own PDFs -- 1336 and 1337 set their columns at 0.9 spaces of 10.0008pt
+# Calibri and Publisher puts those baselines 11.0pt apart, against the
+# 10.8 this constant gives -- so the font is read where it can be
+# (`fontmetrics.line_metrics`) and this is only the fallback.
 SINGLE_LINE_SPACING = 1.2
 
 # The point size IDML assumes for a run that does not state one.
@@ -804,6 +810,13 @@ class IdmlWriter:
             group = ET.SubElement(
                 root, "FontFamily", {"Self": f"font{index}", "Name": family}
             )
+            # Squeezing the spaces out of the family is a guess, and it is
+            # wrong for most faces that have a style in the name at all:
+            # Calibri's regular is 'Calibri' but its light is 'Calibri-Light'
+            # and Times New Roman's is 'TimesNewRomanPSMT'. Where the font
+            # is installed, the file states its own name; where it is not,
+            # the guess is still the best that can be said.
+            naming = fontmetrics.naming(family, False, False)
             ET.SubElement(
                 group,
                 "Font",
@@ -811,7 +824,9 @@ class IdmlWriter:
                     "Self": f"font{index}_regular",
                     "FontFamily": family,
                     "Name": f"{family} Regular",
-                    "PostScriptName": family.replace(" ", ""),
+                    "PostScriptName": (
+                        naming.postscript if naming else family.replace(" ", "")
+                    ),
                     "Status": "Substituted",
                     "FontStyleName": "Regular",
                     "FontType": "OpenTypeTT",
@@ -1262,6 +1277,71 @@ class IdmlWriter:
             },
         )
 
+    def _first_baseline_lift(self, frame: model.TextFrame) -> float:
+        """How far to lift a frame so its first baseline lands where Publisher puts it.
+
+        Publisher hangs a first baseline `spacing x usWinAscent x size`
+        below the top of the text area -- so it moves with the paragraph's
+        line spacing, 2.4pt on a quarter-space line and 8.6pt on a
+        nine-tenths one. No IDML attribute says that. `FixedHeight` is the
+        shape of the thing and is ruled out twice over, here and in
+        `_emit_table`: Affinity answers it by lifting the frame off its
+        position entirely. `LeadingOffset` is honoured, but it puts the
+        baseline at the *whole* leading, which is `1 / 0.78` of what
+        Publisher wants for Calibri.
+
+        So the offset is bought with geometry instead. `LeadingOffset` puts
+        the baseline a known distance down -- the leading -- and lifting the
+        frame's top by the difference lands it where Publisher draws it.
+        The height grows by the same amount, so the bottom edge stays and
+        the story still runs out where it did.
+
+        Only where all of it is known and nothing else moves: a frame that
+        paints something would visibly shift, one others flow around would
+        drag its wrap with it, one not aligned to its top does not hang its
+        text off the first baseline at all, and a face this machine cannot
+        read has no ascent to aim at. Those keep the reader's own rule.
+        """
+        if frame.first_baseline_from_leading or frame.wrap_text:
+            return 0.0
+        if _VERTICAL_JUSTIFICATION.get(frame.vertical_align, "TopAlign") != "TopAlign":
+            return 0.0
+        if frame.style.fill or frame.style.gradient or frame.style.stroke:
+            return 0.0
+        paragraphs = frame.story.paragraphs
+        if not paragraphs and frame.chain_id:
+            # A chain keeps its text on the head link alone, so a
+            # continuation frame has nothing of its own to read. It takes
+            # the head's setting rather than no lift at all: which
+            # paragraph lands in it is not knowable without laying the
+            # story out, and two columns of one story starting at
+            # different heights is the one error that is obvious on sight.
+            chain = self.doc.text_chains.get(frame.chain_id) or []
+            if chain:
+                paragraphs = chain[0].story.paragraphs
+        if not paragraphs or not paragraphs[0].spans:
+            return 0.0
+        paragraph, span = paragraphs[0], paragraphs[0].spans[0]
+        metrics = fontmetrics.line_metrics(span.font, span.bold, span.italic)
+        if metrics is None or not metrics.height:
+            return 0.0
+
+        size = span.size_pt or DEFAULT_POINT_SIZE
+        leading = _leading_for(paragraph, span)
+        if leading is None:
+            # Left on the reader's Auto, which Affinity resolves at 120% of
+            # the size -- measured off its own export, 12.00pt on 10.0008pt
+            # type -- and that is what `LeadingOffset` will then use.
+            leading = SINGLE_LINE_SPACING * size
+        if paragraph.line_spacing_pt is not None:
+            # An exact spacing is the whole line box, so the baseline sits
+            # at the same share of it that the face states.
+            baseline = paragraph.line_spacing_pt * metrics.ascent / metrics.height
+        else:
+            spacing = paragraph.line_spacing_multiple
+            baseline = (1.0 if spacing is None else spacing) * metrics.ascent * size
+        return max(0.0, leading - baseline)
+
     def _emit_text_frame(
         self,
         spread: ET.Element,
@@ -1278,8 +1358,19 @@ class IdmlWriter:
             story_id = link.story_id
             self_id, previous, following = link.self_id, link.previous, link.following
 
+        # Where the first baseline goes has to be bought with frame height,
+        # because IDML has no way to state it -- see `_first_baseline_lift`.
+        # The lift is taken off the top and given back as height, so the
+        # text sits in exactly the band Publisher gave it and the bottom
+        # edge, which is where the story runs out, does not move.
+        lift = self._first_baseline_lift(frame)
+        placed = (
+            replace(frame, y=frame.y - lift, height=frame.height + lift)
+            if lift else frame
+        )
+
         attributes = self._frame_attributes(
-            frame, page, "$ID/[Normal Text Frame]", self_id, offset_x
+            placed, page, "$ID/[Normal Text Frame]", self_id, offset_x
         )
         attributes.update(
             {
@@ -1291,7 +1382,7 @@ class IdmlWriter:
         )
         element = ET.SubElement(spread, "TextFrame", attributes)
         properties = ET.SubElement(element, "Properties")
-        _rect_path(properties, frame.width, frame.height)
+        _rect_path(properties, placed.width, placed.height)
 
         top, right, bottom, left = frame.padding
         columns = max(1, frame.columns)
@@ -1303,7 +1394,7 @@ class IdmlWriter:
             "InsetSpacing": f"{fmt(top)} {fmt(left)} {fmt(bottom)} {fmt(right)}",
             "AutoSizingType": "Off",
         }
-        if frame.first_baseline_from_leading:
+        if frame.first_baseline_from_leading or lift:
             # The leading, not the font's ascent, decides where the first
             # baseline goes. Left unstated, Affinity hangs it a full
             # usWinAscent below the frame's top -- 0.86 of an em against
@@ -1834,6 +1925,10 @@ class IdmlWriter:
         # Likewise text set at normal spacing, where 0 is the whole of it.
         if span.tracking and abs(span.tracking) > 0.01:
             attributes["Tracking"] = fmt(span.tracking)
+        # The slant of a family with no italic in it, which Publisher draws
+        # by shearing the glyphs and IDML states as an angle.
+        if span.skew and abs(span.skew) > 0.01:
+            attributes["Skew"] = fmt(span.skew)
 
         element = ET.SubElement(parent, "CharacterStyleRange", attributes)
 
@@ -1849,7 +1944,12 @@ class IdmlWriter:
                 properties = ET.SubElement(element, "Properties")
             applied = ET.SubElement(properties, "AppliedFont", {"type": "string"})
             applied.text = span.font
-        if span.bold or span.italic:
+        # A named style wins over the two flags: a family whose weights are
+        # its styles has faces bold and italic cannot name between them, and
+        # where the run is in one of those, saying 'Bold' reaches nothing.
+        if span.font_style:
+            element.set("FontStyle", span.font_style)
+        elif span.bold or span.italic:
             style_name = " ".join(
                 part for part, on in (("Bold", span.bold), ("Italic", span.italic)) if on
             )
@@ -2002,7 +2102,19 @@ def _first_line_leading(
     multiple = paragraph.line_spacing_multiple
     if multiple is None or multiple <= 1.0:
         return leading
-    return SINGLE_LINE_SPACING * (span.size_pt or DEFAULT_POINT_SIZE)
+    return _single_line(span)
+
+
+def _single_line(span: model.Span) -> float:
+    """One space of Publisher line spacing, in points, for this run's face.
+
+    Read from the font where it can be: Publisher's space is the face's own
+    usWinAscent plus usWinDescent, and the 120% in `SINGLE_LINE_SPACING` is
+    a stand-in for a font this machine has not got.
+    """
+    size = span.size_pt or DEFAULT_POINT_SIZE
+    metrics = fontmetrics.line_metrics(span.font, span.bold, span.italic)
+    return (metrics.height if metrics else SINGLE_LINE_SPACING) * size
 
 
 def _leading_for(paragraph: model.Paragraph, span: model.Span) -> Optional[float]:
@@ -2010,14 +2122,21 @@ def _leading_for(paragraph: model.Paragraph, span: model.Span) -> Optional[float
 
     Publisher's exact point spacing maps straight across. Its "spaces"
     figure is proportional, so it is resolved against the run's own type
-    size -- 0.9 spaces of 10pt type is 0.9 x 1.2 x 10 = 10.8pt.
+    size and the face that size is set in -- 0.9 spaces of 10pt Calibri is
+    0.9 x 1.2207 x 10 = 10.99pt, which is what Publisher draws, not the
+    10.8 that 120% gives.
     """
     if paragraph.line_spacing_pt is not None:
         return paragraph.line_spacing_pt
     if paragraph.line_spacing_multiple is None:
+        # Left on the reader's Auto, which is 120% -- 1.7% tighter than
+        # Publisher's space for Calibri. Stating it instead is the obvious
+        # next step and is deliberately not taken here: it would put an
+        # explicit leading on every run of every document, and the row
+        # heights of a table are measured against exactly this (backlog.md
+        # on the tables that sank), so it wants its own measurement first.
         return None
-    size = span.size_pt or DEFAULT_POINT_SIZE
-    return paragraph.line_spacing_multiple * SINGLE_LINE_SPACING * size
+    return paragraph.line_spacing_multiple * _single_line(span)
 
 
 def _flatten(items: List[model.Item]) -> List[model.Item]:

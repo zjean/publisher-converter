@@ -2586,6 +2586,123 @@ def _check_gradient_losses(document: model.Document) -> None:
         )
 
 
+# Publisher has no bold Calibri Light to set a bold run in, so it draws
+# one: the reference PDF strokes the glyph outline as well as filling it
+# (text render mode 2), at 0.22971 pt on 8.04 pt text and 0.27086 pt on
+# 9.48 pt. Those are 1/35 of the em to within a ten-millionth, both of
+# them, which is what makes it a rule rather than two measurements -- and
+# IDML says exactly the same thing as a stroke on the run. Every stroked
+# run in `1336 kerkbode.pdf` is one of these, and every one of them is
+# Calibri Light, which is the other half of the reading: Publisher does
+# this where the weight has no bold, not wherever a bold is missing.
+_FAUX_BOLD_EM = 1.0 / 35.0
+
+# The same trick for the italic a family does not have: rather than leave
+# the run upright, Publisher shears it. Every sheared text matrix in
+# `1336 kerkbode.pdf` states the same third of a unit -- 14 runs of
+# Mystical Woods Rough Script, 3 of Blackadder ITC and 1 of Segoe Script
+# Bold, which between them are every italic the file asks of a family that
+# has none. IDML says a shear as an angle, and a third is 18.43 degrees.
+#
+# The sign is the one part read off the shape of the thing rather than
+# probed: the PDF's shear sits in the matrix term that carries x with y, so
+# a glyph's top goes right and the slant is forward, and forward is what
+# IDML's positive skew is documented to be. Worth confirming in Affinity
+# against the pull quote on page 17 of `1336 kerkbode.pub`, which is the
+# spread on page 12 of `files/experiments/1336 kerkbode.pdf`.
+_FAUX_ITALIC_DEGREES = math.degrees(math.atan(1.0 / 3.0))
+
+
+def _name_fonts_as_installed(document: model.Document) -> None:
+    """Name each run's font, and its style, the way its reader indexes it.
+
+    libmspub reports the legacy family name, which is the one Publisher
+    wrote and the only one Publisher can use: in the legacy naming a family
+    holds four styles at most, so a fifth weight has to become a family of
+    its own. 'Calibri Light' is that -- a family on Windows, and on every
+    other reader the 'Light' style of 'Calibri'. Passing the name through
+    is what makes Affinity report a font as missing while the file sits
+    installed in the fonts folder, and it takes the text's metrics with it.
+
+    The style needs naming for the same reason, and in two more cases than
+    the family does. Publisher states a run's face as the family plus two
+    booleans, so where the face it wants is neither the regular nor a bold
+    or italic of it -- a 'Light', or the one upright face of a family with
+    no italic -- the booleans reach nothing and the style has to be said
+    outright. Publisher itself draws what the booleans then have no face
+    for: a stroke where the weight has no bold, a shear where the family
+    has no italic. Both are written here, from the fractions its own PDF
+    uses.
+
+    Only a name the installed face contradicts is touched. A font this
+    machine does not have is left exactly as the file states it, because
+    unverifiable is not the same as wrong, and on the machine that has the
+    font the file's own name is very likely right.
+    """
+    folded: Dict[str, str] = {}
+    stroked = sheared = 0
+    for span in document.spans():
+        if not span.font:
+            continue
+        naming = fontmetrics.naming(span.font, span.bold, span.italic)
+        if naming is None:
+            continue
+        if not (naming.folded or naming.faux_bold or naming.faux_italic):
+            continue
+        if naming.folded:
+            # Said as family and style rather than joined up, because joined
+            # up they spell the name being replaced and the note then reads
+            # as though nothing had happened.
+            folded[span.font] = f"the {naming.style!r} style of {naming.family!r}"
+            span.font = naming.family
+        # Named outright, because bold and italic between them have no way
+        # of asking for it: neither 'Light' nor the sole upright face of a
+        # family whose italic is a shear is a style those two can reach.
+        span.font_style = naming.style
+        # Neither the stroke nor the shear displaces one the run already
+        # carries: a value the document states outright is not this pass's
+        # to replace, and nothing here is worth losing one for.
+        if naming.faux_bold and span.size_pt and span.stroke is None:
+            span.stroke = span.color or (0, 0, 0)
+            span.stroke_width = span.size_pt * _FAUX_BOLD_EM
+            stroked += 1
+        if naming.faux_italic and span.skew is None:
+            span.skew = _FAUX_ITALIC_DEGREES
+            sheared += 1
+
+    if folded:
+        named = ", ".join(
+            f"{stated!r} as {installed}" for stated, installed in sorted(folded.items())
+        )
+        document.warnings.append(
+            f"{len(folded)} font(s) renamed to the family the reader lists "
+            f"them under — {named}: Publisher names a font by the four-style "
+            f"legacy family, where an extra weight has to be a family of its "
+            f"own, and Affinity and macOS name the same file by its "
+            f"typographic family and style. The file's own name reaches no "
+            f"font at all on this machine, so it is the installed one that is "
+            f"written — check the runs are in the weight the original sets them in"
+        )
+    if stroked:
+        document.warnings.append(
+            f"{stroked} bold run(s) set in a weight that has no bold: Publisher "
+            f"draws these by stroking the glyphs rather than in a bold face, "
+            f"because none exists — Calibri Light Bold is in no Calibri release "
+            f"— and that stroke is what is written, at a 35th of the em, "
+            f"the fraction Publisher's own PDF strokes. Affinity does not "
+            f"synthesise a bold, so a real one would have to be chosen by hand"
+        )
+    if sheared:
+        document.warnings.append(
+            f"{sheared} italic run(s) set in a family that has no italic: "
+            f"Publisher slants these by shearing the glyphs rather than in an "
+            f"italic face, because the family ships none, and that shear is "
+            f"what is written — {_FAUX_ITALIC_DEGREES:.2f}°, the third of a "
+            f"unit Publisher's own PDF shears. Check the slant leans the way "
+            f"the original does"
+        )
+
+
 def _check_unrenderable_paths(document: model.Document) -> None:
     """Report filled paths whose outlines enclose nothing.
 
@@ -2789,6 +2906,18 @@ def _convert(
     # After it, so that the ramps are matched against the box libmspub
     # drew rather than the narrower one a straightened band leaves.
     _restore_floored_turns(document, structure)
+    # After every pass that puts text into the document -- the restored
+    # stories, the filled frames, the tables -- so that each run is named
+    # once. Before the WordArt pass, and deliberately: a headline's type
+    # comes off the shape rather than the text, its glyphs are fitted to
+    # the band the shape states, and a slant would push that ink wider than
+    # the band it was fitted to. What the shear is worth on a headline is
+    # not measured either -- Publisher draws WordArt as outlines, so there
+    # is no text matrix in the PDF to read it off -- and the two faces that
+    # set nearly every headline in the corpus have no italic. So the
+    # headlines keep the older behaviour until a probe says otherwise, and
+    # running this first is what leaves them out.
+    _name_fonts_as_installed(document)
     _recover_wordart(document, structure)
     # After the WordArt pass, which places bands of its own that wrap, and
     # before the writer, which is the only thing that reads the offsets.

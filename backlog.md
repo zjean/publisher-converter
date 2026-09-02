@@ -1029,6 +1029,95 @@ says what to read off it in Affinity.
 
 ---
 
+## 16. Where a frame's first baseline lands — **both done; one step between unequal lines is left**
+
+Publisher's vertical text layout is now measured, all of it, off its own
+PDFs and against Affinity's render of our own output
+(`~/Documents/1337 kerkbode.pdf`, which is the only instrument there is for
+what Affinity actually did).
+
+**Publisher stacks line boxes.** Each line takes a box of `spacing x L x
+size`, where `L` is the line GDI reports for the face — usWinAscent +
+usWinDescent + whatever of the line gap those two have not taken up, 1.2207
+em for Calibri — and the baseline hangs `usWinAscent`'s share into that
+box, 0.78 of it for Calibri. Every baseline on `1336`'s meditatie page
+follows from that to a hundredth of a point, including the two steps that
+look wrong until the model explains them: a step between lines of unequal
+size is `0.22 x h(previous) + 0.78 x h(this)`, which is why the step onto
+the 8pt `(Handelingen 2:17)` is 8.76pt and not its own 8.30.
+
+**The line is fixed** (`fontmetrics.line_metrics`): the flat 120% that
+stood in for `L` was 1.7% tight for Calibri, which a 44-line column turned
+into 8pt of drift. Affinity honours a stated leading exactly — its own
+render puts our 10.800864 lines exactly 10.80 apart — so this half is
+arithmetic and needed no probe.
+
+**The first baseline is not.** Publisher puts it at `spacing x usWinAscent
+x size` below the text-area top, so it *moves with the line spacing*: 2.38pt
+for the 25% blank line the meditatie intro opens with, 8.57pt for the 90%
+body columns. Left unstated, Affinity uses 0.677 em regardless — measured,
+and matching no metric in the file, so not worth deriving. What that costs
+on the meditatie page:
+
+| frame | Publisher | Affinity | out by |
+|---|---|---|---|
+| intro block, first line at 25% | 2.38 | 6.77 | **+4.40** |
+| body columns, first line at 90% | 8.57 | 6.74 | **−1.83** |
+
+No IDML attribute states it. `FirstBaselineOffset="FixedHeight"` is the
+right-shaped tool and is ruled out twice over — `_emit_table` and
+`_emit_text_frame` both carry the measurement, Affinity lifts the frame
+clean off its position. `"LeadingOffset"` works (the WordArt path proves
+it) but puts the baseline at the *whole* leading, which is 1/0.78 of what
+Publisher wants: it would cut the intro's error to +0.67 and grow the
+columns' to +2.42. No fixed font metric can express it either, because the
+target scales with the paragraph's spacing and a metric does not.
+
+**Landed** (`idml.IdmlWriter._first_baseline_lift`): the offset is bought
+with geometry. `LeadingOffset` puts the baseline a known distance down, so
+the frame's top goes up by `leading - baseline` and its height grows by the
+same — the text lands in exactly the band Publisher gave it and the bottom
+edge, where the story runs out, does not move. 242 text frames across the
+corpus move, by 0.67 to 6.64pt, median 2.50.
+
+Only where all of it is known and nothing else moves: a painted frame would
+visibly shift (the cream panel behind the meditatie intro is a separate
+polygon, so that one is safe), a wrap object would drag its boundary, a
+frame not aligned to its top does not hang its text off the first baseline,
+and a face this machine cannot read has no ascent to aim at. A chain's
+continuation frames take the head's setting, since a story's text lives on
+the head alone and two columns starting at different heights is the one
+error that is obvious on sight.
+
+`1336`'s meditatie intro, before and after, against Publisher:
+
+| line | before | after | Publisher |
+|---|---|---|---|
+| blank first line | 69.46 | **65.07** | 65.06 |
+| De laatste dagen: … | 79.66 | **75.45** | 73.82 |
+| (Handelingen 2:17) | 129.46 | **125.25** | 124.10 |
+
+### What the remaining 1.6pt is
+
+A constant, and all of it one step: the **step between two lines of
+unequal height**. Publisher's is `0.22 x h(previous) + 0.78 x h(this)`;
+IDML's is `h(this)`, because its leading is a property of the line it
+lands on and knows nothing of the line above. The intro opens with a
+quarter-space blank line and follows it with an 85% one, so that single
+transition costs `10.377 - 8.766 = 1.61pt`, and every line below inherits
+it. Within uniformly set text the two formulas agree exactly, which is why
+the body columns are now right to a third of a point down their whole
+length.
+
+Fixing it means setting a paragraph's leading to the step rather than to
+its own height — correct only where the paragraph is a single line, since
+otherwise its later lines would inherit the step too. So it needs to know
+whether a paragraph fits on one line, which is the same measurement the
+overflowing verse line needs (`actions.md` on Publisher's letter-space
+fitting). Worth doing as one piece of work, not two.
+
+---
+
 ## Not worth doing
 
 Recorded so they don't get re-investigated:

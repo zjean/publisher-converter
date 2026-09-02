@@ -8,9 +8,10 @@ import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from unittest import mock
 from urllib.parse import unquote, urlsplit
 
-from pubidml import convert, idml, model
+from pubidml import convert, fontmetrics, idml, model
 
 from . import support
 from .support import event
@@ -1392,11 +1393,22 @@ class FirstBaselineTest(unittest.TestCase):
             root = ET.fromstring(archive.read(spread))
             return next(root.iter("TextFramePreference"))
 
-    def test_an_ordinary_frame_leaves_the_first_baseline_to_the_reader(self):
-        # Body text is set at a size its frame has room for, so the
-        # reader's own rule is the right one and stating anything would be
-        # overriding it for no reason.
-        self.assertIsNone(self._preference().get("FirstBaselineOffset"))
+    def test_a_frame_whose_face_can_be_read_places_its_own_first_line(self):
+        # The reader's own rule is not Publisher's: Affinity hangs an
+        # unstated first baseline 0.677 em down whatever the line spacing,
+        # where Publisher hangs it at the spacing's share of the face's
+        # usWinAscent -- 4.4pt apart on the quarter-space line a meditatie
+        # intro opens with. Measured off Affinity's own export of our
+        # output; see backlog.md 16.
+        self.assertEqual(
+            self._preference().get("FirstBaselineOffset"), "LeadingOffset"
+        )
+
+    def test_a_face_this_machine_cannot_read_keeps_the_readers_rule(self):
+        # Nothing to aim at without the font's ascent, and a guess here
+        # would move the type rather than place it.
+        with mock.patch.object(idml.fontmetrics, "line_metrics", lambda *a: None):
+            self.assertIsNone(self._preference().get("FirstBaselineOffset"))
 
     def test_a_frame_that_asks_places_it_on_the_leading(self):
         # A WordArt band is shorter than the ascent the font asks for --
@@ -2095,9 +2107,6 @@ class LanguageOutputTest(unittest.TestCase):
         self.assertEqual(tags[0], "Language")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class MarginPreferenceTest(unittest.TestCase):
     """Publisher's guides, which librevenge has no property for at all."""
@@ -2575,3 +2584,271 @@ class ImageWrapOffsetTest(unittest.TestCase):
             {"Top": "0", "Left": "0", "Bottom": "0", "Right": "0"},
         )
 
+
+
+class FontNamingPartTest(unittest.TestCase):
+    """What the package says a run's font is called.
+
+    IDML binds text to a font by the family name on the run plus a style
+    name, so those two are what a reader resolves; the PostScript name in
+    `Resources/Fonts.xml` is what it records having resolved.
+    """
+
+    def _document(self, **span_kwargs) -> model.Document:
+        frame = model.TextFrame(x=0.0, y=0.0, width=300.0, height=100.0)
+        paragraph = model.Paragraph()
+        paragraph.spans.append(model.Span(text="Predikant:", **span_kwargs))
+        frame.story.paragraphs.append(paragraph)
+        page = model.Page(width=612.0, height=792.0)
+        page.items.append(frame)
+        return model.Document(pages=[page])
+
+    def _run(self, document: model.Document) -> ET.Element:
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        return next(story.iter("CharacterStyleRange"))
+
+    def _fonts(self, document: model.Document) -> ET.Element:
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            return ET.fromstring(archive.read("Resources/Fonts.xml"))
+
+    def test_a_named_style_is_written_as_the_font_style(self):
+        run = self._run(self._document(font="Calibri", font_style="Light",
+                                       size_pt=8.0))
+        self.assertEqual(run.get("FontStyle"), "Light")
+
+    def test_a_named_style_wins_over_the_bold_flag(self):
+        # 'Bold' on a weight that has no bold reaches no face at all, and
+        # the style is the only name that does.
+        run = self._run(self._document(font="Calibri", font_style="Light",
+                                       size_pt=8.0, bold=True))
+        self.assertEqual(run.get("FontStyle"), "Light")
+
+    def test_bold_and_italic_still_name_the_style_where_nothing_else_does(self):
+        run = self._run(self._document(font="Calibri", size_pt=8.0,
+                                       bold=True, italic=True))
+        self.assertEqual(run.get("FontStyle"), "Bold Italic")
+
+    def test_a_run_in_no_particular_style_states_none(self):
+        run = self._run(self._document(font="Calibri", size_pt=8.0))
+        self.assertIsNone(run.get("FontStyle"))
+
+    def test_a_stroked_run_carries_the_stroke_as_weight_and_colour(self):
+        # Publisher's faux bold, which `convert` reads off the point size.
+        run = self._run(self._document(
+            font="Calibri", font_style="Light", size_pt=8.04, bold=True,
+            color=(0, 0, 0), stroke=(0, 0, 0), stroke_width=8.04 / 35,
+        ))
+        self.assertEqual(run.get("StrokeColor"), "Color/C_000000")
+        self.assertAlmostEqual(float(run.get("StrokeWeight")), 0.22971, places=4)
+
+    def test_a_sheared_run_states_its_slant_as_a_skew(self):
+        run = self._run(self._document(
+            font="Mystical Woods", font_style="Rough Script", size_pt=14.0,
+            italic=True, skew=18.4349,
+        ))
+        self.assertAlmostEqual(float(run.get("Skew")), 18.4349, places=4)
+        self.assertEqual(run.get("FontStyle"), "Rough Script")
+
+    def test_an_upright_run_states_no_skew(self):
+        run = self._run(self._document(font="Calibri", size_pt=10.0))
+        self.assertIsNone(run.get("Skew"))
+
+    def test_an_installed_font_states_the_postscript_name_it_carries(self):
+        # Squeezing the spaces out of 'Times New Roman' gives
+        # 'TimesNewRoman'; the font itself says 'TimesNewRomanPSMT'.
+        fonts = self._fonts(self._document(font="Times New Roman", size_pt=10.0))
+        entry = next(fonts.iter("Font"))
+        naming = idml.fontmetrics.naming("Times New Roman", False, False)
+        if naming is None:
+            self.skipTest("Times New Roman is not installed on this machine")
+        self.assertEqual(entry.get("PostScriptName"), naming.postscript)
+
+    def test_a_font_this_machine_lacks_falls_back_to_the_squeezed_name(self):
+        fonts = self._fonts(self._document(font="Kerkbode Sans", size_pt=10.0))
+        entry = next(fonts.iter("Font"))
+        self.assertEqual(entry.get("PostScriptName"), "KerkbodeSans")
+
+
+class LeadingTest(unittest.TestCase):
+    """What one "space" of Publisher line spacing comes out as.
+
+    Publisher's space is the line GDI reports for the face, not the flat
+    120% both InDesign and Affinity call Auto, so it is read from the font.
+    """
+
+    def _leading(self, multiple=None, points=None, size=10.0008,
+                 font="Calibri", height=None):
+        paragraph = model.Paragraph(
+            line_spacing_multiple=multiple, line_spacing_pt=points
+        )
+        span = model.Span(text="x", font=font, size_pt=size)
+        metrics = (
+            fontmetrics.LineMetrics(height=height, ascent=height * 0.78)
+            if height is not None else None
+        )
+        with mock.patch.object(idml.fontmetrics, "line_metrics", lambda *a: metrics):
+            return idml._leading_for(paragraph, span)
+
+    def test_a_space_is_resolved_against_the_faces_own_line(self):
+        # 0.9 spaces of 10.0008pt Calibri: Publisher draws 11.0pt.
+        self.assertAlmostEqual(
+            self._leading(multiple=0.9, height=1.2207), 10.9872, places=3
+        )
+
+    def test_the_flat_120_percent_stands_in_for_a_font_it_cannot_read(self):
+        self.assertAlmostEqual(
+            self._leading(multiple=0.9, height=None), 10.8009, places=3
+        )
+
+    def test_an_exact_point_spacing_maps_straight_across(self):
+        self.assertEqual(self._leading(points=11.5, height=1.2207), 11.5)
+
+    def test_spacing_the_file_does_not_state_is_left_on_auto(self):
+        self.assertIsNone(self._leading(multiple=None, height=1.2207))
+
+    def test_a_run_with_no_size_falls_back_to_the_default(self):
+        self.assertAlmostEqual(
+            self._leading(multiple=1.0, size=None, height=1.2207),
+            1.2207 * idml.DEFAULT_POINT_SIZE, places=3
+        )
+
+    def test_the_leading_reaches_the_package(self):
+        frame = model.TextFrame(x=0.0, y=0.0, width=300.0, height=200.0)
+        paragraph = model.Paragraph(line_spacing_multiple=0.9)
+        paragraph.spans.append(
+            model.Span(text="body copy", font="Calibri", size_pt=10.0008)
+        )
+        frame.story.paragraphs.append(paragraph)
+        page = model.Page(width=612.0, height=792.0)
+        page.items.append(frame)
+        document = model.Document(pages=[page])
+
+        path = write_package(document)
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Stories/"))
+            story = ET.fromstring(archive.read(name))
+        leading = next(story.iter("Leading")).text
+        expected = 0.9 * 10.0008 * (
+            fontmetrics.line_metrics("Calibri", False, False).height
+            if fontmetrics.line_metrics("Calibri", False, False) else idml.SINGLE_LINE_SPACING
+        )
+        self.assertAlmostEqual(float(leading), expected, places=3)
+
+
+class FirstBaselineLiftTest(unittest.TestCase):
+    """The height a frame buys to put its first baseline where Publisher does.
+
+    IDML cannot state the offset, so it is bought with geometry: the top
+    goes up by the difference between the leading Affinity will use and the
+    baseline Publisher draws, and the height grows by the same, so the
+    bottom edge -- where the story runs out -- does not move.
+    """
+
+    # 1.2 em line, baseline 0.8 of the way into it, so a lift is a fifth of
+    # the leading and the numbers stay readable.
+    METRICS = fontmetrics.LineMetrics(height=1.2, ascent=0.96)
+
+    #: Distinguishes "use the default metrics" from "the face is unreadable".
+    UNSET = object()
+
+    def _frame(self, multiple=None, points=None, size=10.0, metrics=UNSET,
+               **frame_kwargs):
+        frame = model.TextFrame(
+            x=20.0, y=100.0, width=200.0, height=80.0, **frame_kwargs
+        )
+        paragraph = model.Paragraph(
+            line_spacing_multiple=multiple, line_spacing_pt=points
+        )
+        paragraph.spans.append(model.Span(text="body", font="Kerk", size_pt=size))
+        frame.story.paragraphs.append(paragraph)
+        writer = idml.IdmlWriter(
+            model.Document(pages=[model.Page()]), image_dir_name="x"
+        )
+        chosen = self.METRICS if metrics is self.UNSET else metrics
+        with mock.patch.object(idml.fontmetrics, "line_metrics", lambda *a: chosen):
+            return writer._first_baseline_lift(frame)
+
+    def test_the_lift_is_the_leading_less_the_baseline_publisher_draws(self):
+        # 0.9 x 1.2 x 10 = 10.8 of leading; Publisher's baseline is
+        # 0.9 x 0.96 x 10 = 8.64. The frame buys the 2.16 between them.
+        self.assertAlmostEqual(self._frame(multiple=0.9), 2.16)
+
+    def test_a_tighter_spacing_needs_a_smaller_lift(self):
+        # Publisher's first baseline moves with the spacing, which is the
+        # whole reason no fixed font metric can state it.
+        self.assertAlmostEqual(self._frame(multiple=0.25), 0.6)
+
+    def test_spacing_the_file_leaves_unstated_uses_the_readers_auto(self):
+        # No leading is written, so Affinity resolves it at 120% of the
+        # size; Publisher's baseline is still one space of the face.
+        self.assertAlmostEqual(self._frame(multiple=None), 1.2 * 10.0 - 9.6)
+
+    def test_an_exact_point_spacing_splits_at_the_faces_own_share(self):
+        # 12pt of line box, and the baseline sits 0.96/1.2 of the way in.
+        self.assertAlmostEqual(self._frame(points=12.0), 12.0 - 9.6)
+
+    def test_a_face_this_machine_cannot_read_is_not_lifted(self):
+        self.assertEqual(self._frame(multiple=0.9, metrics=None), 0.0)
+
+    def test_a_frame_that_paints_something_is_not_moved(self):
+        # It would visibly shift, and the panel behind a meditatie intro is
+        # a separate polygon precisely so this one does not have to.
+        painted = model.GraphicStyle(fill=(255, 255, 255))
+        self.assertEqual(self._frame(multiple=0.9, style=painted), 0.0)
+
+    def test_a_frame_others_flow_around_is_not_moved(self):
+        # Moving it drags its wrap boundary with it.
+        self.assertEqual(self._frame(multiple=0.9, wrap_text=True), 0.0)
+
+    def test_a_frame_not_aligned_to_its_top_is_not_moved(self):
+        # Its text does not hang off the first baseline at all.
+        self.assertEqual(self._frame(multiple=0.9, vertical_align="center"), 0.0)
+
+    def test_a_wordart_band_keeps_the_baseline_it_states_itself(self):
+        self.assertEqual(
+            self._frame(multiple=0.9, first_baseline_from_leading=True), 0.0
+        )
+
+    def test_a_frame_with_no_text_is_not_moved(self):
+        frame = model.TextFrame(x=0.0, y=0.0, width=100.0, height=50.0)
+        writer = idml.IdmlWriter(
+            model.Document(pages=[model.Page()]), image_dir_name="x"
+        )
+        self.assertEqual(writer._first_baseline_lift(frame), 0.0)
+
+    def test_the_bottom_edge_does_not_move(self):
+        document = model.Document(pages=[model.Page(width=600.0, height=800.0)])
+        frame = model.TextFrame(x=20.0, y=100.0, width=200.0, height=80.0)
+        paragraph = model.Paragraph(line_spacing_multiple=0.9)
+        paragraph.spans.append(
+            model.Span(text="body copy", font="Calibri", size_pt=10.0008)
+        )
+        frame.story.paragraphs.append(paragraph)
+        document.pages[0].items.append(frame)
+        with zipfile.ZipFile(write_package(document)) as archive:
+            spread = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            element = next(ET.fromstring(archive.read(spread)).iter("TextFrame"))
+        centre_y = float(element.get("ItemTransform").split()[5])
+        half = max(
+            float(p.get("Anchor").split()[1]) for p in element.iter("PathPointType")
+        )
+        page_top = -800.0 / 2
+        top = centre_y - half - page_top
+        bottom = centre_y + half - page_top
+
+        metrics = fontmetrics.line_metrics("Calibri", False, False)
+        if metrics is None:
+            self.skipTest("Calibri is not installed on this machine")
+        lift = 0.9 * 10.0008 * (metrics.height - metrics.ascent)
+        self.assertGreater(lift, 0.0)
+        # The bottom stays put and the top comes up by exactly the lift.
+        self.assertAlmostEqual(bottom, 180.0, places=4)
+        self.assertAlmostEqual(top, 100.0 - lift, places=4)
+
+
+if __name__ == "__main__":
+    unittest.main()
