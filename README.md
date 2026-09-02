@@ -198,7 +198,7 @@ The same flags apply on macOS; only the default paths differ.
 |---|---|
 | `source` | a `.pub` file, or a folder to search (required) |
 | `-o`, `--output PATH` | output folder; created if absent. Default `converted` beside the working directory |
-| `-j`, `--jobs N` | parallel conversions. Default: Python's thread-pool default, the CPU count plus four, capped at 32 |
+| `-j`, `--jobs N` | parallel conversions. Default: the CPU count plus four, capped at 32 — the same number Python's own thread pool would pick, computed here so the batch knows the size of the pool it built |
 | `--no-recursive` | only the given folder, do not descend into subfolders |
 | `--force` | reconvert files whose `.idml` already exists. Without it, those are skipped, so an interrupted run resumes cheaply |
 | `--report PATH` | where to write the CSV. Default `conversion-report.csv` inside the output folder |
@@ -290,13 +290,21 @@ from the window and one converted from the terminal produce the same
 report format.
 
 Closing the window mid-run cancels at once rather than waiting for the
-files already converting to finish. Nothing incomplete is left behind by
-that: a package is moved into place only once it and its images are both
-whole, the same guarantee the CLI relies on above, so no half-written
-`.idml` can result — at worst a stray temporary file,
-`.<name>.idml.XXXXXX.part`, is left beside the output. Starting the
-program again picks up cheaply — a file whose `.idml` already exists is
-skipped, not reconverted.
+files already converting to finish. No half-written `.idml` can result
+from that: a package is moved into place only once whole, the same
+guarantee the CLI relies on above. Two things can be left behind, both
+harmless but visible — the temporary the interrupted package was being
+built in, `.<name>.idml.XXXXXX.part`, and a partly-filled `_images`
+folder, because the pictures are written beside the destination just
+before the package is moved into place. Both belong to a file that never
+arrived, so the next run converts it again and overwrites them.
+
+That run writes no CSV report at all: the report is written when the
+batch ends, and closing the window does not wait for it. A report from
+an earlier run is left where it was, describing that run rather than
+this one. The next completed run rewrites it from scratch. Starting the
+program again picks up cheaply either way — a file whose `.idml` already
+exists is skipped, not reconverted.
 
 ## Logging
 
