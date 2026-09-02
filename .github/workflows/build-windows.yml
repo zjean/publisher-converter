@@ -353,7 +353,44 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+
+          # A tagged download outlives the page it came from: it sits in a
+          # downloads folder for years, gets copied onto a shared drive,
+          # gets mailed to whoever needs it next. A bare pub2idml.exe says
+          # nothing about which build it is, and two of them in one folder
+          # are indistinguishable -- so the version goes in the filename
+          # rather than only in the release title.
+          #
+          # The rolling prerelease above deliberately keeps its bare
+          # names: the README promises `latest` as a stable URL, and
+          # versioning it would break both that promise and the
+          # `gh release download latest --pattern 'pub2idml.exe'` the
+          # README documents.
+          #
+          # Guarded because the name reaches the filesystem: the tag
+          # filter is only `v*`, so `v1.0/rc1` would arrive here and turn
+          # into a path. Refused loudly rather than silently producing an
+          # asset in the wrong place.
+          case "$TAG" in
+            *[!A-Za-z0-9._-]*)
+              echo "tag '$TAG' has characters that cannot go in a filename" >&2
+              exit 1
+              ;;
+          esac
+
+          cd dist
+          for base in pub2idml pub2idml-gui; do
+            mv "$base.exe" "$base-$TAG.exe"
+            # The bytes are unchanged, so the hash is too -- only the name
+            # it describes moves. Rewritten rather than left behind, so
+            # `sha256sum --check` still works on what was downloaded.
+            hash=$(tr -d '\r' < "$base.exe.sha256" | awk '{print $1}')
+            printf '%s  %s\n' "$hash" "$base-$TAG.exe" > "$base-$TAG.exe.sha256"
+            rm "$base.exe.sha256"
+          done
+          cd ..
+
           gh release create "$TAG" \
-            dist/pub2idml.exe dist/pub2idml.exe.sha256 \
-            dist/pub2idml-gui.exe dist/pub2idml-gui.exe.sha256 \
+            "dist/pub2idml-$TAG.exe" "dist/pub2idml-$TAG.exe.sha256" \
+            "dist/pub2idml-gui-$TAG.exe" "dist/pub2idml-gui-$TAG.exe.sha256" \
             --title "pub2idml $TAG" --generate-notes

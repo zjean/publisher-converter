@@ -160,8 +160,17 @@ For a pinned version rather than a moving target, push a tag and that
 build gets its own permanent release:
 
 ```sh
-git tag v1.0.0 && git push origin v1.0.0
+git tag v1.1.0 && git push origin v1.1.0
 ```
+
+A tagged release names its version in the filename —
+`pub2idml-v1.1.0.exe`, `pub2idml-gui-v1.1.0.exe`, and a `.sha256` beside
+each — because a tagged download outlives the page it came from. It ends
+up in a downloads folder, on a shared drive, forwarded to whoever needs
+it next, and a bare `pub2idml.exe` says nothing about which build it is;
+two of them in one folder cannot be told apart at all. The rolling
+`latest` prerelease keeps the bare names on purpose, so the URL and the
+`gh release download` above stay stable.
 
 Build artifacts are also attached to each Actions run, but they expire
 after 90 days and need a GitHub login — the release assets do not.

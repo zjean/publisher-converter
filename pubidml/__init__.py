@@ -5,4 +5,4 @@ which emits a JSON event stream. This package rebuilds a document model
 from that stream and writes an IDML package that Affinity can open.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
