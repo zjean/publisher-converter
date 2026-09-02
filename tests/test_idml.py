@@ -1393,6 +1393,10 @@ class FirstBaselineTest(unittest.TestCase):
             root = ET.fromstring(archive.read(spread))
             return next(root.iter("TextFramePreference"))
 
+    @unittest.skipIf(
+        idml.fontmetrics.line_metrics("Pristina", False, False) is None,
+        "Pristina is not installed, so there is no ascent to place a line by",
+    )
     def test_a_frame_whose_face_can_be_read_places_its_own_first_line(self):
         # The reader's own rule is not Publisher's: Affinity hangs an
         # unstated first baseline 0.677 em down whatever the line spacing,
@@ -1400,6 +1404,13 @@ class FirstBaselineTest(unittest.TestCase):
         # usWinAscent -- 4.4pt apart on the quarter-space line a meditatie
         # intro opens with. Measured off Affinity's own export of our
         # output; see backlog.md 16.
+        #
+        # The skip above is the same bargain the parser and window tests
+        # strike: this one asserts what happens when the face *can* be
+        # read, so a machine without Pristina has nothing to assert rather
+        # than something to fail. The companion test below covers the
+        # unreadable case by standing in for line_metrics, so the pair
+        # stays complete wherever it runs.
         self.assertEqual(
             self._preference().get("FirstBaselineOffset"), "LeadingOffset"
         )
