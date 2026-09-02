@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import csv
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -94,39 +96,81 @@ def run_batch(
     options: Options,
     workers: Optional[int] = None,
     on_result: Optional[Callable[[convert.Result], None]] = None,
-    cancel=None,
+    cancel: Optional[threading.Event] = None,
 ) -> List[convert.Result]:
-    """Convert every job, calling on_result as each one lands."""
+    """Convert every job, calling on_result as each one lands.
+
+    A set `cancel` event stops further submissions. Work already running is
+    left to finish rather than killed: convert() assembles each package
+    beside its destination and moves it into place only once whole, so
+    letting a conversion end costs a second and leaves the output directory
+    consistent, while killing one would gain nothing.
+    """
     log = logsetup.get_logger("batch")
     results: List[convert.Result] = []
     if not jobs:
         return results
+
+    def stopped() -> bool:
+        return cancel is not None and cancel.is_set()
+
+    def submit(pool, job):
+        source, destination = job
+        return pool.submit(
+            convert.convert, source, destination,
+            codepage=options.codepage,
+            wrap_images=options.wrap_images,
+            facing_pages=options.facing_pages,
+        )
+
+    # A ThreadPoolExecutor runs every job handed to it -- cancelling a
+    # future that has already started is a no-op -- so cancellation can
+    # only prevent jobs not yet submitted. Resolving the worker count
+    # ourselves (rather than reading the pool's private _max_workers) lets
+    # the window be sized from a number we own; the same default the
+    # executor would otherwise pick keeps behaviour unchanged when the
+    # caller leaves workers unset.
+    resolved_workers = workers or min(32, (os.cpu_count() or 1) + 4)
+    width = resolved_workers * 2
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(
-                convert.convert, source, destination,
-                codepage=options.codepage,
-                wrap_images=options.wrap_images,
-                facing_pages=options.facing_pages,
-            ): source
-            for source, destination in jobs
-        }
-        for future in concurrent.futures.as_completed(futures):
-            source = futures[future]
-            try:
-                result = future.result()
-            except BaseException as exc:
-                # convert.convert catches its own failures, so this is
-                # something it could not: record it as a failed row rather
-                # than let it discard the whole batch.
-                log.exception("worker died on %s", source)
-                result = convert.Result(
-                    source=source,
-                    error=f"worker died: {exc.__class__.__name__}: {exc}",
-                )
-            results.append(result)
-            if on_result is not None:
-                on_result(result)
+        pending = iter(jobs)
+        futures = {}
+        for job in pending:
+            if stopped():
+                break
+            futures[submit(pool, job)] = job[0]
+            if len(futures) >= width:
+                break
+
+        while futures:
+            done, _ = concurrent.futures.wait(
+                futures, return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for future in done:
+                source = futures.pop(future)
+                try:
+                    result = future.result()
+                except BaseException as exc:
+                    # convert.convert catches its own failures, so this is
+                    # something it could not: record it as a failed row
+                    # rather than let it discard the whole batch.
+                    log.exception("worker died on %s", source)
+                    result = convert.Result(
+                        source=source,
+                        error=f"worker died: {exc.__class__.__name__}: {exc}",
+                    )
+                results.append(result)
+                if on_result is not None:
+                    on_result(result)
+            while len(futures) < width and not stopped():
+                job = next(pending, None)
+                if job is None:
+                    break
+                futures[submit(pool, job)] = job[0]
+
+    if stopped():
+        log.warning("cancelled after %d of %d file(s)", len(results), len(jobs))
     return results
 
 
