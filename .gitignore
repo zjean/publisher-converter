@@ -23,3 +23,10 @@ __pycache__/
 # private to your working copy, which also means `git clean -fdx` will
 # delete it.
 files/
+
+# Isolated workspaces and the scratch a plan's execution keeps beside it.
+# Both are working state, not source: the worktree is a second checkout of
+# this same repo, and .superpowers holds a run's ledger and review
+# packages, which the git history supersedes once the work lands.
+.claude/worktrees/
+.superpowers/
