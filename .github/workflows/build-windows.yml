@@ -99,6 +99,12 @@ jobs:
           pyinstaller --clean --noconfirm pub2idml.spec
           Get-Item dist\pub2idml.exe | Select-Object Name,Length
 
+      - name: Bundle the windowed build
+        shell: pwsh
+        run: |
+          pyinstaller --clean --noconfirm pub2idml-gui.spec
+          Get-Item dist\pub2idml-gui.exe | Select-Object Name,Length
+
       # The real test: no MSYS2, no Python, no repo on PATH, run from a
       # different drive location. If anything is missing from the bundle
       # this fails here rather than on a user's machine.
@@ -116,6 +122,14 @@ jobs:
           .\pub2idml.exe files -o out --log-file run.log -v
           if ($LASTEXITCODE -ne 0) { throw "conversion exited $LASTEXITCODE" }
           Pop-Location
+
+          # PyInstaller can omit Tcl/Tk and still produce an executable
+          # that starts, so the check has to build a real widget tree.
+          Copy-Item dist\pub2idml-gui.exe $isolated\
+          & "$isolated\pub2idml-gui.exe" --self-test
+          if ($LASTEXITCODE -ne 0) {
+            throw "the windowed build could not create its window ($LASTEXITCODE)"
+          }
 
       - name: Check the output is real
         shell: pwsh
@@ -159,6 +173,10 @@ jobs:
           "$hash  pub2idml.exe" | Out-File -Encoding ascii dist\pub2idml.exe.sha256
           Write-Host "SHA256: $hash"
 
+          $guiHash = (Get-FileHash dist\pub2idml-gui.exe -Algorithm SHA256).Hash.ToLower()
+          "$guiHash  pub2idml-gui.exe" | Out-File -Encoding ascii dist\pub2idml-gui.exe.sha256
+          Write-Host "SHA256: $guiHash"
+
       - name: Upload executable
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -166,6 +184,8 @@ jobs:
           path: |
             dist/pub2idml.exe
             dist/pub2idml.exe.sha256
+            dist/pub2idml-gui.exe
+            dist/pub2idml-gui.exe.sha256
           if-no-files-found: error
 
       # Kept even when earlier steps fail: this is the diagnostic trail.
@@ -210,6 +230,8 @@ jobs:
           ls -l dist/
           test -s dist/pub2idml.exe
           test -s dist/pub2idml.exe.sha256
+          test -s dist/pub2idml-gui.exe
+          test -s dist/pub2idml-gui.exe.sha256
           cd dist
           # The checksum file is written by PowerShell, so it carries CRLF;
           # `sha256sum --check` would look for a filename ending in \r.
@@ -218,6 +240,12 @@ jobs:
           echo "expected $expected"
           echo "actual   $actual"
           test "$expected" = "$actual"
+
+          guiExpected=$(tr -d '\r' < pub2idml-gui.exe.sha256 | awk '{print $1}')
+          guiActual=$(sha256sum pub2idml-gui.exe | awk '{print $1}')
+          echo "expected $guiExpected"
+          echo "actual   $guiActual"
+          test "$guiExpected" = "$guiActual"
 
       # Every green build on main replaces a rolling prerelease, so the
       # newest executable always has a stable download URL. Build artifacts
@@ -259,6 +287,7 @@ jobs:
           fi
           gh release create latest \
             dist/pub2idml.exe dist/pub2idml.exe.sha256 \
+            dist/pub2idml-gui.exe dist/pub2idml-gui.exe.sha256 \
             --prerelease --title "Latest build (main)" --notes-file notes.md \
             --target "$COMMIT"
 
@@ -275,4 +304,5 @@ jobs:
           set -euo pipefail
           gh release create "$TAG" \
             dist/pub2idml.exe dist/pub2idml.exe.sha256 \
+            dist/pub2idml-gui.exe dist/pub2idml-gui.exe.sha256 \
             --title "pub2idml $TAG" --generate-notes

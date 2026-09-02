@@ -384,15 +384,30 @@ def self_test() -> int:
     # silently back at its constants, so the one run that has a real Tcl/Tk
     # is the right place to find out. A frame holding labels asks for far
     # more than a pixel; only a measurement that did not happen gives 1.
+    #
+    # Named readably rather than by the raw wizard.CHOOSE..DONE integer,
+    # and carrying the size it actually measured: a CI log is evidence
+    # for whoever reads it later, not just a claim that something failed.
+    step_names = {
+        wizard.CHOOSE: "choose",
+        wizard.DESTINATION: "destination",
+        wizard.CONVERTING: "converting",
+        wizard.DONE: "done",
+    }
     unmeasured = [
-        step for step, frame in application.steps.items()
+        (step, frame.winfo_reqwidth(), frame.winfo_reqheight())
+        for step, frame in application.steps.items()
         if frame.winfo_reqwidth() <= 1 or frame.winfo_reqheight() <= 1
     ]
     application.destroy()
     if unmeasured:
+        detail = ", ".join(
+            "%s (%dx%d)" % (step_names.get(step, step), width, height)
+            for step, width, height in sorted(unmeasured)
+        )
         print(
-            "self-test: steps %s reported no requested size; the window "
-            "would fall back to its minimum" % sorted(unmeasured),
+            "self-test: steps [%s] reported no requested size; the window "
+            "would fall back to its minimum" % detail,
             file=sys.stderr,
         )
         return 1
