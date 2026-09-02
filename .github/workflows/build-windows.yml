@@ -108,13 +108,23 @@ jobs:
       # The real test: no MSYS2, no Python, no repo on PATH, run from a
       # different drive location. If anything is missing from the bundle
       # this fails here rather than on a user's machine.
-      - name: Verify self-contained (PATH stripped to Windows only)
+      - name: Verify both executables are self-contained (PATH stripped to Windows only)
         shell: pwsh
         run: |
           $isolated = "C:\isolated"
           New-Item -ItemType Directory -Force -Path $isolated | Out-Null
           Copy-Item dist\pub2idml.exe $isolated\
           Copy-Item -Recurse files $isolated\files
+
+          # Copy-Item is a cmdlet: under the default ErrorActionPreference
+          # it fails non-terminatingly and never touches $LASTEXITCODE, so
+          # a missing source file would otherwise fall through silently
+          # into whatever exit code the previous native command left
+          # behind. Checked explicitly rather than relying on the copy to
+          # stop execution.
+          if (-not (Test-Path "$isolated\pub2idml.exe")) {
+            throw "pub2idml.exe is missing from the bundle - the console build produced nothing"
+          }
 
           $env:PATH = "C:\Windows\system32;C:\Windows"
           Push-Location $isolated
@@ -126,6 +136,9 @@ jobs:
           # PyInstaller can omit Tcl/Tk and still produce an executable
           # that starts, so the check has to build a real widget tree.
           Copy-Item dist\pub2idml-gui.exe $isolated\
+          if (-not (Test-Path "$isolated\pub2idml-gui.exe")) {
+            throw "pub2idml-gui.exe is missing from the bundle - the windowed build produced nothing"
+          }
           & "$isolated\pub2idml-gui.exe" --self-test
           if ($LASTEXITCODE -ne 0) {
             throw "the windowed build could not create its window ($LASTEXITCODE)"
