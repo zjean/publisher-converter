@@ -5,11 +5,13 @@ implementation rather than two that drift. Everything here is silent: no
 printing, no argument parsing. What the caller wants to say about progress
 it says through on_result.
 
-The subtleties worth not re-deriving live here. A skipped file still
-becomes a Result, because the CSV is rewritten from scratch on every run
-and a file absent from the results is a file absent from the report. A
-worker that dies in a way convert() could not catch becomes a failed row
-rather than losing the batch.
+The subtleties worth not re-deriving live here. Cancelling can only skip
+work not yet submitted -- a thread pool runs every job it was handed --
+which is why run_batch feeds it through a window rather than all at once.
+A skipped file still becomes a Result, because the CSV is rewritten from
+scratch on every run and a file absent from the results is a file absent
+from the report. A worker that dies in a way convert() could not catch
+becomes a failed row rather than losing the batch.
 """
 
 from __future__ import annotations
@@ -125,15 +127,19 @@ def run_batch(
 
     # A ThreadPoolExecutor runs every job handed to it -- cancelling a
     # future that has already started is a no-op -- so cancellation can
-    # only prevent jobs not yet submitted. Resolving the worker count
-    # ourselves (rather than reading the pool's private _max_workers) lets
-    # the window be sized from a number we own; the same default the
-    # executor would otherwise pick keeps behaviour unchanged when the
-    # caller leaves workers unset.
+    # only prevent jobs not yet submitted. Hence the window: submission
+    # stays a couple of waves ahead of completion instead of handing the
+    # pool the whole batch at once. Resolving the worker count here and
+    # passing that same number to the pool is what makes the window
+    # proportional to the pool's real size, rather than to a guess at what
+    # the executor picked for itself -- and it makes the default the
+    # documentation states true by construction.
     resolved_workers = workers or min(32, (os.cpu_count() or 1) + 4)
     width = resolved_workers * 2
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=resolved_workers
+    ) as pool:
         pending = iter(jobs)
         futures = {}
         for job in pending:

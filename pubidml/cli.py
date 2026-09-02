@@ -53,7 +53,8 @@ def run(argv=None) -> int:
     )
     parser.add_argument(
         "-j", "--jobs", type=int, default=0,
-        help="parallel conversions (default: one per CPU core)",
+        help="parallel conversions (default: the CPU count plus four, "
+             "capped at 32)",
     )
     parser.add_argument(
         "--no-recursive", action="store_true",

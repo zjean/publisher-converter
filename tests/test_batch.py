@@ -7,10 +7,13 @@ three so the GUI can rely on them without a second implementation.
 
 from __future__ import annotations
 
+import concurrent.futures
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pubidml import batch, convert
 
@@ -124,6 +127,28 @@ class CallbackTest(unittest.TestCase):
         )
         self.assertEqual(len(seen), 5)
         self.assertEqual(len(results), 5)
+
+    def test_the_pool_is_built_from_the_worker_count_run_batch_resolved(self):
+        # The submission window is sized from resolved_workers, so the
+        # pool has to be the same size: letting the executor pick its own
+        # default again would make the window proportional to a number
+        # nothing in this file owns, and would leave the documented
+        # default a bet on what CPython happens to compute.
+        convert.convert = lambda source, destination, **kw: convert.Result(
+            source=Path(source), output=Path(destination), pages=1
+        )
+        seen = []
+        real_pool = concurrent.futures.ThreadPoolExecutor
+
+        def recording(*args, **kwargs):
+            seen.append(kwargs.get("max_workers"))
+            return real_pool(*args, **kwargs)
+
+        with mock.patch.object(
+            batch.concurrent.futures, "ThreadPoolExecutor", recording
+        ):
+            batch.run_batch(self._jobs(1), batch.Options())
+        self.assertEqual(seen, [min(32, (os.cpu_count() or 1) + 4)])
 
     def test_a_dead_worker_still_produces_a_failed_result(self):
         def explode(source, destination, **kw):
