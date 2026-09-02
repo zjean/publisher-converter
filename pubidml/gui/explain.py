@@ -44,6 +44,10 @@ _TRANSLATIONS = [
         "dit bestand duurde te lang om te openen",
     ),
     (
+        "pubdump binary missing",
+        "het programma is niet compleet; download het opnieuw",
+    ),
+    (
         "could not launch parser",
         "het omzetprogramma kon niet gestart worden",
     ),

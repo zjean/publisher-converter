@@ -39,6 +39,17 @@ class ErrorTranslationTest(unittest.TestCase):
                     f"no mapping for {message!r}",
                 )
 
+    def test_an_incomplete_installation_says_so_in_dutch(self):
+        # convert.py raises this with the resolved path interpolated, and it is
+        # the one failure a non-technical reader can actually act on: the
+        # English original tells them to run 'make'.
+        dutch = explain.error(
+            "pubdump binary missing at C:\\Program Files\\pub2idml\\bin\\pubdump.exe"
+            " — run 'make' first"
+        )
+        self.assertIn("niet compleet", dutch)
+        self.assertNotIn("make", dutch)
+
     def test_an_unmapped_error_survives_verbatim_with_a_pointer(self):
         # Swallowing an unrecognised diagnostic to protect the Dutch
         # surface would cost the one clue a support conversation has.
