@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import signal
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -420,3 +421,73 @@ class FacingDetailLineTest(unittest.TestCase):
 
     def test_the_flag_reaches_the_csv(self):
         self.assertIn("facing_pages", batch.REPORT_COLUMNS)
+
+
+class InterruptedBatchTest(unittest.TestCase):
+    """Ctrl-C is the case the report exists for.
+
+    Somebody who stops a run of a thousand files stops it because they
+    want to see what came out, and the report is the only place that is
+    written down. An interrupted run that leaves a header row and nothing
+    else is worse than no report at all: it is a file, so it looks like an
+    answer.
+    """
+
+    def setUp(self):
+        self.work = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.source_dir = self.work / "in"
+        self.source_dir.mkdir()
+        for name in ("a.pub", "b.pub", "c.pub", "d.pub", "e.pub"):
+            (self.source_dir / name).write_bytes(b"stub")
+        self.output = self.work / "out"
+
+        original = convert.convert
+
+        def stub(source, destination, **kwargs):
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            Path(destination).write_bytes(b"idml")
+            return convert.Result(
+                source=Path(source), output=Path(destination), pages=1, text_frames=1
+            )
+
+        cli.convert.convert = stub
+        self.addCleanup(setattr, cli.convert, "convert", original)
+
+    def test_the_report_still_lists_what_had_converted(self):
+        # The SIGINT is raised from inside the per-file print because that
+        # is a point in the batch where the main thread is demonstrably
+        # running Python. Raising it from a worker thread reproduces the
+        # bug too, but leaves the row count up to whenever the main thread
+        # next reaches an instruction boundary -- and the row count is the
+        # whole assertion here.
+        printed = cli._print_result
+        calls = {"n": 0}
+
+        def interrupt_on_the_third(result):
+            printed(result)
+            calls["n"] += 1
+            if calls["n"] == 3:
+                signal.raise_signal(signal.SIGINT)
+                # Reached only if something replaced the default SIGINT
+                # handler (unittest's --catchbreak does): still exercise
+                # the path rather than quietly stop testing it.
+                raise KeyboardInterrupt
+
+        cli._print_result = interrupt_on_the_third
+        self.addCleanup(setattr, cli, "_print_result", printed)
+
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = cli.run(
+                [str(self.source_dir), "-o", str(self.output), "--no-log", "-j", "1"]
+            )
+
+        rows = read_report(self.output / "conversion-report.csv")
+        self.assertEqual(
+            len(rows), 3,
+            "the interrupted run threw away the rows it had already collected",
+        )
+        self.assertEqual({r["status"] for r in rows}, {"ok"})
+        self.assertIn("Converted 3/5", out.getvalue())
+        self.assertIn("interrupted: 2 file(s) not attempted", out.getvalue())
+        self.assertEqual(code, 1)

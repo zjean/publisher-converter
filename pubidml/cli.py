@@ -170,12 +170,18 @@ def run(argv=None) -> int:
     skipped = len(results)
     interrupted = False
 
+    # Collected here as each result lands rather than from run_batch's
+    # return value: a Ctrl-C reaching the main thread mid-batch never lets
+    # run_batch return, so `results += run_batch(...)` would discard every
+    # row it had already accumulated and the report below would describe
+    # an interrupted run as having converted nothing.
     def announce(result):
+        results.append(result)
         if not args.quiet:
             _print_result(result)
 
     try:
-        results += batch.run_batch(
+        batch.run_batch(
             jobs,
             options,
             workers=args.jobs if args.jobs > 0 else None,
