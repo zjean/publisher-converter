@@ -62,10 +62,20 @@ class ChooseStep(Step):
         self.status = ttk.Label(self, text="", wraplength=WRAP, justify="left")
         self.status.grid(row=3, column=0, sticky="w", pady=(PAD, 0))
 
+    def refresh(self) -> None:
+        # A restart clears the selection but cannot clear this label by
+        # itself, and "12 Publisher-bestanden gevonden in 3 mappen" over a
+        # Volgende that will not move is the worst pair this wizard can
+        # show: the screen says the files are found and the only way
+        # forward is a dead button with no explanation. Coming Back from
+        # step 2 keeps its selection, so the count survives that.
+        if self.shell.selection is None:
+            self.status.configure(text="")
+
     def _pick_folder(self) -> None:
         chosen = filedialog.askdirectory(title=strings.STEP1_CHOOSE_FOLDER)
         if chosen:
-            self._accept([Path(chosen)])
+            self.accept([Path(chosen)])
 
     def _pick_files(self) -> None:
         chosen = filedialog.askopenfilenames(
@@ -73,9 +83,15 @@ class ChooseStep(Step):
             filetypes=[("Publisher", "*.pub")],
         )
         if chosen:
-            self._accept([Path(p) for p in chosen])
+            self.accept([Path(p) for p in chosen])
 
-    def _accept(self, paths) -> None:
+    def accept(self, paths) -> None:
+        """Take a set of chosen paths, from a dialog or from argv.
+
+        Public because the argv route is a supported gesture: dropping a
+        folder onto the program's icon is how this window expects to be
+        started, and the shell reaches this directly for it.
+        """
         try:
             selection = wizard.scan(paths)
         except wizard.MixedRootsError:
@@ -218,9 +234,10 @@ class DoneStep(Step):
         # the .idml and Affinity only takes the images in once the file
         # is saved as its own format. This is the last screen anyone
         # reads, so it is the only place left to say it.
-        ttk.Label(
+        self.next_hint = ttk.Label(
             self, text=strings.STEP4_NEXT, wraplength=WRAP, justify="left"
-        ).grid(row=3, column=0, sticky="w", pady=(PAD, PAD))
+        )
+        self.next_hint.grid(row=3, column=0, sticky="w", pady=(PAD, PAD))
 
         buttons = ttk.Frame(self)
         buttons.grid(row=4, column=0, sticky="w")

@@ -53,7 +53,18 @@ class _ApplicationCase(unittest.TestCase):
         self.work = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.work, True)
         self.application = app.Application()
-        self.addCleanup(self.application.destroy)
+        # Not addCleanup(destroy) directly: the close-path test destroys
+        # the window itself, and Tk raises rather than shrugging when a
+        # dead root is destroyed a second time -- which would turn a
+        # passing test into an ERROR in teardown.
+        self.addCleanup(self._destroy_quietly, self.application)
+
+    @staticmethod
+    def _destroy_quietly(application):
+        try:
+            application.destroy()
+        except tkinter.TclError:
+            pass
 
     def pub_folder(self, name: str, count: int = 2) -> Path:
         folder = self.work / name
@@ -68,7 +79,7 @@ class ChooseStepTest(_ApplicationCase):
     def test_a_folder_of_pub_files_is_counted_and_lets_the_user_on(self):
         from pubidml.gui import strings, wizard
         folder = self.pub_folder("Archief")
-        self.application.steps[wizard.CHOOSE]._accept([folder])
+        self.application.steps[wizard.CHOOSE].accept([folder])
         self.assertEqual(
             self.application.steps[wizard.CHOOSE].status.cget("text"),
             strings.STEP1_FOUND.format(files=2, folders=1),
@@ -79,7 +90,7 @@ class ChooseStepTest(_ApplicationCase):
         from pubidml.gui import strings, wizard
         empty = self.work / "Leeg"
         empty.mkdir()
-        self.application.steps[wizard.CHOOSE]._accept([empty])
+        self.application.steps[wizard.CHOOSE].accept([empty])
         self.assertEqual(
             self.application.steps[wizard.CHOOSE].status.cget("text"),
             strings.STEP1_NONE,
@@ -97,7 +108,7 @@ class ChooseStepTest(_ApplicationCase):
         original_cwd = os.getcwd()
         try:
             os.chdir(folder)
-            self.application.steps[wizard.CHOOSE]._accept(
+            self.application.steps[wizard.CHOOSE].accept(
                 [Path("0.pub"), folder / "1.pub"]
             )
         finally:
@@ -124,11 +135,59 @@ class NavigationTest(_ApplicationCase):
     def test_back_from_step_two_returns_to_the_choice(self):
         from pubidml.gui import wizard
         folder = self.pub_folder("Heen")
-        self.application.steps[wizard.CHOOSE]._accept([folder])
+        self.application.steps[wizard.CHOOSE].accept([folder])
         self.application._next()
         self.assertEqual(self.application.step, wizard.DESTINATION)
         self.application.back_button.invoke()
         self.assertEqual(self.application.step, wizard.CHOOSE)
+
+    def test_a_restarted_wizard_stops_claiming_it_found_something(self):
+        # The pair this asserts against is a status line reading "2
+        # Publisher-bestanden gevonden" beside a Volgende that will not
+        # move. test_next_still_advances_after_a_restart cannot see it,
+        # because it accepts a new folder before it looks.
+        from pubidml.gui import wizard
+        folder = self.pub_folder("Eerst")
+        self.application.steps[wizard.CHOOSE].accept([folder])
+        self.assertNotEqual(
+            self.application.steps[wizard.CHOOSE].status.cget("text"), ""
+        )
+        self.application.show(wizard.DONE)
+        self.application.restart()
+        self.assertEqual(
+            self.application.steps[wizard.CHOOSE].status.cget("text"), ""
+        )
+        self.assertIsNone(self.application.selection)
+        self.assertFalse(self.application._can_advance)
+
+    def test_coming_back_from_step_two_keeps_the_count(self):
+        # The other half of the rule above: Back still has a selection, so
+        # clearing the status there would lose information the user needs.
+        from pubidml.gui import strings, wizard
+        folder = self.pub_folder("Terug")
+        self.application.steps[wizard.CHOOSE].accept([folder])
+        self.application._next()
+        self.application.back_button.invoke()
+        self.assertEqual(
+            self.application.steps[wizard.CHOOSE].status.cget("text"),
+            strings.STEP1_FOUND.format(files=2, folders=1),
+        )
+
+    def test_only_the_current_step_is_in_the_keyboard_chain(self):
+        # tkraise alone left every frame mapped, so the three hidden
+        # steps' buttons stayed Tab-reachable -- step 4's restart button
+        # could be pressed during step 3. An unmapped frame is out of the
+        # traversal chain; grid_info is empty for one.
+        from pubidml.gui import wizard
+        self.application.show(wizard.CONVERTING)
+        self.assertNotEqual(
+            self.application.steps[wizard.CONVERTING].grid_info(), {}
+        )
+        for hidden in (wizard.CHOOSE, wizard.DESTINATION, wizard.DONE):
+            self.assertEqual(
+                self.application.steps[hidden].grid_info(), {},
+                f"step {hidden} is still mapped behind step 3",
+            )
 
     def test_next_still_advances_after_a_restart(self):
         # Step 4 rebinds Next to close the window; without rebinding it
@@ -137,7 +196,7 @@ class NavigationTest(_ApplicationCase):
         self.application.show(wizard.DONE)
         self.application.restart()
         folder = self.pub_folder("Opnieuw")
-        self.application.steps[wizard.CHOOSE]._accept([folder])
+        self.application.steps[wizard.CHOOSE].accept([folder])
         self.application.next_button.invoke()
         self.assertTrue(self.application.winfo_exists())
         self.assertEqual(self.application.step, wizard.DESTINATION)
@@ -148,7 +207,7 @@ class DestinationStepTest(_ApplicationCase):
     def test_a_destination_inside_the_source_is_explained_and_refused(self):
         from pubidml.gui import strings, wizard
         folder = self.pub_folder("Bron")
-        self.application.steps[wizard.CHOOSE]._accept([folder])
+        self.application.steps[wizard.CHOOSE].accept([folder])
         step = self.application.steps[wizard.DESTINATION]
 
         self.application.destination = folder / "uit"
@@ -165,10 +224,11 @@ class DestinationStepTest(_ApplicationCase):
 class _StubRun:
     """A finished Run, without a thread or a conversion behind it."""
 
-    def __init__(self, failure=None, results=(), cancelled=False):
+    def __init__(self, failure=None, results=(), cancelled=False,
+                 finished=True):
         self.failure = failure
         self.total = 1
-        self.finished = True
+        self.finished = finished
         self.cancelled = cancelled
         self.cancel_calls = 0
         self._results = list(results)
@@ -216,6 +276,28 @@ class DrainTest(_ApplicationCase):
         self.assertEqual(showerror.call_count, 0)
         self.assertEqual(self.application.step, wizard.DONE)
 
+    def test_a_restart_mid_run_leaves_no_tick_to_fire(self):
+        # A tick already booked cannot be recalled, so dropping the Run
+        # can leave exactly one queued callback behind. It must neither
+        # raise nor book another.
+        self.application.run = _StubRun(finished=False)
+        self.application._schedule_drain()
+        self.application.restart()
+        self.assertIsNone(self.application._tick)
+        self.application._drain()            # the tick that got away
+        self.assertIsNone(self.application._tick)
+
+    def test_closing_mid_run_asks_the_batch_to_stop(self):
+        # Cancel and go: the worker is not waited for, because a close
+        # that hangs for a wave of per-file time reads as a crash.
+        run = _StubRun(finished=False)
+        self.application.run = run
+        self.application._schedule_drain()
+        self.application._on_close()
+        self.assertEqual(run.cancel_calls, 1)
+        self.assertIsNone(self.application._tick)
+        self.assertFalse(self.application.winfo_exists())
+
     def test_cancelling_reaches_the_run_and_stops_offering_itself(self):
         from pubidml.gui import strings, wizard
         run = _StubRun()
@@ -227,4 +309,40 @@ class DrainTest(_ApplicationCase):
         self.assertEqual(str(step.cancel_button["state"]), "disabled")
         self.assertEqual(
             step.cancel_button.cget("text"), strings.STEP3_CANCELLING
+        )
+
+
+@unittest.skipIf(tkinter is None, "no usable tkinter on this machine")
+class DoneStepTest(_ApplicationCase):
+    def test_step_four_says_to_keep_the_images_folder(self):
+        # The one way a conversion that reports nothing wrong still loses
+        # its pictures, and step 4 is the only place it is ever said. A
+        # future edit could drop this label with a green suite otherwise.
+        from pubidml.gui import strings, wizard
+        self.application.show(wizard.DONE)
+        self.assertEqual(
+            self.application.steps[wizard.DONE].next_hint.cget("text"),
+            strings.STEP4_NEXT,
+        )
+        self.assertIn("_images", strings.STEP4_NEXT)
+
+    def test_a_file_that_failed_is_named_with_its_reason(self):
+        from pubidml import convert
+        from pubidml.gui import strings, wizard
+        result = convert.Result(
+            source=Path("kapot.pub"),
+            error="not a supported Publisher file (or corrupt)",
+        )
+        self.application.run = _StubRun(results=[result])
+        self.application.show(wizard.DONE)
+        step = self.application.steps[wizard.DONE]
+        shown = step.failures.get("1.0", "end")
+        self.assertIn("kapot.pub", shown)
+        self.assertIn("beschadigd", shown)
+        self.assertEqual(
+            step.counts.cget("text"),
+            "\n".join([
+                strings.STEP4_OK.format(n=0),
+                strings.STEP4_FAILED.format(n=1),
+            ]),
         )

@@ -50,17 +50,21 @@ class Application(tk.Tk):
         self._log = logsetup.get_logger("gui")
         self._can_advance = False
         self._seen = 0
+        # The pending _drain callback's id, so a run that ends -- however
+        # it ends -- takes its own tick down with it rather than leaving
+        # one to fire against a Run that is no longer there.
+        self._tick: Optional[str] = None
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
         container.columnconfigure(0, weight=1)
         container.rowconfigure(0, weight=1)
 
-        # All four frames are built once and stacked, and tkraise picks
-        # which one shows. Building on demand would mean a step's widgets
-        # only exist once someone reached it, and self_test() -- the check
-        # that Tcl/Tk was really bundled -- would then prove nothing about
-        # the three steps it did not reach.
+        # All four frames are built once, into the same cell, and show()
+        # picks which one is mapped. Building on demand would mean a
+        # step's widgets only exist once someone reached it, and
+        # self_test() -- the check that Tcl/Tk was really bundled -- would
+        # then prove nothing about the three steps it did not reach.
         self.steps = {
             wizard.CHOOSE: steps.ChooseStep(container, self),
             wizard.DESTINATION: steps.DestinationStep(container, self),
@@ -81,6 +85,11 @@ class Application(tk.Tk):
         )
         self.next_button.pack(side="right")
 
+        # Closing the window is the one gesture that can arrive at any
+        # moment, including in the middle of a batch, so it gets a handler
+        # rather than Tk's default destroy.
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self.step = wizard.CHOOSE
         self.show(wizard.CHOOSE)
 
@@ -88,7 +97,7 @@ class Application(tk.Tk):
             # A folder dropped on the program's icon. Skipping past step 1
             # is the whole point of the gesture: the choice has been made
             # already, and asking for it again reads as if the drop failed.
-            self.steps[wizard.CHOOSE]._accept(initial)
+            self.steps[wizard.CHOOSE].accept(initial)
             if self.selection is not None:
                 self._next()
 
@@ -110,11 +119,19 @@ class Application(tk.Tk):
     def restart(self) -> None:
         # The old Run is dropped rather than reused: Run.start() refuses a
         # second call and its jobs are fixed at construction, so a second
-        # batch is a second object by design.
+        # batch is a second object by design. Dropping it means the tick
+        # that was draining it has to go first -- otherwise the next one
+        # fires with self.run already None.
+        self._cancel_drain()
         self.selection = None
         self.destination = None
         self.run = None
         self._seen = 0
+        # Kept in step with the button it describes. Both show() and
+        # _next() happen to gate on self.selection instead, so a stale
+        # True is harmless today -- but a flag that means "the previous
+        # lap's destination was fine" is a trap for the next reader.
+        self.set_can_advance(False)
         self.show(wizard.CHOOSE)
 
     def open_output(self) -> None:
@@ -146,6 +163,17 @@ class Application(tk.Tk):
         # what decides whether the run may start at all -- it calls
         # set_can_advance, and the branches below read the answer.
         frame.refresh()
+        # Unmapped, not merely covered. tkraise only reorders the stack,
+        # and every frame stayed mapped underneath -- which left the three
+        # hidden steps' buttons in the Tab traversal chain, reachable and
+        # pressable by keyboard alone. Step 4's restart button pressed
+        # during step 3 was the concrete route, and it dropped the running
+        # batch. grid_remove keeps the widgets (self_test still builds and
+        # lays out all four) while taking them out of the chain.
+        for other_step, other in self.steps.items():
+            if other_step != step:
+                other.grid_remove()
+        frame.grid()
         frame.tkraise()
         self.back_button.configure(
             state="normal" if step in (wizard.DESTINATION,) else "disabled"
@@ -202,10 +230,30 @@ class Application(tk.Tk):
         self._seen = 0
         self.show(wizard.CONVERTING)
         self.run.start()
-        self.after(100, self._drain)
+        self._schedule_drain()
+
+    def _schedule_drain(self) -> None:
+        # Cancel first, so there is never more than one tick outstanding
+        # no matter who books one. Enforcing that here rather than at the
+        # call sites means a future caller cannot get it wrong.
+        self._cancel_drain()
+        self._tick = self.after(100, self._drain)
+
+    def _cancel_drain(self) -> None:
+        if self._tick is not None:
+            self.after_cancel(self._tick)
+            self._tick = None
 
     def _drain(self) -> None:
         """The only place a Result reaches a widget."""
+        # This tick has fired; only the reschedule below books another.
+        self._tick = None
+        if self.run is None:
+            # Belt to _cancel_drain's braces. A tick already in flight
+            # cannot be recalled, so whatever dropped the Run -- a
+            # restart, a close -- can leave exactly one queued callback
+            # behind, and it must not raise into the error dialog.
+            return
         arrived = self.run.poll()
         self._seen += len(arrived)
         if arrived:
@@ -233,7 +281,31 @@ class Application(tk.Tk):
                 )
             self.show(wizard.DONE)
             return
-        self.after(100, self._drain)
+        self._schedule_drain()
+
+    def _on_close(self) -> None:
+        """Closing the window, possibly mid-batch.
+
+        The batch is asked to stop and the window goes straight away; it
+        deliberately does not wait for the worker. Blocking a close for up
+        to two waves of per-file time would look like a hang to exactly
+        the person this wizard was built for, and they would reach for
+        Task Manager.
+
+        Not waiting costs nothing, which is the part worth writing down.
+        convert() assembles each package beside its destination and moves
+        it into place only once whole, so every .idml already written is a
+        complete one -- there is no half-file to clean up. And batch.plan
+        passes over any source whose .idml is already there, so starting
+        the program again resumes from where the close landed instead of
+        converting the whole collection a second time. What is lost is the
+        report row for the files still in flight, and re-running rewrites
+        the report anyway.
+        """
+        if self.run is not None and not self.run.finished:
+            self.run.cancel()
+        self._cancel_drain()
+        self.destroy()
 
 
 def self_test() -> int:
