@@ -38,6 +38,12 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    # A normal run is well under half of this. The ceiling is here because
+    # the isolation test below launches a windowed executable, and a
+    # windowed PyInstaller build that fails on import shows its traceback
+    # in a modal dialog: without a limit that is a job that sits waiting
+    # for a click nobody can give it until GitHub's own six-hour cap.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
@@ -114,6 +120,7 @@ jobs:
           $isolated = "C:\isolated"
           New-Item -ItemType Directory -Force -Path $isolated | Out-Null
           Copy-Item dist\pub2idml.exe $isolated\
+          Copy-Item dist\pub2idml-gui.exe $isolated\
           Copy-Item -Recurse files $isolated\files
 
           # Copy-Item is a cmdlet: under the default ErrorActionPreference
@@ -125,24 +132,48 @@ jobs:
           if (-not (Test-Path "$isolated\pub2idml.exe")) {
             throw "pub2idml.exe is missing from the bundle - the console build produced nothing"
           }
+          if (-not (Test-Path "$isolated\pub2idml-gui.exe")) {
+            throw "pub2idml-gui.exe is missing from the bundle - the windowed build produced nothing"
+          }
 
           $env:PATH = "C:\Windows\system32;C:\Windows"
           Push-Location $isolated
           .\pub2idml.exe --help | Select-Object -First 3
           .\pub2idml.exe files -o out --log-file run.log -v
           if ($LASTEXITCODE -ne 0) { throw "conversion exited $LASTEXITCODE" }
-          Pop-Location
 
           # PyInstaller can omit Tcl/Tk and still produce an executable
           # that starts, so the check has to build a real widget tree.
-          Copy-Item dist\pub2idml-gui.exe $isolated\
-          if (-not (Test-Path "$isolated\pub2idml-gui.exe")) {
-            throw "pub2idml-gui.exe is missing from the bundle - the windowed build produced nothing"
+          #
+          # Start-Process rather than the `&`-plus-$LASTEXITCODE idiom the
+          # rest of this file uses, and not because it reads better.
+          # pub2idml-gui.exe is linked /SUBSYSTEM:WINDOWS: PowerShell waits
+          # for a console application and returns immediately for a
+          # windowed one, so $LASTEXITCODE after `&` would be whatever the
+          # previous native command left behind -- the conversion's 0 just
+          # above -- and this check would pass green whatever the bundle
+          # does. -PassThru hands back a real process object, so the exit
+          # code is the executable's own regardless of subsystem. The
+          # bounded wait covers the other half: a windowed build that dies
+          # on import shows its traceback in a modal dialog (see
+          # disable_windowed_traceback in pub2idml-gui.spec), which without
+          # a timeout is a hang rather than a failure. Two minutes is far
+          # more than building and tearing down a widget tree needs.
+          #
+          # The next windowed check added here should copy this, not the
+          # idiom above: that one is correct for console binaries and
+          # quietly meaningless for these.
+          $gui = Start-Process -FilePath "$isolated\pub2idml-gui.exe" `
+            -ArgumentList "--self-test" -WorkingDirectory $isolated `
+            -NoNewWindow -PassThru
+          if (-not $gui.WaitForExit(120000)) {
+            $gui.Kill()
+            throw "the windowed build hung building its window"
           }
-          & "$isolated\pub2idml-gui.exe" --self-test
-          if ($LASTEXITCODE -ne 0) {
-            throw "the windowed build could not create its window ($LASTEXITCODE)"
+          if ($gui.ExitCode -ne 0) {
+            throw "the windowed build could not create its window ($($gui.ExitCode))"
           }
+          Pop-Location
 
       - name: Check the output is real
         shell: pwsh
