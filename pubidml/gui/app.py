@@ -295,7 +295,7 @@ class Application(tk.Tk):
         self.run = runner.Run(
             jobs,
             batch.Options(),
-            self.destination / REPORT_NAME,
+            self.report_path,
             skipped,
         )
         self._seen = 0
@@ -415,9 +415,9 @@ def self_test() -> int:
 
     Everything it finds goes to the log rather than to stderr. The build
     that runs this is the windowed one, which has no stderr at all --
-    printing to it would raise, and a check whose evidence cannot be read
-    is a check that only says something failed. main() points logging at
-    self_test_log_path() before calling here.
+    printing to it would go nowhere, silently, and a check whose evidence
+    cannot be read is a check that only says something failed. main()
+    points logging at self_test_log_path() before calling here.
     """
     application = Application()
     application.withdraw()
@@ -477,9 +477,10 @@ def main(argv=None) -> int:
         # setup below and the diagnostic is the whole reason the switch
         # exists. The build that runs it is console=False: there is no
         # stdout, and sys.stderr is None rather than a sink, so printing
-        # the evidence would raise instead of quietly going nowhere. A
-        # named file beside the executable is a channel a windowed build
-        # still has, and one the workflow can collect.
+        # the evidence would go nowhere -- silently discarded, not even
+        # an error to notice. A named file beside the executable is a
+        # channel a windowed build still has, and one the workflow can
+        # collect.
         if logsetup.configure(self_test_log_path(), verbose=False) is None:
             # Beside the executable is not always writable -- an
             # installed copy under Program Files is not -- so fall back

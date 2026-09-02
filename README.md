@@ -297,7 +297,9 @@ harmless but visible — the temporary the interrupted package was being
 built in, `.<name>.idml.XXXXXX.part`, and a partly-filled `_images`
 folder, because the pictures are written beside the destination just
 before the package is moved into place. Both belong to a file that never
-arrived, so the next run converts it again and overwrites them.
+arrived, so the next run converts it again and overwrites the `_images`
+folder. The `.part` temporary is not overwritten, because each run picks
+a fresh random name for it — it sits there until deleted by hand.
 
 That run writes no CSV report at all: the report is written when the
 batch ends, and closing the window does not wait for it. A report from

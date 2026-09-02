@@ -478,9 +478,10 @@ class SelfTestEvidenceTest(unittest.TestCase):
 
     The build that runs it is console=False: there is no stdout, and
     sys.stderr is None rather than a sink, so a print() of the diagnostic
-    raised instead of quietly going nowhere -- and the switch returns
-    before the normal logging setup, so there was no log either. What
-    reached CI was a red timeout with nothing in it.
+    went nowhere at all -- silently discarded, not even an error to
+    notice -- and the switch returns before the normal logging setup, so
+    there was no log either. What reached CI was a red timeout with
+    nothing in it.
     """
 
     def setUp(self):

@@ -453,6 +453,7 @@ class InterruptedBatchTest(unittest.TestCase):
         cli.convert.convert = stub
         self.addCleanup(setattr, cli.convert, "convert", original)
 
+    @unittest.removeHandler
     def test_the_report_still_lists_what_had_converted(self):
         # The SIGINT is raised from inside the per-file print because that
         # is a point in the batch where the main thread is demonstrably
@@ -460,6 +461,17 @@ class InterruptedBatchTest(unittest.TestCase):
         # bug too, but leaves the row count up to whenever the main thread
         # next reaches an instruction boundary -- and the row count is the
         # whole assertion here.
+        #
+        # @unittest.removeHandler swaps in the plain default SIGINT
+        # handler for the duration of this test. Without it, a suite run
+        # under --catchbreak has unittest's own handler installed, and
+        # that handler does not raise -- it sets the result's stop flag
+        # and returns, so raise_signal() here would not interrupt cli.run
+        # at all. The batch would finish normally, the assertions below
+        # would still pass, and the suite would quietly stop after this
+        # test with nothing to say that ten-odd tests never ran. The
+        # decorator keeps this test discriminating regardless of how the
+        # suite around it is invoked.
         printed = cli._print_result
         calls = {"n": 0}
 
@@ -468,10 +480,6 @@ class InterruptedBatchTest(unittest.TestCase):
             calls["n"] += 1
             if calls["n"] == 3:
                 signal.raise_signal(signal.SIGINT)
-                # Reached only if something replaced the default SIGINT
-                # handler (unittest's --catchbreak does): still exercise
-                # the path rather than quietly stop testing it.
-                raise KeyboardInterrupt
 
         cli._print_result = interrupt_on_the_third
         self.addCleanup(setattr, cli, "_print_result", printed)
