@@ -16,6 +16,15 @@ main thread without either side reading the other's memory. self._results
 belongs to poll() and the main thread alone -- the worker never reads or
 writes it, which is what makes concatenating "everything seen" safe: it
 happens once, from the worker's own list, in the worker's own thread.
+
+One object is genuinely shared without a lock: the individual Result
+instances themselves cross from the worker's `seen` list into the queue
+and from there into self._results, so the same object sits in both
+places at once. Result is a plain dataclass with mutable `fonts` and
+`warnings` lists, but nothing on either side of the boundary ever writes
+to a Result once convert() has returned it -- both threads only read --
+so the aliasing carries no live race. Freezing Result would close the
+theoretical gap but lives in convert.py, out of this module's reach.
 """
 
 from __future__ import annotations
@@ -63,13 +72,24 @@ class Run:
 
     @property
     def results(self) -> List[convert.Result]:
-        return self._results
+        """Everything poll() has drained.
+
+        Complete only after one more poll() past finished: the worker
+        sets the flag only after the report is written, which is after
+        its last queue.put, so the queue can still hold items put just
+        before the flag went up. A copy, not the accumulator itself, so a
+        caller sorting or mutating what it gets back cannot corrupt
+        poll()'s own list.
+        """
+        return list(self._results)
 
     @property
     def failure(self) -> Optional[BaseException]:
         return self._failure
 
     def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("Run.start() called more than once")
         self._thread = threading.Thread(target=self._work, daemon=True)
         self._thread.start()
 
@@ -88,6 +108,8 @@ class Run:
         return arrived
 
     def _work(self) -> None:
+        log = logsetup.get_logger("gui")
+
         # Owned entirely by this thread: the report is built from this
         # list, never from self._results, so there is nothing here for
         # the main thread's poll() to race against.
@@ -108,7 +130,6 @@ class Run:
             except Exception:
                 log.exception("on_result callback failed for %s", result.source)
 
-        log = logsetup.get_logger("gui")
         try:
             self._run_batch(
                 self._jobs,
@@ -123,12 +144,28 @@ class Run:
             log.exception("the conversion thread died")
             self._failure = exc
         finally:
+            # The report is written from a try whose except catches
+            # Exception, not OSError: a decades-old Publisher collection
+            # can hand back a source path the filesystem itself only
+            # decoded with surrogateescape, and csv writing that under
+            # utf-8 raises UnicodeEncodeError -- a ValueError, not an
+            # OSError. Narrower than Exception would let that (or any
+            # other surprise from write_report) skip straight past
+            # self._done.set() below, and a flag the main loop never sees
+            # go up is exactly the forever-spinner this class exists to
+            # avoid.
             try:
                 everything = self._pre_skipped + seen
                 everything.sort(key=lambda r: str(r.source))
                 batch.write_report(self._report_path, everything)
-            except OSError as exc:
-                log.error(
-                    "could not write report to %s: %s", self._report_path, exc
+            except Exception as exc:
+                log.exception(
+                    "could not write report to %s", self._report_path
                 )
-            self._done.set()
+                # A run_batch death (already recorded above) is the more
+                # informative failure; don't let a report-writing failure
+                # it caused overwrite it.
+                if self._failure is None:
+                    self._failure = exc
+            finally:
+                self._done.set()

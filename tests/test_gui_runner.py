@@ -7,6 +7,7 @@ main loop drains it. No tkinter is needed to test that.
 
 from __future__ import annotations
 
+import csv
 import tempfile
 import time
 import unittest
@@ -35,9 +36,11 @@ class RunTest(unittest.TestCase):
         self.output = self.work / "out"
         self.report = self.output / "conversion-report.csv"
         self.original = convert.convert
+        self.original_write_report = batch.write_report
 
     def tearDown(self):
         convert.convert = self.original
+        batch.write_report = self.original_write_report
 
     def _jobs(self, count):
         return [
@@ -69,6 +72,13 @@ class RunTest(unittest.TestCase):
         self.assertTrue(self.report.exists())
 
     def test_files_skipped_before_the_run_still_reach_the_report(self):
+        # run.results is the main thread's own accumulator (seeded from
+        # pre_skipped in __init__); the CSV is built worker-side from a
+        # separate concatenation (pre_skipped + seen). Under R4 those are
+        # the one place the two could diverge, so this asserts the report
+        # itself -- row present, and in the sort order write_report and
+        # cli.py both use (str(source), ascending) -- not just the count
+        # a caller happens to see through poll().
         convert.convert = lambda source, destination, **kw: convert.Result(
             source=Path(source), output=Path(destination), pages=1
         )
@@ -83,6 +93,41 @@ class RunTest(unittest.TestCase):
         run.start()
         drain(run)
         self.assertEqual(len(run.results), 2)
+
+        with self.report.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        sources = [row["source"] for row in rows]
+        self.assertEqual(
+            sources,
+            [str(self.work / "0.pub"), str(self.work / "old.pub")],
+            "rows are not sorted by source the way write_report expects",
+        )
+        old_row = rows[sources.index(str(self.work / "old.pub"))]
+        self.assertEqual(old_row["status"], "skipped")
+
+    def test_a_broken_report_writer_still_lets_the_run_finish(self):
+        # write_report can raise something other than OSError -- a source
+        # path the filesystem only decoded with surrogateescape turns
+        # into a UnicodeEncodeError (a ValueError) once csv tries to write
+        # it as utf-8, and a decades-old Publisher collection is exactly
+        # where such a name shows up. The finally that sets `finished`
+        # must not sit past that exception, or the main loop polls a dead
+        # thread forever.
+        convert.convert = lambda source, destination, **kw: convert.Result(
+            source=Path(source), output=Path(destination), pages=1
+        )
+
+        def explode(path, results):
+            raise ValueError("surrogate byte in a filename")
+
+        batch.write_report = explode
+        run = runner.Run(self._jobs(1), batch.Options(), self.report, [])
+        run.start()
+        deadline = time.time() + 10
+        while not run.finished and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(run.finished, "a broken report writer must not hang the run")
+        self.assertIsNotNone(run.failure)
 
     def test_a_worker_thread_that_dies_is_reported_not_swallowed(self):
         # A GUI that hangs on a spinner forever is worse than one that
