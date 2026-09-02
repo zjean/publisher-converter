@@ -244,6 +244,58 @@ and its images are both whole, so a run stopped by a full disk or a
 killed process leaves nothing behind — rather than a truncated file that
 every later run would skip as already converted.
 
+### The window: pub2idml-gui.exe
+
+For people who will not open a command line, the same converter also
+ships as `pub2idml-gui.exe` — a four-step Dutch wizard, built by
+`pub2idml-gui.spec` and released alongside `pub2idml.exe`, not instead of
+it. It is a second executable rather than a second mode of the first
+because a windowed Windows executable has no stdout: a program that could
+run either way would leave the command line silent whenever someone ran
+it there.
+
+Drag a folder onto the program's icon, or open it and choose one. That
+icon drop is the only drag gesture the window supports — there is
+deliberately no drag-and-drop *inside* it, because the usual library for
+that is a compiled extension, and this project ships no third-party
+runtime dependencies for either executable. The whole tree is converted
+recursively and its folder structure recreated under the destination,
+which the wizard proposes as a sibling of what was chosen, never a folder
+inside it — a destination inside the source is refused, with an
+explanation, because a later run would otherwise convert its own output
+all over again. Files chosen across two drives, or a UNC path alongside a
+drive letter, are refused too, with a message of their own: without one
+folder both paths share, there is no tree left to mirror into a
+destination.
+
+There is nothing to configure. Code page detection, image wrapping,
+booklet detection, job count and recursion all stay on the automatic
+defaults the [Options](#options) table above documents; anyone who needs
+to change one of them wants `pub2idml.exe`.
+
+The last screen reports what happened in plain Dutch, lists any file
+that could not be read with a Dutch reason in place of the converter's
+own English message, and repeats the one step no converter can do
+unattended:
+
+> Hierna: open elk .idml-bestand in Affinity en kies
+> Bestand → Opslaan als… Laat de map _images ernaast staan
+> totdat u dat gedaan heeft.
+
+The CSV report itself stays English — it is written by the same
+`batch.write_report` the command line calls, so a collection converted
+from the window and one converted from the terminal produce the same
+report format.
+
+Closing the window mid-run cancels at once rather than waiting for the
+files already converting to finish. Nothing incomplete is left behind by
+that: a package is moved into place only once it and its images are both
+whole, the same guarantee the CLI relies on above, so no half-written
+`.idml` can result — at worst a stray temporary file,
+`.<name>.idml.XXXXXX.part`, is left beside the output. Starting the
+program again picks up cheaply — a file whose `.idml` already exists is
+skipped, not reconverted.
+
 ## Logging
 
 Every run writes a diagnostic log, so a batch that misbehaves on another
