@@ -198,7 +198,7 @@ The same flags apply on macOS; only the default paths differ.
 |---|---|
 | `source` | a `.pub` file, or a folder to search (required) |
 | `-o`, `--output PATH` | output folder; created if absent. Default `converted` beside the working directory |
-| `-j`, `--jobs N` | parallel conversions. Default: one per CPU core |
+| `-j`, `--jobs N` | parallel conversions. Default: Python's thread-pool default, the CPU count plus four, capped at 32 |
 | `--no-recursive` | only the given folder, do not descend into subfolders |
 | `--force` | reconvert files whose `.idml` already exists. Without it, those are skipped, so an interrupted run resumes cheaply |
 | `--report PATH` | where to write the CSV. Default `conversion-report.csv` inside the output folder |
