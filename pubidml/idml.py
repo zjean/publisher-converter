@@ -29,6 +29,7 @@ centre rather than a corner.
 
 from __future__ import annotations
 
+import base64
 import math
 import os
 import tempfile
@@ -79,6 +80,10 @@ _IMAGE_TYPE_NAME = {
 # RFC 3986 path characters that need no escaping: the sub-delims plus ':',
 # '@' and the separator. Everything else in a filename gets percent-encoded.
 _URI_PATH_SAFE = "/!$&'()*+,;=:@"
+
+# The folder an embedded picture's link names but nobody writes. See the
+# LinkResourceURI comment in _emit_image for why the attribute is kept.
+_NOTIONAL_IMAGE_DIR = "images"
 
 NO_PARAGRAPH_STYLE = "ParagraphStyle/$ID/[No paragraph style]"
 NO_CHARACTER_STYLE = "CharacterStyle/$ID/[No character style]"
@@ -460,9 +465,22 @@ class _ChainLink(NamedTuple):
 class IdmlWriter:
     """Renders a `model.Document` into an IDML package on disk.
 
-    Images are written alongside the .idml into a sidecar folder and
-    referenced by relative URI, which is how InDesign packages normally
-    carry placed artwork and what Affinity resolves most reliably.
+    Pictures are carried inside the package, base64 in each image's
+    `<Contents>`. That is what `image_dir_name=None` means, and it is the
+    default because the alternative -- a `<name>_images/` folder beside
+    the .idml, linked by relative URI -- was the one way a conversion
+    that reported nothing wrong still lost its artwork: move the .idml
+    without the folder and every picture is gone.
+
+    `research/probe_embedded_image.py` asked Affinity whether it reads
+    embedded bytes at all, with the link deliberately pointed at a file
+    that was not there so a drawn picture could only have come from the
+    contents. It draws them, from base64 (hex it ignores).
+
+    Naming a directory instead restores the linked sidecar exactly as it
+    was. It is kept for the experiments in `research/` that record it,
+    and as the way back should Affinity ever object to the unresolvable
+    URI an embedded image carries.
     """
 
     def __init__(
@@ -482,8 +500,13 @@ class IdmlWriter:
         # frozen: Publisher repeats the same ramp across a document.
         self.gradient_ids: Dict[model.Gradient, str] = {}
         self.fonts: List[str] = []
-        # (relative path, bytes) pairs the caller must write next to the IDML
+        # (relative path, bytes) pairs the caller must write next to the
+        # IDML. Empty when images are embedded, which is why write()'s
+        # sidecar block needs no mode of its own.
         self.image_files: List[tuple] = []
+        # Numbers the pictures. Not len(image_files): embedding appends
+        # nothing there, and the notional filenames must still differ.
+        self._image_count = 0
         self._parts: Dict[str, bytes] = {}
         # id(frame) -> _ChainLink, for the frames of a threaded story. Keyed
         # by identity, not equality: the continuation links of a chain hold no
@@ -1722,9 +1745,15 @@ class IdmlWriter:
         # under the frame's own clipping.
         self._emit_transparency(rectangle, item.style)
 
-        index = len(self.image_files) + 1
-        filename = f"{self.image_dir_name}/image{index}{model.extension_for(item.mime_type)}"
-        self.image_files.append((filename, item.data))
+        self._image_count += 1
+        embed = self.image_dir_name is None
+        directory = _NOTIONAL_IMAGE_DIR if embed else self.image_dir_name
+        filename = (
+            f"{directory}/image{self._image_count}"
+            f"{model.extension_for(item.mime_type)}"
+        )
+        if not embed:
+            self.image_files.append((filename, item.data))
 
         placed_w, placed_h = _content_bounds(
             item.content_rotation, item.width, item.height
@@ -1755,6 +1784,22 @@ class IdmlWriter:
                 "Bottom": fmt(placed_h),
             },
         )
+        if embed:
+            # After Profile and GraphicBounds because that is the order the
+            # probe Affinity accepted was built in, and unwrapped because
+            # that is how it was written there too. Hex was ignored; base64
+            # drew the picture.
+            #
+            # This holds the encoded text -- a third larger again than the
+            # bytes the document model is already holding -- until the part
+            # is serialised. parse_document's docstring puts peak memory at
+            # roughly three times the file size per worker; embedding adds
+            # to that, which matters when sizing the thread pool. In the
+            # package itself it costs nothing: deflate takes base64's
+            # overhead back out, measured at 1.01x the linked package
+            # across 60 MB of corpus artwork.
+            contents = ET.SubElement(image_properties, "Contents")
+            contents.text = base64.b64encode(item.data).decode("ascii")
         ET.SubElement(
             image,
             "Link",
@@ -1768,9 +1813,18 @@ class IdmlWriter:
                 # that already worked — parentheses in particular — are left
                 # byte-for-byte alone and only genuinely illegal characters
                 # (space, '#', '%') are escaped.
+                #
+                # An embedded image keeps the attribute even though nothing
+                # is ever written at that path: the probe pointed it at a
+                # file it knew to be absent and Affinity drew the picture
+                # anyway, so an unresolvable URI is demonstrably fine while
+                # Contents is present, and inventing a shape the probe did
+                # not test would be guessing. If the Resource Manager ever
+                # complains about a missing link, dropping the attribute
+                # entirely is the first thing to try.
                 "LinkResourceURI": "file:" + quote(filename, safe=_URI_PATH_SAFE),
                 "LinkResourceFormat": type_name,
-                "StoredState": "Normal",
+                "StoredState": "Embedded" if embed else "Normal",
                 "LinkClassID": "35906",
                 "LinkClientID": "257",
                 "LinkResourceModified": "false",

@@ -1,4 +1,4 @@
-"""Single-file conversion: .pub in, .idml (plus linked images) out."""
+"""Single-file conversion: .pub in, one self-contained .idml out."""
 
 from __future__ import annotations
 
@@ -2790,8 +2790,8 @@ def convert(
 ) -> Result:
     """Convert one .pub file to an .idml package.
 
-    Linked images are written to a sibling folder named after the output
-    file, so `report.idml` is accompanied by `report_images/`.
+    The package carries its own pictures, so the .idml is the whole
+    deliverable and can be moved anywhere on its own.
 
     `facing_pages` None reads the layout off the file, which is what the
     command line does when neither flag is given; True and False are the
@@ -2941,9 +2941,10 @@ def _convert(
     _check_unnamed_languages(document)
     _check_overset_text(document)
 
+    # No image_dir_name, so the pictures ride inside the package instead
+    # of in a folder beside it that anyone could move away from it.
     writer = idml.IdmlWriter(
         document,
-        image_dir_name=f"{destination.stem}_images",
         wrap_images=wrap_images,
         facing_pages=facing_pages,
     )

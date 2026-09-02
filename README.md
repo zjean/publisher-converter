@@ -31,7 +31,7 @@ LibreOffice uses). Everything above that is ours:
   pubidml/idml.py      Emits the IDML package (ZIP of XML parts).
      │
      ▼
-   .idml  +  <name>_images/
+   .idml               One file. The pictures travel in it.
 ```
 
 Splitting at the JSON boundary keeps all binary-format handling in the
@@ -56,8 +56,7 @@ third-party Python packages at all.
 
 Two things follow, and both are visible elsewhere in this README. One
 manual step survives: open the `.idml` in Affinity and save as its own
-format, which is also what turns the `_images` sidecar into embedded
-artwork. And everything travels through InDesign's document model, so
+format. And everything travels through InDesign's document model, so
 whatever Publisher expresses that IDML cannot — or that Affinity's IDML
 importer does not honour — is lost in the crossing. That is what
 *Known limitations* is a list of. Since Affinity's importer cannot be
@@ -226,14 +225,13 @@ if ($LASTEXITCODE -ne 0) { Write-Host "some files failed - check the report" }
 C:\Converted\
   Newsletters\
     March 2019.idml
-    March 2019_images\        <- keep this next to the .idml
-      image1.jpg
   conversion-report.csv
 ```
 
-Open the `.idml` in Affinity and **save as `.afpub`**. Only then is the
-`_images` folder no longer needed — until that point the `.idml` links to
-it, and moving one without the other loses the pictures.
+One file per Publisher document, pictures included, so an `.idml` can be
+moved, copied or mailed on its own. Open it in Affinity and **save as
+`.afpub`**: that is the step no converter can do for you, because IDML is
+a format Affinity imports rather than edits.
 
 Start with the report, not the files: sort by `status`, deal with
 `failed` and `review` first, and trust the `ok` rows.
@@ -281,8 +279,7 @@ whoever helps them will have — and repeats the one step no converter can
 do unattended:
 
 > Hierna: open elk .idml-bestand in Affinity en kies
-> Bestand → Opslaan als… Laat de map _images ernaast staan
-> totdat u dat gedaan heeft.
+> Bestand → Opslaan als…
 
 The CSV report itself stays English — it is written by the same
 `batch.write_report` the command line calls, so a collection converted
@@ -292,14 +289,12 @@ report format.
 Closing the window mid-run cancels at once rather than waiting for the
 files already converting to finish. No half-written `.idml` can result
 from that: a package is moved into place only once whole, the same
-guarantee the CLI relies on above. Two things can be left behind, both
-harmless but visible — the temporary the interrupted package was being
-built in, `.<name>.idml.XXXXXX.part`, and a partly-filled `_images`
-folder, because the pictures are written beside the destination just
-before the package is moved into place. Both belong to a file that never
-arrived, so the next run converts it again and overwrites the `_images`
-folder. The `.part` temporary is not overwritten, because each run picks
-a fresh random name for it — it sits there until deleted by hand.
+guarantee the CLI relies on above. One thing can be left behind,
+harmless but visible: the temporary the interrupted package was being
+built in, `.<name>.idml.XXXXXX.part`. It belongs to a file that never
+arrived, so the next run converts that file again — but it does not
+overwrite the temporary, because each run picks a fresh random name for
+it. That one sits there until deleted by hand.
 
 That run writes no CSV report at all: the report is written when the
 batch ends, and closing the window does not wait for it. A report from
@@ -380,15 +375,27 @@ Output:
 converted/
   Newsletters/
     March 2019.idml
-    March 2019_images/
-      image1.jpg
   conversion-report.csv
 ```
 
-Images are written to a sidecar folder next to each `.idml` and
-referenced by relative link, which is how InDesign packages normally
-carry placed artwork. **Keep the `_images` folder next to the `.idml`**
-until you have opened it in Affinity and saved as `.afpub`.
+Each `.idml` carries its own pictures, base64 inside the image's
+`<Contents>`, and nothing is written beside it.
+
+It used to be the other way round — a `<name>_images/` folder next to
+each package, linked by relative URI, which is how InDesign packages
+normally carry placed artwork. That was the one way a conversion
+reporting nothing wrong still lost the pictures: move the `.idml` on its
+own and every picture is gone, and no report row says so. IDML never
+required it. `research/probe_embedded_image.py` asked Affinity whether it
+reads an image's own bytes, with the link deliberately pointed at a file
+that was not there so that a drawn picture could only have come from the
+contents; it draws them, from base64 (hex it ignores). Inside the ZIP
+the change costs 1.01× the linked package across 60 MB of corpus
+artwork, because deflate takes base64's overhead back out.
+
+`IdmlWriter(image_dir_name=...)` still writes the sidecar, which is what
+the scripts in `research/` pass and the way back if Affinity ever
+objects to the unresolvable URI an embedded image carries.
 
 ### Optional: EMF vector artwork
 

@@ -768,24 +768,48 @@ class RealFileTest(unittest.TestCase):
                         if name.endswith(".xml"):
                             ET.fromstring(archive.read(name))
 
-    def test_every_declared_image_link_resolves_on_disk(self):
-        from urllib.parse import unquote, urlsplit
+    def _pictures(self, destination: Path):
+        """Every picture the package declares, as (Image, bytes)."""
+        import base64
 
+        found = []
+        with zipfile.ZipFile(destination) as archive:
+            for name in archive.namelist():
+                if not name.startswith("Spreads/"):
+                    continue
+                for image in ET.fromstring(archive.read(name)).iter("Image"):
+                    text = image.findtext("Properties/Contents")
+                    self.assertIsNotNone(
+                        text, f"{name}: an image carries no embedded contents"
+                    )
+                    found.append((image, base64.b64decode(text)))
+        return found
+
+    def test_every_declared_picture_travels_inside_the_package(self):
+        # This used to resolve each LinkResourceURI against the sidecar on
+        # disk. The question it asks is unchanged -- can the package still
+        # produce the artwork it claims? -- but the answer now has to be
+        # inside the file, because that is where the bytes went.
         for source in sorted(SAMPLES.glob("*.pub")):
             with self.subTest(source=source.name):
                 result, destination = self.convert_one(source)
                 self.assertTrue(result.ok, result.error)
-                with zipfile.ZipFile(destination) as archive:
-                    for name in archive.namelist():
-                        if not name.startswith("Spreads/"):
-                            continue
-                        root = ET.fromstring(archive.read(name))
-                        for link in root.iter("Link"):
-                            uri = link.get("LinkResourceURI")
-                            target = destination.parent / unquote(urlsplit(uri).path)
-                            self.assertTrue(target.exists(), f"{uri} -> {target}")
+                for image, payload in self._pictures(destination):
+                    self.assertTrue(payload, "an embedded picture is empty")
+                    self.assertEqual(
+                        image.find("Link").get("StoredState"), "Embedded"
+                    )
+                self.assertEqual(
+                    [p.name for p in destination.parent.iterdir()],
+                    [destination.name],
+                    "a conversion wrote something beside the package",
+                )
 
     def test_a_filename_with_awkward_characters_survives_end_to_end(self):
+        # '#' and '%' in the output name once broke the link to the
+        # sidecar. Nothing outside the package is named after the file any
+        # more, so what is left to check is that such a name converts at
+        # all and arrives with its artwork.
         source = next(iter(sorted(SAMPLES.glob("*.pub"))), None)
         self.assertIsNotNone(source)
         work = Path(tempfile.mkdtemp())
@@ -794,17 +818,8 @@ class RealFileTest(unittest.TestCase):
 
         result, destination = self.convert_one(awkward)
         self.assertTrue(result.ok, result.error)
-
-        from urllib.parse import unquote, urlsplit
-
-        with zipfile.ZipFile(destination) as archive:
-            for name in archive.namelist():
-                if not name.startswith("Spreads/"):
-                    continue
-                for link in ET.fromstring(archive.read(name)).iter("Link"):
-                    uri = link.get("LinkResourceURI")
-                    target = destination.parent / unquote(urlsplit(uri).path)
-                    self.assertTrue(target.exists(), f"{uri} -> {target}")
+        for _image, payload in self._pictures(destination):
+            self.assertTrue(payload, "an embedded picture is empty")
 
     def test_hostile_corpus_files_produce_clean_results_not_tracebacks(self):
         # Two of the three libmspub regression files are rejected outright;

@@ -601,17 +601,23 @@ class SelfTestEvidenceTest(unittest.TestCase):
 
 @unittest.skipIf(tkinter is None, _NO_TK)
 class DoneStepTest(_ApplicationCase):
-    def test_step_four_says_to_keep_the_images_folder(self):
-        # The one way a conversion that reports nothing wrong still loses
-        # its pictures, and step 4 is the only place it is ever said. A
-        # future edit could drop this label with a green suite otherwise.
+    def test_step_four_says_to_save_the_file_in_affinity(self):
+        # An .idml is an interchange format Affinity imports rather than
+        # edits, so the reader's work is not safe until it is saved as an
+        # Affinity document -- and step 4 is the only place that is ever
+        # said. A future edit could drop this label with a green suite
+        # otherwise.
         from pubidml.gui import strings, wizard
         self.application.show(wizard.DONE)
         self.assertEqual(
             self.application.steps[wizard.DONE].next_hint.cget("text"),
             strings.STEP4_NEXT,
         )
-        self.assertIn("_images", strings.STEP4_NEXT)
+        self.assertIn("Opslaan als", strings.STEP4_NEXT)
+        # The pictures travel inside the package now, so the sentence that
+        # used to tell the reader to keep a folder beside the .idml would
+        # be describing something that no longer exists.
+        self.assertNotIn("_images", strings.STEP4_NEXT)
 
     def test_a_file_that_failed_is_named_with_its_reason(self):
         from pubidml import convert

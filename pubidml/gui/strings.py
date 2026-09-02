@@ -58,8 +58,7 @@ STEP4_FAILED = "{n} konden niet gelezen worden"
 STEP4_SKIPPED = "{n} overgeslagen (waren al omgezet)"
 STEP4_NEXT = (
     "Hierna: open elk .idml-bestand in Affinity en kies\n"
-    "Bestand → Opslaan als… Laat de map _images ernaast staan\n"
-    "totdat u dat gedaan heeft."
+    "Bestand → Opslaan als…"
 )
 STEP4_OPEN_FOLDER = "Map openen"
 STEP4_OPEN_REPORT = "Rapport openen"

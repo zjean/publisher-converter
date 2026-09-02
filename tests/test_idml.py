@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import math
 import tempfile
 import unittest
@@ -289,6 +290,98 @@ class ImageTypeTest(unittest.TestCase):
                     root = ET.fromstring(archive.read(spread))
                 image = next(root.iter("Image"))
                 self.assertEqual(image.get("ImageTypeName"), expected)
+
+
+class EmbeddedImageTest(unittest.TestCase):
+    """A package that carries its pictures cannot be separated from them.
+
+    The sidecar was the one way a conversion reporting nothing wrong
+    still lost its artwork: move the .idml without the folder and every
+    picture is gone. `research/probe_embedded_image.py` established that
+    Affinity draws an image from base64 `<Contents>` even when the link
+    beside it points at a file that is not there, so these assert the
+    shape that probe proved rather than a plausible-looking one.
+    """
+
+    def _spread(self, path: Path) -> ET.Element:
+        with zipfile.ZipFile(path) as archive:
+            name = next(n for n in archive.namelist() if n.startswith("Spreads/"))
+            return ET.fromstring(archive.read(name))
+
+    def _embedded(self, name: str = "doc") -> Path:
+        root = Path(tempfile.mkdtemp())
+        destination = root / f"{name}.idml"
+        idml.IdmlWriter(image_document()).write(destination)
+        return destination
+
+    def test_the_picture_travels_inside_the_package(self):
+        image = next(self._spread(self._embedded()).iter("Image"))
+        contents = image.find("Properties/Contents")
+        self.assertIsNotNone(contents, "no Contents element was written")
+        # Exactly the bytes that went in: a picture that decodes to
+        # something else is a picture nobody would notice was wrong.
+        self.assertEqual(base64.b64decode(contents.text), b"hello")
+
+    def test_the_link_says_the_bytes_are_where_affinity_should_look(self):
+        # Affinity reads Contents only when told the image is embedded;
+        # left at "Normal" it follows the link and finds nothing.
+        link = next(self._spread(self._embedded()).iter("Link"))
+        self.assertEqual(link.get("StoredState"), "Embedded")
+
+    def test_the_base64_is_one_unbroken_run(self):
+        # The probe wrote it unwrapped and Affinity accepted that; line
+        # breaks are untested and there is no reason to introduce them.
+        text = next(self._spread(self._embedded()).iter("Image")).findtext(
+            "Properties/Contents"
+        )
+        self.assertNotIn("\n", text)
+        self.assertEqual(text, text.strip())
+
+    def test_nothing_is_left_beside_the_idml(self):
+        destination = self._embedded(name="Newsletter #3")
+        self.assertEqual(
+            [p.name for p in destination.parent.iterdir()],
+            [destination.name],
+            "something other than the package was written to the output folder",
+        )
+
+    def test_several_pictures_each_carry_their_own_bytes(self):
+        # The filenames used to be numbered off the sidecar list, which
+        # embedding never appends to; two images sharing a number would
+        # go unnoticed while the artwork still looked right.
+        document = image_document()
+        document.pages[0].items.append(
+            model.Image(data=b"second", mime_type="image/png",
+                        x=0.0, y=0.0, width=72.0, height=72.0)
+        )
+        root = Path(tempfile.mkdtemp())
+        destination = root / "doc.idml"
+        idml.IdmlWriter(document).write(destination)
+        spread = self._spread(destination)
+        payloads = [
+            base64.b64decode(i.findtext("Properties/Contents"))
+            for i in spread.iter("Image")
+        ]
+        self.assertEqual(payloads, [b"hello", b"second"])
+        uris = [link.get("LinkResourceURI") for link in spread.iter("Link")]
+        self.assertEqual(len(set(uris)), 2, uris)
+
+    def test_naming_a_folder_still_links_exactly_as_it_used_to(self):
+        # The escape hatch, should Affinity ever object to the
+        # unresolvable URI an embedded image carries. The research
+        # scripts pass image_dir_name too, and are records of past
+        # experiments that must keep running.
+        root = Path(tempfile.mkdtemp())
+        destination = root / "doc.idml"
+        idml.IdmlWriter(image_document(), image_dir_name="doc_images").write(
+            destination
+        )
+        image = next(self._spread(destination).iter("Image"))
+        self.assertIsNone(image.find("Properties/Contents"))
+        link = image.find("Link")
+        self.assertEqual(link.get("StoredState"), "Normal")
+        target = root / unquote(urlsplit(link.get("LinkResourceURI")).path)
+        self.assertEqual(target.read_bytes(), b"hello")
 
 
 class RotationSignTest(unittest.TestCase):
