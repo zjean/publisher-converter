@@ -173,6 +173,42 @@ class NavigationTest(_ApplicationCase):
             strings.STEP1_FOUND.format(files=2, folders=1),
         )
 
+    def test_the_x_button_goes_through_the_close_handler(self):
+        # Calling _on_close() in a test proves nothing about the X button:
+        # without this, deleting the protocol registration leaves every
+        # test green while the window silently reverts to Tk's default
+        # destroy and R13 reopens with no signal at all.
+        self.assertTrue(
+            self.application.protocol("WM_DELETE_WINDOW"),
+            "the X button is not bound to the close handler",
+        )
+
+    def test_sluiten_and_the_x_button_take_the_same_way_out(self):
+        from pubidml.gui import app, wizard
+        # Patched before the step is shown, because show() binds a bound
+        # method: patching afterwards would leave the button holding the
+        # real one and the assertion would be about nothing.
+        with mock.patch.object(app.Application, "_on_close") as on_close:
+            self.application.show(wizard.DONE)
+            self.application.next_button.invoke()
+        self.assertEqual(on_close.call_count, 1)
+
+    def test_the_window_is_floored_at_the_roomiest_step(self):
+        # Only one frame is mapped, so the window would otherwise grow
+        # entering the tallest step and shrink leaving it.
+        from pubidml.gui import app, wizard
+        tallest = max(
+            frame.winfo_reqheight()
+            for frame in self.application.steps.values()
+        )
+        widest = max(
+            frame.winfo_reqwidth()
+            for frame in self.application.steps.values()
+        )
+        floor_width, floor_height = self.application.minsize()
+        self.assertGreaterEqual(floor_width, max(app.MIN_WIDTH, widest))
+        self.assertGreaterEqual(floor_height, max(app.MIN_HEIGHT, tallest))
+
     def test_only_the_current_step_is_in_the_keyboard_chain(self):
         # tkraise alone left every frame mapped, so the three hidden
         # steps' buttons stayed Tab-reachable -- step 4's restart button
@@ -225,18 +261,21 @@ class _StubRun:
     """A finished Run, without a thread or a conversion behind it."""
 
     def __init__(self, failure=None, results=(), cancelled=False,
-                 finished=True):
+                 finished=True, arriving=(), total=1):
         self.failure = failure
-        self.total = 1
+        self.total = total
         self.finished = finished
         self.cancelled = cancelled
         self.cancel_calls = 0
         self._results = list(results)
+        self._arriving = list(arriving)
         self.polls = 0
 
     def poll(self):
         self.polls += 1
-        return []
+        arrived, self._arriving = self._arriving, []
+        self._results.extend(arrived)
+        return arrived
 
     @property
     def results(self):
@@ -276,6 +315,50 @@ class DrainTest(_ApplicationCase):
         self.assertEqual(showerror.call_count, 0)
         self.assertEqual(self.application.step, wizard.DONE)
 
+    def test_a_run_still_going_books_another_tick(self):
+        # Without this, dropping the reschedule leaves every test green
+        # and ships a wizard that freezes on step 3 after 100ms -- the
+        # single worst outcome available, since the batch keeps running
+        # and the window never says another word.
+        from pubidml.gui import wizard
+        self.application.run = _StubRun(finished=False)
+        self.application.show(wizard.CONVERTING)
+        self.application._drain()
+        self.assertIsNotNone(self.application._tick)
+        self.assertEqual(self.application.step, wizard.CONVERTING)
+
+    def test_a_result_that_lands_moves_the_progress_line(self):
+        from pubidml import convert
+        from pubidml.gui import strings, wizard
+        result = convert.Result(
+            source=Path("een.pub"), output=Path("een.idml"),
+            pages=1, text_frames=1,
+        )
+        self.application.run = _StubRun(
+            finished=False, arriving=[result], total=2
+        )
+        self.application.show(wizard.CONVERTING)
+        self.application._drain()
+        step = self.application.steps[wizard.CONVERTING]
+        self.assertEqual(
+            step.count.cget("text"),
+            strings.STEP3_PROGRESS.format(done=1, total=2),
+        )
+        self.assertEqual(step.current.cget("text"), "een.pub")
+
+    def test_booking_a_tick_cancels_the_one_already_out(self):
+        # The invariant _schedule_drain exists to hold. Nothing else
+        # reaches it with a tick outstanding, so without this test the
+        # cancel-before-book could be deleted in silence.
+        from pubidml.gui import app
+        self.application.run = _StubRun(finished=False)
+        self.application._schedule_drain()
+        first = self.application._tick
+        with mock.patch.object(app.Application, "after_cancel") as cancel:
+            self.application._schedule_drain()
+        cancel.assert_called_once_with(first)
+        self.assertNotEqual(self.application._tick, first)
+
     def test_a_restart_mid_run_leaves_no_tick_to_fire(self):
         # A tick already booked cannot be recalled, so dropping the Run
         # can leave exactly one queued callback behind. It must neither
@@ -290,13 +373,34 @@ class DrainTest(_ApplicationCase):
     def test_closing_mid_run_asks_the_batch_to_stop(self):
         # Cancel and go: the worker is not waited for, because a close
         # that hangs for a wave of per-file time reads as a crash.
+        #
+        # destroy is asserted rather than performed. Tk swaps its whole
+        # command table for the dead-app handler once the last main window
+        # goes, so any call after a real destroy -- winfo_exists very much
+        # included -- raises TclError. Asking the window whether it still
+        # exists is the one question it can no longer answer, so this used
+        # to be the very bug it was written to catch.
+        from pubidml.gui import app
         run = _StubRun(finished=False)
         self.application.run = run
         self.application._schedule_drain()
-        self.application._on_close()
+        with mock.patch.object(app.Application, "destroy") as destroy:
+            self.application._on_close()
+        self.assertEqual(destroy.call_count, 1)
         self.assertEqual(run.cancel_calls, 1)
         self.assertIsNone(self.application._tick)
-        self.assertFalse(self.application.winfo_exists())
+
+    def test_the_close_handler_really_takes_the_window_down(self):
+        # The mocked test above proves _on_close *calls* destroy. It
+        # cannot prove the call lands, so this one does it for real -- and
+        # then asks the only way Tk still allows: once the last main
+        # window goes, Tk swaps its command table for the dead-app
+        # handler, so every further call raises instead of answering.
+        # That is also what makes the teardown guard necessary, so this
+        # test is what keeps the guard exercised.
+        self.application._on_close()
+        with self.assertRaises(tkinter.TclError):
+            self.application.winfo_exists()
 
     def test_cancelling_reaches_the_run_and_stops_offering_itself(self):
         from pubidml.gui import strings, wizard

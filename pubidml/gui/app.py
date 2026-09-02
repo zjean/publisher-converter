@@ -29,6 +29,10 @@ from . import runner, steps, strings, wizard
 #: window and one converted from the terminal leave the same report.
 REPORT_NAME = "conversion-report.csv"
 
+#: A floor for the window, raised in __init__ to whatever the tallest and
+#: widest step actually asks for.
+MIN_WIDTH, MIN_HEIGHT = 560, 460
+
 
 class Application(tk.Tk):
     def __init__(
@@ -38,7 +42,7 @@ class Application(tk.Tk):
     ):
         super().__init__()
         self.title(strings.WINDOW_TITLE)
-        self.minsize(560, 460)
+        self.minsize(MIN_WIDTH, MIN_HEIGHT)
 
         self.selection: Optional[wizard.Selection] = None
         self.destination: Optional[Path] = None
@@ -92,6 +96,7 @@ class Application(tk.Tk):
 
         self.step = wizard.CHOOSE
         self.show(wizard.CHOOSE)
+        self._fit_to_the_largest_step()
 
         if initial:
             # A folder dropped on the program's icon. Skipping past step 1
@@ -100,6 +105,29 @@ class Application(tk.Tk):
             self.steps[wizard.CHOOSE].accept(initial)
             if self.selection is not None:
                 self._next()
+
+    def _fit_to_the_largest_step(self) -> None:
+        """Floor the window at the roomiest step, not at a guessed number.
+
+        Only the current step is mapped, so the container follows whichever
+        frame is showing: if step 4 wants more room than step 3, the window
+        grows on entering step 4 and shrinks on leaving it, which to
+        someone non-technical reads as the program twitching.
+
+        The constant above does win at default fonts -- but only by about
+        forty pixels vertically, and Windows text scaling at 125% pushes
+        step 4 past it while leaving step 3 short, so the margin is not
+        something to rely on. winfo_reqheight is the *requested* size,
+        which a frame computes from its children whether it is mapped or
+        not, so grid_remove does not hide the three steps that are away.
+        """
+        self.update_idletasks()
+        widest = max(frame.winfo_reqwidth() for frame in self.steps.values())
+        tallest = max(frame.winfo_reqheight() for frame in self.steps.values())
+        self.minsize(
+            max(MIN_WIDTH, widest),
+            max(MIN_HEIGHT, tallest + self.nav.winfo_reqheight()),
+        )
 
     # --- shell API the steps call ---------------------------------
     def set_selection(self, selection) -> None:
@@ -197,8 +225,13 @@ class Application(tk.Tk):
         elif step == wizard.CONVERTING:
             self.next_button.configure(state="disabled", command=self._next)
         else:
+            # _on_close, not destroy: Sluiten and the X button should not
+            # take different paths out. They are equivalent here today --
+            # the run has finished and there is no tick left -- but the
+            # next person to make step 4 reachable with work still in
+            # flight will not think to check that this one agrees.
             self.next_button.configure(
-                text=strings.CLOSE, state="normal", command=self.destroy
+                text=strings.CLOSE, state="normal", command=self._on_close
             )
 
     def _back(self) -> None:
@@ -292,15 +325,17 @@ class Application(tk.Tk):
         the person this wizard was built for, and they would reach for
         Task Manager.
 
-        Not waiting costs nothing, which is the part worth writing down.
-        convert() assembles each package beside its destination and moves
-        it into place only once whole, so every .idml already written is a
-        complete one -- there is no half-file to clean up. And batch.plan
-        passes over any source whose .idml is already there, so starting
-        the program again resumes from where the close landed instead of
-        converting the whole collection a second time. What is lost is the
-        report row for the files still in flight, and re-running rewrites
-        the report anyway.
+        What not waiting actually costs is worth stating exactly.
+        IdmlWriter.write builds each package into an mkstemp sibling and
+        os.replaces it only once whole, so no incomplete .idml can be left
+        behind -- and batch.plan passes over any source whose .idml is
+        already there, so starting the program again resumes from where
+        the close landed rather than converting the collection a second
+        time. It is not quite "nothing to clean up", though: killing the
+        daemon mid-write can leave that temporary, .<name>.idml.XXXXXX.part,
+        beside the output. Windows does not hide a leading dot, so this
+        audience will see it and wonder. Also lost is the report row for
+        whatever was still in flight, which the next run rewrites anyway.
         """
         if self.run is not None and not self.run.finished:
             self.run.cancel()
