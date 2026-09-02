@@ -39,6 +39,7 @@ class Selection:
 
     @property
     def folder_count(self) -> int:
+        """How many distinct parent folders selection.paths spans."""
         return len({p.parent for p in self.paths})
 
 
@@ -48,9 +49,18 @@ def _shares_one_root(paths: List[Path]) -> bool:
     On POSIX every absolute path's anchor is "/", so this only ever
     refuses on Windows -- two drive letters, or a UNC share beside a
     drive letter -- which is exactly the case os.path.commonpath cannot
-    turn into one destination tree.
+    turn into one destination tree. The comparison is case-folded because
+    'C:\\' and 'c:\\' name the same drive.
+
+    This is an anchor check, not an absoluteness check: relative paths
+    all carry the empty anchor and so trivially "share one root" no
+    matter where they actually point, and os.path.commonpath on unrelated
+    relative paths returns "" rather than raising. Neither case is
+    reachable through a file-choosing dialog, which only ever hands back
+    absolute paths -- but scan() does not itself force that, so a caller
+    that skips the dialog can see it.
     """
-    return len({p.anchor for p in paths}) <= 1
+    return len({p.anchor.lower() for p in paths}) <= 1
 
 
 def scan(paths: List[Path]) -> Optional[Selection]:
@@ -90,6 +100,13 @@ def scan(paths: List[Path]) -> Optional[Selection]:
             files.append(path)
     if not files:
         return None
+
+    # A folder and a file inside it can both be dropped onto the icon at
+    # once -- an ordinary mistake, not a malformed one -- and without this
+    # the same file is found twice: once via find_sources(folder), once
+    # via the file arm above. Left alone that inflates the count a user
+    # reads and converts the file twice to the same destination.
+    files = list(dict.fromkeys(files))
 
     if not _shares_one_root(files):
         raise MixedRootsError()

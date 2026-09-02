@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path, PureWindowsPath
@@ -21,6 +22,8 @@ class ScanTest(unittest.TestCase):
         selection = wizard.scan([self.work])
         self.assertEqual(len(selection.paths), 2)
         self.assertEqual(selection.root, self.work)
+        # a.pub's parent is self.work, b.pub's is nested: two folders.
+        self.assertEqual(selection.folder_count, 2)
 
     def test_a_folder_with_no_publisher_files_finds_nothing(self):
         (self.work / "notes.txt").write_text("x")
@@ -67,6 +70,36 @@ class ScanTest(unittest.TestCase):
         self.assertFalse(wizard._shares_one_root([c_drive, unc_share]))
         self.assertTrue(
             wizard._shares_one_root([c_drive, PureWindowsPath(r"C:\Archief\b.pub")])
+        )
+
+    def test_scan_raises_mixed_roots_past_the_no_files_found_check(self):
+        # A relative and an absolute path to real, existing files carry
+        # different anchors ('' vs '/') on this machine, so this reaches
+        # the real `raise` inside scan() -- not just _shares_one_root in
+        # isolation -- and pins that the guard sits after the "no files"
+        # check (files clearly were found here) and that scan() lets the
+        # exception propagate rather than swallowing it into None.
+        (self.work / "a.pub").write_bytes(b"stub")
+        (self.work / "b.pub").write_bytes(b"stub")
+        absolute = self.work / "a.pub"
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(self.work)
+            relative = Path("b.pub")
+            with self.assertRaises(wizard.MixedRootsError):
+                wizard.scan([relative, absolute])
+        finally:
+            os.chdir(original_cwd)
+
+    def test_a_file_named_twice_via_its_folder_counts_once(self):
+        # Dropping a folder and a file inside it together is ordinary,
+        # not malformed; without dedup the count read out to the user
+        # would be wrong and the file would convert twice.
+        (self.work / "a.pub").write_bytes(b"stub")
+        (self.work / "b.pub").write_bytes(b"stub")
+        selection = wizard.scan([self.work, self.work / "a.pub"])
+        self.assertEqual(
+            sorted(p.name for p in selection.paths), ["a.pub", "b.pub"]
         )
 
 
