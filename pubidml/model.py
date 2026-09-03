@@ -58,7 +58,25 @@ class Gradient:
     """A gradient fill. Frozen so equal gradients share one IDML resource."""
 
     stops: Tuple[GradientStop, ...]
+    #: The ramp's angle *inside the shape*, in the convention libmspub
+    #: reports. This is what gets laid across the box, which is why the
+    #: shape's own placement is not folded into it: a diagonal ramp is
+    #: stretched to the box's proportions (`idml._ramp_angle`) and a rigid
+    #: turn of the whole shape must not be stretched with it.
     angle: float = 0.0
+    #: The shape's own turn, in degrees on the page, added *after* that
+    #: stretch. Publisher turns a shape and its shade together and libmspub
+    #: reports neither on the ramp.
+    turn: float = 0.0
+    #: Whether the shape is mirrored, which reflects the finished page
+    #: angle -- after the turn, because Publisher turns the shape and then
+    #: flips it.
+    flipped_h: bool = False
+    flipped_v: bool = False
+    #: How far the ramp runs, in points, where the file states a box to
+    #: measure it across. None means fall back to the item's own box, which
+    #: is all there is for a ramp libmspub reported and the file did not.
+    span: Optional[float] = None
     radial: bool = False
 
 

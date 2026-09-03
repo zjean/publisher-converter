@@ -289,6 +289,9 @@ def _ramp_angle(
     angle_deg: float,
     width: float = 0.0,
     height: float = 0.0,
+    turn: float = 0.0,
+    flipped_h: bool = False,
+    flipped_v: bool = False,
 ) -> float:
     """One ramp's angle, turned from Publisher's convention into IDML's.
 
@@ -335,7 +338,7 @@ def _ramp_angle(
     plain = model._fold_angle(angle_deg + 90.0)
     if not width or not height:
         # A text run has no box of its own to lay a diagonal across.
-        return plain
+        return _placed(plain, turn, flipped_h, flipped_v)
     square = math.radians(abs(angle_deg) - 90.0)
     turned = math.degrees(
         math.atan2(width * math.sin(square), height * math.cos(square))
@@ -344,10 +347,39 @@ def _ramp_angle(
     # from; that stays as the quarter turn states it.
     if abs(model._fold_angle(turned - plain)) > 90.0:
         turned += 180.0
-    return model._fold_angle(turned)
+    return _placed(turned, turn, flipped_h, flipped_v)
 
 
-def _ramp_geometry(angle_deg: float, width: float, height: float):
+def _placed(angle: float, turn: float, flipped_h: bool, flipped_v: bool) -> float:
+    """Where a ramp laid across the shape ends up once the shape is placed.
+
+    The stretch above is about the ramp *inside* the shape, so the shape's
+    own placement comes after it: turn first, then mirror, because that is
+    the order Publisher composes them in. Measured against Publisher's own
+    PDF export: the masthead ribbon states a turn and no flip, the heading
+    bands state both, and only this order and this sign put all of them on
+    the axis Publisher draws -- the ribbon to two thousandths of a degree,
+    where folding the turn into the angle before the stretch left it 12
+    degrees out.
+
+    The turn's sign is the caller's: Publisher states a turn the other way
+    about from the way it draws it, which `convert` negates on the way in.
+    """
+    angle = angle + turn
+    # A mirrored shape mirrors its shade: reflected about the horizontal
+    # axis for a vertical flip, about the vertical axis for a horizontal
+    # one. Only the vertical flip is measured -- no shape in the corpus
+    # states a horizontal one.
+    if flipped_v:
+        angle = -angle
+    if flipped_h:
+        angle = 180.0 - angle
+    return model._fold_angle(angle)
+
+
+def _ramp_geometry(
+    angle_deg: float, width: float, height: float, span: Optional[float] = None
+):
     """Where a gradient starts and how far it runs across a box.
 
     IDML measures both in the box's own coordinates, which are centred on
@@ -355,6 +387,17 @@ def _ramp_geometry(angle_deg: float, width: float, height: float):
     anticlockwise from left-to-right. The ramp has to cover the box's
     whole extent in that direction, so the length is the box projected
     onto it and the start is half of that back from the centre.
+
+    `span` overrides that length where the file states the box the ramp was
+    measured across, which is not always the one the item carries. Two
+    things pull them apart, and Publisher's own PDF export settles both.
+    An outline: the anchor measures the shape with it, libmspub reports the
+    path inside it, and on the page-8 panel of the newsletter corpus that
+    is 82.9pt against 66.4 -- a ramp squeezed into four fifths of its room,
+    which reaches neither end colour. And a turn: a shape turned 12 degrees
+    has a page-aligned box half again as tall as itself, and measuring the
+    ramp across *that* ran the masthead ribbon 231pt where Publisher runs
+    it 92.1.
     """
     radians = math.radians(angle_deg)
     # A quarter turn leaves a cosine of 1e-17 rather than nothing, which
@@ -363,7 +406,7 @@ def _ramp_geometry(angle_deg: float, width: float, height: float):
         value if abs(value) > 1e-9 else 0.0
         for value in (math.cos(radians), math.sin(radians))
     )
-    length = abs(width * cos) + abs(height * sin)
+    length = span if span is not None else abs(width * cos) + abs(height * sin)
     # Adding zero turns the -0.0 that negating a zero cosine leaves back
     # into 0.0, which is the same number and the only one of the two that
     # formats as "0".
@@ -1175,7 +1218,10 @@ class IdmlWriter:
         }
         gradient = item.style.gradient
         if gradient is not None and gradient in self.gradient_ids:
-            angle = _ramp_angle(gradient.angle, item.width, item.height)
+            angle = _ramp_angle(
+                gradient.angle, item.width, item.height,
+                gradient.turn, gradient.flipped_h, gradient.flipped_v,
+            )
             attributes["GradientFillAngle"] = fmt(angle)
             # An angle says which way the ramp runs, not how far, and a
             # ramp with no distance to run is not a ramp: everything before
@@ -1184,7 +1230,7 @@ class IdmlWriter:
             # came out as two flat halves meeting in a hard edge down its
             # middle -- the fade over the whole shape is what the distance
             # is for.
-            start, length = _ramp_geometry(angle, item.width, item.height)
+            start, length = _ramp_geometry(angle, item.width, item.height, gradient.span)
             attributes["GradientFillStart"] = start
             attributes["GradientFillLength"] = fmt(length)
         if item.style.stroke is not None:
@@ -1940,7 +1986,12 @@ class IdmlWriter:
             self.gradient_ids.get(span.gradient) if span.gradient is not None else None
         )
         if reference:
-            angle = _ramp_angle(span.gradient.angle, *(box or ()))
+            angle = _ramp_angle(
+                span.gradient.angle, *(box or ()),
+                turn=span.gradient.turn,
+                flipped_h=span.gradient.flipped_h,
+                flipped_v=span.gradient.flipped_v,
+            )
             attributes["FillColor"] = reference
             attributes["GradientFillAngle"] = fmt(angle)
             # A shape gets its ramp geometry from its own bounds; a run has
@@ -1951,7 +2002,7 @@ class IdmlWriter:
             # middle. The band the headline sits in is the distance the
             # ramp was meant to run over, so it is stated here.
             if box:
-                start, length = _ramp_geometry(angle, *box)
+                start, length = _ramp_geometry(angle, *box, span=span.gradient.span)
                 attributes["GradientFillStart"] = start
                 attributes["GradientFillLength"] = fmt(length)
         else:

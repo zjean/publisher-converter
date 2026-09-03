@@ -966,39 +966,53 @@ def _apply_page_margins(
         )
 
 
-def _mirrored_ramp_angle(found: "pubfile.ShapeGradient") -> float:
-    """The ramp's angle in the shape's own frame, mirrored as the shape is.
+#: Below this a corrected ramp turn is the turn it already had, and saying
+#: so would be counting a shape that needed nothing. At 0.005 degrees the
+#: widest ramp in the corpus moves four hundredths of a point end to end.
+_RAMP_ANGLE_EPSILON = 0.005
 
-    Publisher writes a band dragged over by its top handle as a half turn
-    *and* a vertical flip, and the two cancel. A reader that takes the turn
-    and leaves the flip draws the ramp upside down, which is what every
-    navy section heading in the kerkbode corpus arrived as: navy at the top
-    into white at the foot, where Publisher draws white at the top into
-    navy at the foot. The flip is stated in the Escher shape record's flag
-    word and nowhere else, and libmspub folds it into the order of the
-    points it emits, next to the turn and just as invisible to a ramp.
 
-    A flip is a reflection, so it mirrors the direction the ramp runs: a
-    vertical flip about the horizontal axis, a horizontal one about the
-    vertical axis. The angle here sits a quarter turn from that direction
-    (`idml._ramp_angle` adds it), which leaves the two reflections as
-    `180 - angle` and `-angle`. The shape's own turn goes on afterwards,
-    because Publisher flips the shape and then turns it.
+def _ramp_span(found: "pubfile.ShapeGradient") -> float:
+    """How far the ramp runs, measured across the box the file states.
 
-    Measured: the vertical flip, against Publisher's own PDF export of
-    `1336 kerkbode.pub` and `1337 kerkbode.pub`. Every flipped band there
-    comes out the way Publisher draws it with this and upside down without
-    -- and flipping first rather than last is what puts the residual tilt
-    on Publisher's own 89.96 instead of 90.04. Not measured: the horizontal
-    flip, which no shape in the corpus states, and which is this same
-    reflection about the other axis.
+    Not the box the item carries. The anchor measures a shape with its
+    outline while libmspub reports the path inside it -- 16pt apart on the
+    page-8 panel of the newsletter corpus -- and a turned shape's
+    page-aligned box is bigger than the shape in both directions, half
+    again as tall on the masthead ribbon. Measured across the item either
+    way leaves the ramp squeezed or stretched, reaching its end colours
+    early or not at all.
+
+    The angle used is the ramp's *inside* the shape, before the shape is
+    turned or mirrored, because that is the frame the file's box is in.
     """
-    angle = found.angle
-    if found.flipped_h:
-        angle = -angle
-    if found.flipped_v:
-        angle = 180.0 - angle
-    return angle
+    angle = idml._ramp_angle(found.angle, found.width, found.height)
+    return (
+        abs(found.width * math.cos(math.radians(angle)))
+        + abs(found.height * math.sin(math.radians(angle)))
+    )
+
+
+def _ramp_turn(found: "pubfile.ShapeGradient", item: model.Item) -> float:
+    """The turn a ramp owes the page, once the shape is placed on it.
+
+    Publisher turns a shape and its shade together, and libmspub reports
+    neither on the ramp: for a polygon the turn goes into the order of the
+    points, where a ramp stated as an angle cannot see it. So it is carried
+    here and handed to the writer, which adds it *after* laying the ramp
+    across the box -- a rigid turn of the whole shape is not the diagonal
+    that `idml._ramp_angle` stretches, and stretching it too is what left
+    the masthead ribbon twelve degrees off the axis Publisher draws.
+
+    Two signs are in it. Publisher states a turn the other way about from
+    the way it draws it -- the same negation `_restore_floored_turns`
+    works in -- so the file's value is negated. And a turn the item already
+    carries is one the reader will apply to the ramp itself, so it is taken
+    off again rather than counted twice. That second term is not measured:
+    libmspub reports no rotation at all on any gradient shape in the
+    corpus, so every one of them has an item turn of zero.
+    """
+    return model._fold_angle(-found.rotation - item.rotation)
 
 
 def _restore_gradient_ramps(
@@ -1043,7 +1057,28 @@ def _restore_gradient_ramps(
                 item.width,
                 item.height,
             )
-            if found is None or len(found.stops) < 2:
+            if found is None:
+                continue
+            turn = _ramp_turn(found, item)
+            if len(found.stops) < 2:
+                # No ramp to rebuild: libmspub reads a fill with no
+                # waypoint list correctly. Only where the shape sits is
+                # missing from it -- the turn and the flip. The masthead
+                # ribbon on page 1 of every issue in the corpus is this
+                # case, set at -12.192 degrees and arriving straight up and
+                # down.
+                placed = item.style.gradient
+                if placed is not None and (
+                    abs(turn - placed.turn) > _RAMP_ANGLE_EPSILON
+                    or found.flipped_h != placed.flipped_h
+                    or found.flipped_v != placed.flipped_v
+                    or placed.span is None
+                ):
+                    item.style.gradient = replace(
+                        placed, turn=turn, span=_ramp_span(found),
+                        flipped_h=found.flipped_h, flipped_v=found.flipped_v,
+                    )
+                    restored += 1
                 continue
             item.style.gradient = model.Gradient(
                 stops=tuple(
@@ -1053,18 +1088,15 @@ def _restore_gradient_ramps(
                 # A flattened fill never became a Gradient at all, so its
                 # angle went with the ramp; the file states it, and
                 # `pubfile` hands it over the way libmspub would have.
-                #
-                # Plus the shape's own turn, because Publisher turns a shape
-                # and its shade together and libmspub reports the two
-                # apart: a polygon's turn goes into the order of its points,
-                # where the ramp cannot see it, which leaves every band in a
-                # newsletter shading the wrong way up. Where the reader
-                # turns the object itself the ramp goes round with it, so
-                # what the angle owes is the turn the item is *not* already
-                # carrying.
-                angle=model._fold_angle(
-                    _mirrored_ramp_angle(found) + found.rotation - item.rotation
-                ),
+                # That angle is the ramp's inside the shape and stays so.
+                # Where the shape then *sits* is the turn and the flip,
+                # kept apart from it because the writer lays the ramp
+                # across the box before placing it.
+                angle=found.angle,
+                turn=turn,
+                flipped_h=found.flipped_h,
+                flipped_v=found.flipped_v,
+                span=_ramp_span(found),
                 radial=(
                     item.style.gradient.radial
                     if item.style.gradient is not None else False

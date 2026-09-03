@@ -179,7 +179,11 @@ def shadings(path: Path):
 
 def ours(item) -> dict:
     """The axis `idml.py` writes, as a bearing with y measured upwards."""
-    angle = idml._ramp_angle(item.style.gradient.angle, item.width, item.height)
+    ramp = item.style.gradient
+    angle = idml._ramp_angle(
+        ramp.angle, item.width, item.height,
+        ramp.turn, ramp.flipped_h, ramp.flipped_v,
+    )
     _start, length = idml._ramp_geometry(angle, item.width, item.height)
     # _ramp_geometry states the angle anticlockwise from left-to-right with
     # y increasing downwards, so the bearing is the angle itself once y is

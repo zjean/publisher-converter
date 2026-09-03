@@ -1164,18 +1164,33 @@ These are real and deliberate, not bugs to be surprised by later.
     angles the format states ninety degrees askew, and a negation, since
     ODF measures clockwise. A flattened fill never became a gradient at
     all, so its angle was lost with the ramp.
-  - **Which way up the shape is.** Publisher turns and mirrors a shape and
-    its shade together; libmspub reports neither, folding both into the
-    order of the points it emits, where a ramp stated as an angle cannot
-    see them. So the shape's own turn goes back onto the angle — less any
-    turn the item already carries, or it would be counted twice — and so
-    does its flip, as a reflection: `180 - angle` for a vertical one,
-    `-angle` for a horizontal one, taken before the turn. The pair matters
-    because Publisher writes a band dragged over by its top handle as a
-    half turn *and* a vertical flip, which cancel. Read the turn alone and
-    every navy section heading in the newsletter corpus comes out upside
-    down — navy at the top into white at the foot, where Publisher draws
-    white at the top into navy at the foot.
+  - **Where the shape sits.** Publisher turns and mirrors a shape and its
+    shade together; libmspub reports neither, folding both into the order
+    of the points it emits, where a ramp stated as an angle cannot see
+    them. Both are put back, and *after* the ramp is laid across the box
+    rather than before it — a rigid turn of the whole shape is not the
+    diagonal the box stretches (below), and stretching it too ran the
+    masthead ribbon twelve degrees off the axis Publisher draws. The turn
+    goes on first and the mirror second, reflecting the finished angle,
+    which is the order Publisher composes them in; and the file states a
+    turn the other way about from the way it draws it, so its sign is
+    flipped on the way in.
+
+    Both halves matter, and the corpus makes each of them visible on its
+    own. A band dragged over by its top handle is stated as a half turn
+    *and* a vertical flip, which cancel: read the turn alone and every
+    navy section heading comes out upside down — navy at the top into
+    white at the foot, where Publisher draws white at the top into navy.
+    The masthead ribbon states a turn and no flip, at -12.192°, and
+    arrived straight up and down. Against Publisher's own PDF export every
+    ramp in the corpus now lands within 0.005° of the axis it draws.
+  - **How far it runs.** Across the box the *file* states, which is not
+    always the one the item carries. The anchor measures a shape with its
+    outline while libmspub reports the path inside it — 82.9pt against
+    66.4 on one panel, a ramp squeezed into four fifths of its room and
+    reaching neither end colour — and a turned shape's page-aligned box is
+    bigger than the shape in both directions, half again as tall on the
+    ribbon.
   - **Which shape it belongs to.** By where the shape sits, and — where a
     banner and its backing panel share a centre to within half a point —
     by which is nearer its size. The size cannot be *required* to match:

@@ -2075,25 +2075,37 @@ def _read_gradients(data: bytes, palette: List[tuple]) -> List[ShapeGradient]:
         first = _resolve_color(fill, fill, palette)
         last = _resolve_color(back, fill, palette) if isinstance(back, int) else None
         waypoints = _shade_stops(props.get(_PROP_FILL_SHADE), palette, fill)
-        if first is None or last is None or not waypoints:
+        if first is None or last is None:
             continue
+        rotation = (
+            _signed(props[_PROP_ROTATION]) / _FIXED_16_16
+            if isinstance(props.get(_PROP_ROTATION), int) else 0.0
+        )
+        flipped_h = bool(flags & _SHAPE_FLIP_H)
+        flipped_v = bool(flags & _SHAPE_FLIP_V)
 
-        stops = _ramp_stops(focus, waypoints, first, last)
+        # A fill with no waypoint list is one libmspub builds from the two
+        # end colours itself, and gets right -- so there is no ramp to
+        # rebuild here. Its record is still worth keeping where the shape
+        # is turned or mirrored, because that is dropped from *every* ramp
+        # and this is the only way back to it. Where the shape is neither,
+        # there is nothing to carry and an extra record can only make an
+        # ambiguity out of two shapes sharing a centre.
+        turned = rotation or flipped_h or flipped_v
+        if not waypoints and not turned:
+            continue
+        stops = _ramp_stops(focus, waypoints, first, last) if waypoints else []
         found.append(
             ShapeGradient(
                 angle=_gradient_angle(props),
-                # A shape's shade turns with the shape. libmspub reports the
-                # two apart, and for a polygon the turn goes into the order
-                # of the points, where a ramp cannot see it -- so it is
-                # carried here and put back on the angle.
-                rotation=(
-                    _signed(props[_PROP_ROTATION]) / _FIXED_16_16
-                    if isinstance(props.get(_PROP_ROTATION), int) else 0.0
-                ),
-                # And a mirrored shape mirrors its shade, for the same
-                # reason and with the same remedy.
-                flipped_h=bool(flags & _SHAPE_FLIP_H),
-                flipped_v=bool(flags & _SHAPE_FLIP_V),
+                # A shape's shade turns with the shape, and a mirrored
+                # shape mirrors its shade. libmspub reports neither
+                # alongside the ramp -- for a polygon both go into the
+                # order of the points, where a ramp cannot see them -- so
+                # they are carried here and put back on the angle.
+                rotation=rotation,
+                flipped_h=flipped_h,
+                flipped_v=flipped_v,
                 stops=stops,
                 centre_x=(box[0] + box[2]) / 2.0,
                 centre_y=(box[1] + box[3]) / 2.0,

@@ -883,6 +883,22 @@ keeping, because each one looks right until it is measured:
   the turn goes on. Only the vertical one is measured; no shape in the
   corpus states a horizontal flip.
 
+  Two more came out of the same measurement once it could see a sense.
+  **The turn was being stretched with the ramp.** A diagonal ramp is laid
+  along the shape's own diagonal, so its angle follows the box's
+  proportions — but a rigid turn of the whole shape is not that, and
+  folding it into the angle before the stretch put the masthead ribbon at
+  95.9° where Publisher draws 102.2°. Turn and flip are now applied after
+  the stretch, and the file's turn is negated on the way in, because
+  Publisher states one the other way about from the way it draws it. The
+  corpus never showed the sign before: every other turn in it is a half
+  turn, where the sign cannot be seen. **And the ramp ran across the wrong
+  box.** The anchor measures a shape with its outline, libmspub reports
+  the path inside it, and the page-8 panel is 82.9pt against 66.4 — a ramp
+  four fifths of its proper length, reaching neither end colour. A turned
+  shape is worse: the ribbon's page-aligned box is 231pt where the shape
+  is 92.1. Both now measure across the box the file states.
+
   This one hid because the measurement in place could not see it.
   `research/gradient_angle.py` compares a ramp's *axis* against
   Publisher's own PDF and folds the comparison into half a turn, which is

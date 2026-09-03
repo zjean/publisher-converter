@@ -266,7 +266,10 @@ def main(pub: Path, pdf: Path) -> None:
             if ramp is None:
                 continue
             stops = idml._spanning_stops(ramp.stops)
-            angle = idml._ramp_angle(ramp.angle, item.width, item.height)
+            angle = idml._ramp_angle(
+                ramp.angle, item.width, item.height,
+                ramp.turn, ramp.flipped_h, ramp.flipped_v,
+            )
             stated = structure.gradient_for(
                 item.x + item.width / 2 - page.width / 2,
                 item.y + item.height / 2 - page.height / 2,
@@ -281,7 +284,13 @@ def main(pub: Path, pdf: Path) -> None:
             # could be this shape's ask Publisher what it draws at the
             # same place.
             ux, uy = math.cos(math.radians(angle)), math.sin(math.radians(angle))
-            half = (abs(item.width * ux) + abs(item.height * uy)) / 2.0
+            # The distance the writer actually runs the ramp over, which is
+            # the box the file states rather than the item's own where the
+            # two differ -- an outline, or a turn.
+            _start, run = idml._ramp_geometry(
+                angle, item.width, item.height, ramp.span
+            )
+            half = run / 2.0
             steps = 21
             best = None
             for across, down in origins:

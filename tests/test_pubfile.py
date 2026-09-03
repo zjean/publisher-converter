@@ -18,7 +18,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
-from pubidml import convert, fontmetrics, model, pubfile
+from pubidml import convert, fontmetrics, idml, model, pubfile
 from pubidml.pubfile import _read_stream
 
 REPO = Path(__file__).resolve().parent.parent
@@ -2918,7 +2918,7 @@ class RealGradientTest(unittest.TestCase):
             self.skipTest("newsletter sample absent")
         navy = [
             found for found in structure.gradients
-            if found.stops[0][1] == (0x00, 0x33, 0x80)
+            if found.stops and found.stops[0][1] == (0x00, 0x33, 0x80)
         ]
         self.assertGreater(len(navy), 4, "no navy heading bands were read")
         for found in navy:
@@ -2930,6 +2930,24 @@ class RealGradientTest(unittest.TestCase):
             any(not found.flipped_v for found in structure.gradients),
             "every gradient in the file read as flipped",
         )
+
+    def test_the_masthead_states_a_turn_with_no_ramp_to_hang_it_on(self):
+        """The one shape per issue whose fill states no waypoint list.
+
+        libmspub reads its two colours correctly, so nothing here replaces
+        them -- but it drops the shape's turn the same way it drops every
+        other, and the ribbon is set at -12.192 degrees. The record has to
+        reach `gradient_for` for that turn to be put back, which means
+        being read even though there is no ramp in it.
+        """
+        structure = pubfile.read_structure(SAMPLES / "cgk" / "1336 kerkbode.pub")
+        if structure is None:
+            self.skipTest("newsletter sample absent")
+        turned = [
+            found for found in structure.gradients
+            if not found.stops and abs(found.rotation + 12.192) < 0.01
+        ]
+        self.assertEqual(len(turned), 1, "the masthead's turn was not read")
 
     def test_a_reconstructed_ramp_holds_the_waypoints_libmspub_reports(self):
         """The reversal rule, checked against libmspub's own reading.
@@ -2959,6 +2977,10 @@ class RealGradientTest(unittest.TestCase):
                     item.height,
                 )
                 if found is None:
+                    continue
+                if not found.stops:
+                    # A fill with no waypoint list: the record carries the
+                    # shape's turn and no ramp to compare.
                     continue
                 theirs = [stop.color for stop in ramp.stops]
                 ours = [colour for _position, colour in found.stops]
@@ -3025,6 +3047,15 @@ class GradientRestorationTest(unittest.TestCase):
         shape = model.Rectangle(x=50.0, y=100.0, width=100.0, height=50.0, style=style)
         return model.Document(pages=[page_with(shape)]), shape
 
+    def placed(self, shape) -> float:
+        """The angle the writer ends up at: the ramp laid across the box,
+        then turned and mirrored with the shape."""
+        ramp = shape.style.gradient
+        return idml._ramp_angle(
+            ramp.angle, shape.width, shape.height,
+            ramp.turn, ramp.flipped_h, ramp.flipped_v,
+        )
+
     def structure(self):
         # page_with makes a 612x792 page, so this centre is the shape's.
         return pubfile.FileStructure(gradients=[
@@ -3067,7 +3098,7 @@ class GradientRestorationTest(unittest.TestCase):
         structure = self.structure()
         structure.gradients[0].rotation = 180.0
         convert._restore_gradient_ramps(document, structure)
-        self.assertAlmostEqual(shape.style.gradient.angle, 180.0)
+        self.assertAlmostEqual(self.placed(shape), -90.0)
 
     def test_a_shape_turned_over_mirrors_its_ramp_with_it(self):
         # Publisher writes a band that has been flipped top for bottom as
@@ -3085,7 +3116,8 @@ class GradientRestorationTest(unittest.TestCase):
         structure.gradients[0].rotation = 180.0
         structure.gradients[0].flipped_v = True
         convert._restore_gradient_ramps(document, structure)
-        self.assertAlmostEqual(shape.style.gradient.angle, 0.0)
+        # The turn alone would put it at -90; the flip brings it back.
+        self.assertAlmostEqual(self.placed(shape), 90.0)
 
     def test_a_vertical_flip_on_its_own_turns_the_ramp_over(self):
         document, shape = self.document(
@@ -3094,7 +3126,7 @@ class GradientRestorationTest(unittest.TestCase):
         structure = self.structure()
         structure.gradients[0].flipped_v = True
         convert._restore_gradient_ramps(document, structure)
-        self.assertAlmostEqual(shape.style.gradient.angle, 180.0)
+        self.assertAlmostEqual(self.placed(shape), -90.0)
 
     def test_a_horizontal_flip_mirrors_the_ramp_the_other_way(self):
         document, shape = self.document(
@@ -3102,9 +3134,19 @@ class GradientRestorationTest(unittest.TestCase):
         )
         structure = self.structure()
         structure.gradients[0].angle = 90.0
+        convert._restore_gradient_ramps(document, structure)
+        self.assertAlmostEqual(self.placed(shape), 180.0)
+
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        structure = self.structure()
+        structure.gradients[0].angle = 90.0
         structure.gradients[0].flipped_h = True
         convert._restore_gradient_ramps(document, structure)
-        self.assertAlmostEqual(shape.style.gradient.angle, -90.0)
+        # A stated 90 lays this ramp right to left; mirrored about the
+        # vertical axis it runs left to right instead.
+        self.assertAlmostEqual(self.placed(shape), 0.0)
 
     def test_a_turn_the_item_already_carries_is_not_counted_twice(self):
         # Where libmspub *does* report the rotation, the reader turns the
@@ -3117,7 +3159,85 @@ class GradientRestorationTest(unittest.TestCase):
         structure = self.structure()
         structure.gradients[0].rotation = 180.0
         convert._restore_gradient_ramps(document, structure)
-        self.assertAlmostEqual(shape.style.gradient.angle, 0.0)
+        self.assertAlmostEqual(shape.style.gradient.turn, 0.0)
+
+    def test_the_ramp_runs_across_the_box_the_file_states(self):
+        # The anchor measures the shape with its outline; libmspub reports
+        # the path inside it. On the page-8 panel of the newsletter corpus
+        # that is 82.9pt against 66.4, and a ramp measured across the
+        # narrower one reaches neither of its end colours.
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        structure = self.structure()
+        structure.gradients[0].height = 62.0
+        convert._restore_gradient_ramps(document, structure)
+        self.assertAlmostEqual(shape.style.gradient.span, 62.0)
+        _start, length = idml._ramp_geometry(
+            self.placed(shape), shape.width, shape.height,
+            shape.style.gradient.span,
+        )
+        self.assertAlmostEqual(length, 62.0)
+
+    def test_a_turned_shape_measures_its_ramp_before_the_turn(self):
+        # A shape turned 12 degrees has a page-aligned box half again as
+        # tall as itself, and the ramp was never meant to run across that.
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        structure = self.structure()
+        structure.gradients[0].rotation = -12.192
+        convert._restore_gradient_ramps(document, structure)
+        # The record's own box is 100 x 50 and the ramp is upright in it.
+        self.assertAlmostEqual(shape.style.gradient.span, 50.0)
+
+    def test_a_ramp_with_no_waypoints_still_gains_the_shape_s_turn(self):
+        # libmspub builds a ramp with no waypoint list from the two end
+        # colours itself, and gets the colours right -- but not the turn,
+        # which it folds into the order of the points like any other. The
+        # masthead ribbon on page 1 of every issue in the corpus is stated
+        # this way, at -12.192 degrees, and arrived straight up and down
+        # where Publisher draws it along the ribbon.
+        whole = model.Gradient(stops=(
+            model.GradientStop(location=0.0, color=(145, 56, 1)),
+            model.GradientStop(location=100.0, color=(255, 209, 125)),
+        ))
+        document, shape = self.document(model.GraphicStyle(gradient=whole))
+        structure = self.structure()
+        structure.gradients[0].stops = []
+        structure.gradients[0].rotation = -12.192
+        convert._restore_gradient_ramps(document, structure)
+        # The file states the turn the other way about from the way
+        # Publisher draws it, so the ramp is placed at +12.192 on top of
+        # the quarter turn a stated zero already carries.
+        self.assertAlmostEqual(shape.style.gradient.turn, 12.192)
+        self.assertAlmostEqual(self.placed(shape), 102.192)
+        # Its colours are libmspub's own, and are left alone.
+        self.assertEqual(
+            [stop.color for stop in shape.style.gradient.stops],
+            [(145, 56, 1), (255, 209, 125)],
+        )
+
+    def test_replacing_a_ramp_twice_changes_nothing_the_second_time(self):
+        # The pass reads the file rather than the document it is editing,
+        # so running it again has to land on the same ramp -- otherwise a
+        # turn or a span would be applied on top of itself.
+        whole = model.Gradient(stops=(
+            model.GradientStop(location=0.0, color=(145, 56, 1)),
+            model.GradientStop(location=100.0, color=(255, 209, 125)),
+        ))
+        document, shape = self.document(model.GraphicStyle(gradient=whole))
+        structure = self.structure()
+        structure.gradients[0].stops = []
+        structure.gradients[0].rotation = -12.192
+        convert._restore_gradient_ramps(document, structure)
+        once = shape.style.gradient
+        convert._restore_gradient_ramps(document, structure)
+        self.assertEqual(shape.style.gradient, once)
+        self.assertEqual(
+            [stop.color for stop in shape.style.gradient.stops],
+            [(145, 56, 1), (255, 209, 125)],
+        )
 
     def test_a_ramp_that_arrived_whole_still_gains_its_ends(self):
         # libmspub drops the two end colours from every ramp with a
