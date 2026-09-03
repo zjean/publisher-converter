@@ -868,6 +868,30 @@ keeping, because each one looks right until it is measured:
   were missing them too — the heading bars run navy to white and arrived
   light blue to pale blue. The rule is now: replace wherever the file
   states a ramp, leave a fill with no waypoint list alone.
+- **The shape's flip was not read.** The turn was, and putting it back on
+  the angle is what stood every band up the right way — but Publisher
+  writes a band dragged over by its top handle as a half turn *and* a
+  vertical flip, and the two cancel. The flip lives in the Escher shape
+  record's flag word, `fFlipV`, and nowhere else, and libmspub folds it
+  into the order of the points it emits next to the turn. Reading the
+  turn alone left every navy section heading half a turn out: navy at the
+  top into white at the foot, where Publisher draws white at the top into
+  navy at the foot. Eight bands an issue, all three issues, plus the
+  page-11 panel in 1336 — which states the flip with *no* turn, and is
+  what separates the two. A flip is a reflection, so it mirrors the
+  angle: `180 - angle` vertically, `-angle` horizontally, taken before
+  the turn goes on. Only the vertical one is measured; no shape in the
+  corpus states a horizontal flip.
+
+  This one hid because the measurement in place could not see it.
+  `research/gradient_angle.py` compares a ramp's *axis* against
+  Publisher's own PDF and folds the comparison into half a turn, which is
+  exactly the half turn at fault, so it read every one of these as a
+  perfect match. `research/gradient_sense.py` is the missing half: it
+  walks the box, asks Publisher what colour it draws at each step, and
+  scores our stop list against it as written and reversed. Before the
+  fix it names the eight bands; after it, every ramp in all three issues
+  matches, down to an average channel error under one.
 
 And one plain bug: `_resolve_color` resolved an intensity change against
 a base it resolved in turn, which recursed until the stack ran out on a

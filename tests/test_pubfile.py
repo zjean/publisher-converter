@@ -2905,6 +2905,32 @@ class RealGradientTest(unittest.TestCase):
         }
         self.assertIn(((255, 255, 255), (0xE1, 0xE1, 0xE1), (0x66, 0x33, 0x00)), ramps)
 
+    def test_the_bands_the_file_turns_over_are_read_as_turned_over(self):
+        """The navy section headings, which Publisher flips as well as turns.
+
+        Every one of them states a half turn *and* `fFlipV`, and the pair
+        is what puts its ramp back the way up Publisher draws it. Read the
+        turn alone and the band runs navy at the top into white at the
+        foot, which is the ramp upside down.
+        """
+        structure = pubfile.read_structure(SAMPLES / "cgk" / "1336 kerkbode.pub")
+        if structure is None:
+            self.skipTest("newsletter sample absent")
+        navy = [
+            found for found in structure.gradients
+            if found.stops[0][1] == (0x00, 0x33, 0x80)
+        ]
+        self.assertGreater(len(navy), 4, "no navy heading bands were read")
+        for found in navy:
+            self.assertTrue(found.flipped_v, "a heading band read as not flipped")
+            self.assertFalse(found.flipped_h)
+        # And the panels that are not flipped are still read as not flipped,
+        # so the flag is being read rather than assumed.
+        self.assertTrue(
+            any(not found.flipped_v for found in structure.gradients),
+            "every gradient in the file read as flipped",
+        )
+
     def test_a_reconstructed_ramp_holds_the_waypoints_libmspub_reports(self):
         """The reversal rule, checked against libmspub's own reading.
 
@@ -3042,6 +3068,43 @@ class GradientRestorationTest(unittest.TestCase):
         structure.gradients[0].rotation = 180.0
         convert._restore_gradient_ramps(document, structure)
         self.assertAlmostEqual(shape.style.gradient.angle, 180.0)
+
+    def test_a_shape_turned_over_mirrors_its_ramp_with_it(self):
+        # Publisher writes a band that has been flipped top for bottom as
+        # a half turn *and* a vertical flip, and the two together leave the
+        # shade the way up it started. libmspub bakes both into the order
+        # of the polygon's points, where a ramp cannot see either, so the
+        # turn alone would put the ramp upside down -- which is what every
+        # navy section heading in the kerkbode corpus arrived as: navy at
+        # the top into white at the foot, where Publisher draws white at
+        # the top into navy at the foot.
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        structure = self.structure()
+        structure.gradients[0].rotation = 180.0
+        structure.gradients[0].flipped_v = True
+        convert._restore_gradient_ramps(document, structure)
+        self.assertAlmostEqual(shape.style.gradient.angle, 0.0)
+
+    def test_a_vertical_flip_on_its_own_turns_the_ramp_over(self):
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        structure = self.structure()
+        structure.gradients[0].flipped_v = True
+        convert._restore_gradient_ramps(document, structure)
+        self.assertAlmostEqual(shape.style.gradient.angle, 180.0)
+
+    def test_a_horizontal_flip_mirrors_the_ramp_the_other_way(self):
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        structure = self.structure()
+        structure.gradients[0].angle = 90.0
+        structure.gradients[0].flipped_h = True
+        convert._restore_gradient_ramps(document, structure)
+        self.assertAlmostEqual(shape.style.gradient.angle, -90.0)
 
     def test_a_turn_the_item_already_carries_is_not_counted_twice(self):
         # Where libmspub *does* report the rotation, the reader turns the

@@ -1164,6 +1164,18 @@ These are real and deliberate, not bugs to be surprised by later.
     angles the format states ninety degrees askew, and a negation, since
     ODF measures clockwise. A flattened fill never became a gradient at
     all, so its angle was lost with the ramp.
+  - **Which way up the shape is.** Publisher turns and mirrors a shape and
+    its shade together; libmspub reports neither, folding both into the
+    order of the points it emits, where a ramp stated as an angle cannot
+    see them. So the shape's own turn goes back onto the angle — less any
+    turn the item already carries, or it would be counted twice — and so
+    does its flip, as a reflection: `180 - angle` for a vertical one,
+    `-angle` for a horizontal one, taken before the turn. The pair matters
+    because Publisher writes a band dragged over by its top handle as a
+    half turn *and* a vertical flip, which cancel. Read the turn alone and
+    every navy section heading in the newsletter corpus comes out upside
+    down — navy at the top into white at the foot, where Publisher draws
+    white at the top into navy at the foot.
   - **Which shape it belongs to.** By where the shape sits, and — where a
     banner and its backing panel share a centre to within half a point —
     by which is nearer its size. The size cannot be *required* to match:

@@ -322,6 +322,11 @@ _WORDART_STRETCH = 0x0A
 # as straight text is usually no loss and worth saying apart from one that
 # is.
 _SHAPE_RECORD = 0xF00A
+# The shape record's second word is its flag field. Two bits of it say the
+# shape is mirrored, and Publisher states a flip nowhere else -- there is
+# no property for it, and libmspub folds both into the order of the points
+# it emits, where a ramp stated as an angle cannot see them.
+_SHAPE_FLIP_H, _SHAPE_FLIP_V = 0x40, 0x80
 _WORDART_PLAIN = 136
 _WORDART_WARPS = {
     137: "stop sign", 138: "triangle up", 139: "triangle down",
@@ -642,6 +647,12 @@ class ShapeGradient:
     #: The turn the shape itself is stated at, which its shade turns with.
     #: Stated as it was made, so a band turned over twice states -540.
     rotation: float = 0.0
+    #: Whether the shape is mirrored, which its shade is mirrored with.
+    #: Publisher writes a band dragged over by its top handle as a half
+    #: turn and a vertical flip together, and the two cancel: read the
+    #: turn alone and the ramp comes out upside down.
+    flipped_h: bool = False
+    flipped_v: bool = False
     centre_x: float = 0.0
     centre_y: float = 0.0
     width: float = 0.0
@@ -2034,11 +2045,16 @@ def _read_gradients(data: bytes, palette: List[tuple]) -> List[ShapeGradient]:
     for body, end in _escher_shapes(escher, 0, len(escher)):
         props: dict = {}
         box = None
+        flags = 0
         for _version, instance, rec_type, sub_body, sub_end in _escher_records(
             escher, body, end
         ):
             if rec_type in _PROPERTY_RECORDS:
                 props.update(_escher_properties(escher, sub_body, sub_end, instance))
+            elif rec_type == _SHAPE_RECORD:
+                # The shape id, then the flags: whether it is mirrored is
+                # stated here and nowhere else.
+                flags = int.from_bytes(escher[sub_body + 4:sub_body + 8], "little")
             elif rec_type == _CLIENT_ANCHOR:
                 anchor = _escher_values(escher, sub_body, sub_end)
                 if all(side in anchor for side in _ANCHOR_SIDES):
@@ -2074,6 +2090,10 @@ def _read_gradients(data: bytes, palette: List[tuple]) -> List[ShapeGradient]:
                     _signed(props[_PROP_ROTATION]) / _FIXED_16_16
                     if isinstance(props.get(_PROP_ROTATION), int) else 0.0
                 ),
+                # And a mirrored shape mirrors its shade, for the same
+                # reason and with the same remedy.
+                flipped_h=bool(flags & _SHAPE_FLIP_H),
+                flipped_v=bool(flags & _SHAPE_FLIP_V),
                 stops=stops,
                 centre_x=(box[0] + box[2]) / 2.0,
                 centre_y=(box[1] + box[3]) / 2.0,

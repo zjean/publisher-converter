@@ -966,6 +966,41 @@ def _apply_page_margins(
         )
 
 
+def _mirrored_ramp_angle(found: "pubfile.ShapeGradient") -> float:
+    """The ramp's angle in the shape's own frame, mirrored as the shape is.
+
+    Publisher writes a band dragged over by its top handle as a half turn
+    *and* a vertical flip, and the two cancel. A reader that takes the turn
+    and leaves the flip draws the ramp upside down, which is what every
+    navy section heading in the kerkbode corpus arrived as: navy at the top
+    into white at the foot, where Publisher draws white at the top into
+    navy at the foot. The flip is stated in the Escher shape record's flag
+    word and nowhere else, and libmspub folds it into the order of the
+    points it emits, next to the turn and just as invisible to a ramp.
+
+    A flip is a reflection, so it mirrors the direction the ramp runs: a
+    vertical flip about the horizontal axis, a horizontal one about the
+    vertical axis. The angle here sits a quarter turn from that direction
+    (`idml._ramp_angle` adds it), which leaves the two reflections as
+    `180 - angle` and `-angle`. The shape's own turn goes on afterwards,
+    because Publisher flips the shape and then turns it.
+
+    Measured: the vertical flip, against Publisher's own PDF export of
+    `1336 kerkbode.pub` and `1337 kerkbode.pub`. Every flipped band there
+    comes out the way Publisher draws it with this and upside down without
+    -- and flipping first rather than last is what puts the residual tilt
+    on Publisher's own 89.96 instead of 90.04. Not measured: the horizontal
+    flip, which no shape in the corpus states, and which is this same
+    reflection about the other axis.
+    """
+    angle = found.angle
+    if found.flipped_h:
+        angle = -angle
+    if found.flipped_v:
+        angle = 180.0 - angle
+    return angle
+
+
 def _restore_gradient_ramps(
     document: model.Document, structure: Optional["pubfile.FileStructure"]
 ) -> None:
@@ -1028,7 +1063,7 @@ def _restore_gradient_ramps(
                 # what the angle owes is the turn the item is *not* already
                 # carrying.
                 angle=model._fold_angle(
-                    found.angle + found.rotation - item.rotation
+                    _mirrored_ramp_angle(found) + found.rotation - item.rotation
                 ),
                 radial=(
                     item.style.gradient.radial
