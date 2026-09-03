@@ -1107,9 +1107,9 @@ def _restore_gradient_ramps(
             restored += 1
 
     for page in document.pages:
-        visit(page.items, page.width, page.height)
+        visit(page.items, *page.file_size)
     for master in document.masters:
-        visit(master.items, master.width, master.height)
+        visit(master.items, *master.file_size)
 
     if restored:
         log.info("gradient ramps read from the file for %d shape(s)", restored)
@@ -1192,9 +1192,9 @@ def _restore_floored_turns(
             turned += 1
 
     for page in document.pages:
-        visit(page.items, page.width, page.height)
+        visit(page.items, *page.file_size)
     for master in document.masters:
-        visit(master.items, master.width, master.height)
+        visit(master.items, *master.file_size)
 
     if turned:
         log.info("turn read from the file for %d shape(s)", turned)
@@ -1440,8 +1440,10 @@ def _frames_by_shape(
         seen = [
             item for item in model._walk(page.items)
             if isinstance(item, model.TextFrame)
-            and abs(item.x + item.width / 2.0 - page.width / 2.0 - anchor.centre_x) <= 0.5
-            and abs(item.y + item.height / 2.0 - page.height / 2.0 - anchor.centre_y) <= 0.5
+            and abs(item.x + item.width / 2.0 - page.file_size[0] / 2.0
+                    - anchor.centre_x) <= 0.5
+            and abs(item.y + item.height / 2.0 - page.file_size[1] / 2.0
+                    - anchor.centre_y) <= 0.5
         ]
         if len(seen) == 1:
             frames[anchor.shape_seq] = seen[0]
@@ -2087,9 +2089,9 @@ def _recover_wordart(
             page_size.setdefault(id(art), (width, height))
 
     for page in document.pages:
-        collect(page.items, page.width, page.height)
+        collect(page.items, *page.file_size)
     for master in document.masters:
-        collect(master.items, master.width, master.height)
+        collect(master.items, *master.file_size)
 
     # The frame each shape becomes, against the first of its paths. Every
     # later path is a further paint of the same shape and is dropped.
@@ -2244,9 +2246,10 @@ def _pages_by_chunk(
     centres: List[tuple] = []
     for index, page in enumerate(document.pages):
         for item in model._walk(page.items):
+            width, height = page.file_size
             centres.append((
-                item.x + item.width / 2.0 - page.width / 2.0,
-                item.y + item.height / 2.0 - page.height / 2.0,
+                item.x + item.width / 2.0 - width / 2.0,
+                item.y + item.height / 2.0 - height / 2.0,
                 index,
             ))
 

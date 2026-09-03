@@ -525,8 +525,30 @@ class PageMargins:
     columns: Tuple[float, ...] = ()
 
 
+class TrimmedSize:
+    """The page size the file states, for anything matching the .pub by it.
+
+    `convert._snap_page_size` trims a page rectangle to the standard it was
+    drawn a hair off, and only the rectangle moves: every item keeps the
+    coordinates the file gives it. The file's own Escher anchors are stated
+    from the centre of the page *it* states, so every pass that matches a
+    shape against the .pub has to measure from there rather than from the
+    new trim -- half the trim is 0.78pt on A5, and the matchers allow half
+    a point. Subclasses carry `stated_width`/`stated_height`, None while
+    the rectangle is still the stated one.
+    """
+
+    @property
+    def file_size(self) -> Tuple[float, float]:
+        """The page as the file states it, trimmed or not."""
+        return (
+            self.width if self.stated_width is None else self.stated_width,
+            self.height if self.stated_height is None else self.stated_height,
+        )
+
+
 @dataclass
-class Page:
+class Page(TrimmedSize):
     width: float = 612.0
     height: float = 792.0
     items: List[Item] = field(default_factory=list)
@@ -538,10 +560,17 @@ class Page:
     #: read. None means unknown, and the reader keeps its own default --
     #: which is a guide in the wrong place, but an honest one.
     margins: Optional[PageMargins] = None
+    #: The size the file states, where the page rectangle has since been
+    #: trimmed to a standard (`convert._snap_page_size`). None means the
+    #: rectangle is still the stated one. Everything that matches a shape
+    #: against the .pub has to measure from *this* centre: the file's
+    #: anchors are stated from it, and only the rectangle moved.
+    stated_width: Optional[float] = None
+    stated_height: Optional[float] = None
 
 
 @dataclass
-class Master:
+class Master(TrimmedSize):
     """Content Publisher held once and repeated on every page applying it."""
 
     name: str = "A"
@@ -549,6 +578,9 @@ class Master:
     height: float = 792.0
     items: List[Item] = field(default_factory=list)
     margins: Optional[PageMargins] = None
+    #: See `TrimmedSize`. A master is trimmed with the pages.
+    stated_width: Optional[float] = None
+    stated_height: Optional[float] = None
 
 
 @dataclass

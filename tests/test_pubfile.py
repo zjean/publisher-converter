@@ -3274,6 +3274,23 @@ class GradientRestorationTest(unittest.TestCase):
         self.assertIsNone(shape.style.gradient)
         self.assertTrue(shape.style.approximated_fill)
 
+    def test_a_trimmed_page_still_matches_the_shape_the_file_states(self):
+        # The page rectangle is snapped to the standard it was drawn a hair
+        # off, and only the rectangle moves: every item keeps the
+        # coordinates the file gives it. But the Escher anchors are stated
+        # from the centre of the page the *file* states, so matching them
+        # against the trimmed centre misses by half the trim -- 0.78pt on
+        # A5, where `gradient_for` allows half a point. It took 20 of the
+        # 21 ramps in an issue with it.
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        page = document.pages[0]
+        page.stated_width, page.stated_height = page.width, page.height
+        page.width, page.height = page.width - 1.55, page.height + 0.32
+        convert._restore_gradient_ramps(document, self.structure())
+        self.assertIsNotNone(shape.style.gradient)
+
     def test_a_shape_inside_a_group_is_reached(self):
         shape = model.Rectangle(
             x=50.0, y=100.0, width=100.0, height=50.0,
