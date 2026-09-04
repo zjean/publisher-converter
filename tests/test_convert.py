@@ -1308,3 +1308,155 @@ class WordArtTrackingTest(unittest.TestCase):
 
     def test_the_old_constant_is_what_an_unmeasured_font_still_gets(self):
         self.assertEqual(convert._wordart_tracking(1.2, 0.50), 100.0)
+
+
+class PageSnapTest(unittest.TestCase):
+    """Setting a page up as the standard size it was drawn a hair off."""
+
+    MM = 72.0 / 25.4
+
+    def document(self, width_mm, height_mm, pages=1, masters=0) -> model.Document:
+        width, height = width_mm * self.MM, height_mm * self.MM
+        return model.Document(
+            pages=[model.Page(width=width, height=height) for _ in range(pages)],
+            masters=[model.Master(width=width, height=height) for _ in range(masters)],
+        )
+
+    def sizes(self, document) -> set:
+        return {
+            (round(page.width / self.MM, 3), round(page.height / self.MM, 3))
+            for page in list(document.pages) + list(document.masters)
+        }
+
+    def test_the_newsletters_page_is_set_up_as_a5(self):
+        # 148.5265 x 209.8887mm, which is A5 as anybody reading it means A5.
+        document = self.document(148.5265, 209.8887, pages=4, masters=1)
+        snapped = convert._snap_page_size(document)
+        self.assertEqual(snapped[0], "A5")
+        self.assertEqual(self.sizes(document), {(148.0, 210.0)})
+
+    def test_a_landscape_page_matches_the_same_standard_turned(self):
+        document = self.document(297.0, 209.5)
+        self.assertEqual(convert._snap_page_size(document)[0], "A4")
+        self.assertEqual(self.sizes(document), {(297.0, 210.0)})
+
+    def test_a_page_that_is_already_the_standard_is_left_alone(self):
+        document = self.document(148.0, 210.0)
+        self.assertIsNone(convert._snap_page_size(document))
+
+    def test_a_size_near_no_standard_keeps_what_the_file_states(self):
+        # `Lisa Hoogendijk` is 280 x 350mm, which is nothing but itself.
+        document = self.document(280.0, 350.0)
+        self.assertIsNone(convert._snap_page_size(document))
+        self.assertEqual(self.sizes(document), {(280.0, 350.0)})
+
+    def test_a_page_more_than_a_millimetre_off_is_not_that_standard(self):
+        document = self.document(148.0, 208.5)
+        self.assertIsNone(convert._snap_page_size(document))
+
+    def test_pages_that_differ_in_size_are_never_guessed_at(self):
+        document = self.document(148.5265, 209.8887, pages=2)
+        document.pages[1].width = 200.0 * self.MM
+        self.assertIsNone(convert._snap_page_size(document))
+        self.assertEqual(len(self.sizes(document)), 2)
+
+    def test_a_trim_that_really_moved_is_reported(self):
+        document = self.document(148.5265, 209.8887)
+        convert._note_snapped_page(document, convert._snap_page_size(document))
+        self.assertEqual(len(document.warnings), 1)
+        self.assertIn("A5", document.warnings[0])
+        self.assertIn("--no-page-snap", document.warnings[0])
+
+    @needs_parser
+    def test_the_newsletters_convert_to_an_a5_page(self):
+        work = Path(tempfile.mkdtemp())
+        for source in sorted((SAMPLES / "cgk").glob("*kerkbode.pub")):
+            with self.subTest(source=source.name):
+                destination = work / f"{source.stem}.idml"
+                result = convert.convert(source, destination)
+                self.assertTrue(result.ok, result.error)
+                with zipfile.ZipFile(destination) as archive:
+                    root = ET.fromstring(archive.read("Resources/Preferences.xml"))
+                setup = next(root.iter("DocumentPreferences"))
+                self.assertAlmostEqual(
+                    float(setup.get("PageWidth")) / self.MM, 148.0, places=3
+                )
+                self.assertAlmostEqual(
+                    float(setup.get("PageHeight")) / self.MM, 210.0, places=3
+                )
+                self.assertEqual(setup.get("PageOrientation"), "Portrait")
+
+    def test_a_correction_below_the_trim_says_nothing(self):
+        # libmspub reports four decimals of an inch, so a page that is A4
+        # arrives a thousandth of a millimetre off it. Not worth a word.
+        document = self.document(210.001, 297.001)
+        snapped = convert._snap_page_size(document)
+        self.assertEqual(snapped[0], "A4")
+        convert._note_snapped_page(document, snapped)
+        self.assertEqual(document.warnings, [])
+
+
+class MeasurementUnitTest(unittest.TestCase):
+    """Which unit the document's own geometry was typed in.
+
+    Publisher keeps the measurement unit as an application option, so the
+    reading is of the lengths rather than of a field (`_measurement_unit`).
+    """
+
+    MM = 72.0 / 25.4
+
+    def document(self, width, height, margins=None) -> model.Document:
+        page = model.Page(width=width, height=height)
+        if margins is not None:
+            page.margins = model.PageMargins(*margins)
+        return model.Document(pages=[page])
+
+    def test_a_page_typed_in_millimetres_reads_as_millimetres(self):
+        # A4, which is round in millimetres and in nothing else.
+        document = self.document(210 * self.MM, 297 * self.MM)
+        self.assertEqual(convert._measurement_unit(document), "mm")
+
+    def test_us_letter_reads_as_inches(self):
+        document = self.document(612.0, 792.0, margins=(18.0, 18.0, 18.0, 18.0))
+        self.assertEqual(convert._measurement_unit(document), "in")
+
+    def test_metric_margins_carry_a_page_round_in_neither_unit(self):
+        # `1336 kerkbode`: the page is 148.5265 x 209.8887mm, which was
+        # never typed, but the margins are exactly 14, 15, 16 and 17mm.
+        document = self.document(
+            421.02, 594.96,
+            margins=tuple(mm * self.MM for mm in (14, 15, 16, 17)),
+        )
+        self.assertEqual(convert._measurement_unit(document), "mm")
+
+    def test_an_inch_length_that_happens_to_be_half_millimetres_is_not_enough(self):
+        # 2.5in is 63.5mm and 5in is 127mm, both whole half-millimetres.
+        # One of them agreeing is a coincidence, so a document stating one
+        # among inches stays imperial.
+        document = self.document(5 * 72.0, 7 * 72.0, margins=(18.0,) * 4)
+        self.assertEqual(convert._measurement_unit(document), "in")
+
+    def test_a_document_stating_nothing_metric_falls_back_to_inches(self):
+        document = model.Document(pages=[])
+        self.assertEqual(convert._measurement_unit(document), "in")
+
+    def test_a_master_states_lengths_too(self):
+        document = model.Document(
+            pages=[model.Page(width=421.02, height=594.96)],
+            masters=[model.Master(width=210 * self.MM, height=297 * self.MM)],
+        )
+        self.assertEqual(convert._measurement_unit(document), "mm")
+
+    @needs_parser
+    def test_the_corpus_divides_the_way_its_locales_do(self):
+        # Every European file metric, the one US-letter file imperial.
+        expected = {"Blank Note Card (100_1502 Snail) (2 up)": "in"}
+        for source in sorted(SAMPLES.rglob("*.pub")):
+            with self.subTest(source=source.name):
+                document = convert.parse_document(source)
+                structure = pubfile.read_structure(source)
+                convert._apply_page_margins(document, structure)
+                self.assertEqual(
+                    convert._measurement_unit(document),
+                    expected.get(source.stem, "mm"),
+                )

@@ -214,6 +214,8 @@ The same flags apply on macOS; only the default paths differ.
 | `--no-image-wrap` | keep the source's exact stacking instead of flowing text around images and around the headlines the file says it flowed around. Both will then cover text |
 | `--facing-pages` | lay the pages out as reader's spreads — `1 \| 2-3 \| 4-5` — instead of singly. Only needed where the file does not describe a booklet itself: a print sheet that reaches two pages side by side and a page count that is a multiple of four are read as one, and a document nobody has printed states no sheet |
 | `--no-facing-pages` | lay every page out singly, overriding what the file says. For a document read as a booklet that is not one |
+| `--no-page-snap` | keep the page size the file states. Without it, a page within a millimetre of a standard size (A3–A6, B5, US Letter, Legal, Tabloid, Half Letter) is set up as that size, with every item left where it is |
+| `--bleed MM` | document bleed in millimetres on all four edges. Default `3`. Publisher states no bleed of its own — it has only a fixed 0.125in print option — so this is a setting rather than a reading. `--bleed 0` sets the document up without one |
 | `--log-file PATH` | write the log here instead of the per-user log folder (`%LOCALAPPDATA%\pub2idml\logs` on Windows, `~/Library/Logs/pub2idml` on macOS) |
 | `--no-log` | do not write a log file |
 | `-v`, `--verbose` | debug-level detail in the log (not the console) |
@@ -747,6 +749,60 @@ These are real and deliberate, not bugs to be surprised by later.
   where this fires are flagged `review`. A `#` is only ever replaced when
   the document carries a field table *and* the text came from a master,
   so a typed `#` is left alone.
+- **A page a hair off a standard size is set up as that size.** The
+  three newsletters state `148.5265 × 209.8887mm` — A5 as anybody reading
+  it means A5, half a millimetre out on one side and a tenth on the other,
+  but not A5 as a reader shows it, and a document whose setup says
+  `Custom` is one nobody can hand to a printer without explaining first.
+  A page within a millimetre of A3–A6, B5, US Letter, Legal, Tabloid or
+  Half Letter — in either orientation — is set up as that size.
+
+  **Only the page rectangle moves.** Every item keeps the coordinates the
+  file gives it, which are stated from the top left, so the whole
+  difference falls at the right and bottom trim: 0.53mm and 0.11mm here,
+  against margins of 16 and 17mm. The guides move with the trim rather
+  than with the content, for the same reason — they are read as positions
+  and resolved into insets afterwards, so a guide stays under the copy it
+  was drawn for, and `1336 kerkbode`'s margins come out 14 / 15 / 15.47 /
+  17.11mm rather than 14 / 15 / 16 / 17.
+
+  Nothing is snapped unless every page agrees on a size, since a document
+  whose pages differ is not one size drawn slightly wrong. A trim that
+  really moves is reported and the file flagged `review`; a page that
+  already *is* the standard is corrected silently, because libmspub
+  reports four decimal places of an inch and an exact A4 therefore arrives
+  a thousandth of a millimetre off. `--no-page-snap` keeps the stated size.
+  Across the corpus this fires on the three newsletters and on
+  `Cantico_dei_Cantici` (148.5 × 210mm), and leaves `Lisa Hoogendijk`
+  (280 × 350mm) alone.
+- **The document is set up in the unit it was laid out in.** The ruler
+  reads millimetres or inches rather than points, decided per file from
+  the lengths the document states about itself — its page size and its
+  margin guides.
+
+  Publisher keeps the measurement unit as an *application* option (File →
+  Options → Advanced), not as a document property, so no field says which
+  one to use. The geometry says it anyway, and it says it in one
+  direction only: a length typed in inches converts to an exact but
+  awkward millimetre value (`0.25in` is `6.35mm`, `8.5in` is `215.9mm`),
+  while a length typed in millimetres converts to no round inch value at
+  all (`14mm` is `0.55118in`). So a length round in millimetres and *not*
+  round in inches could only have been typed in millimetres; a length
+  round in inches is evidence of nothing. Two such lengths settle it,
+  because `2.5in` and `5in` happen to be whole half-millimetres too and
+  one agreeing length can be a coincidence.
+
+  `1336 kerkbode` is the case that needs the margins rather than the page:
+  its page is `148.5265 × 209.8887mm`, round in neither unit and typed by
+  nobody, but its margins are exactly 14, 15, 16 and 17mm. Across the
+  22-file corpus this reads every European file as metric and the one
+  US-letter file as imperial. It is a view preference and nothing more —
+  every length in the package stays in points either way.
+- **Bleed is a setting, not a reading.** Publisher has no document bleed
+  at all: `Allow bleeds` is a print option with a fixed 0.125in, and
+  searching the whole `Contents` stream of all three newsletters for 3mm
+  (`108000` EMU) finds nothing. So the package is set up with `--bleed`,
+  3mm by default, written as one uniform figure on all four edges.
 - **Margin and column guides are carried**, read out of the `.pub`
   rather than from libmspub, which reports exactly two properties for a
   page: `svg:width` and `svg:height`. The file keeps one set of guides

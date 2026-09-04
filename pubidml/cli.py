@@ -104,6 +104,26 @@ def run(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--bleed", type=float, default=convert.DEFAULT_BLEED_MM, metavar="MM",
+        help=(
+            "document bleed in millimetres on all four edges "
+            f"(default: {convert.DEFAULT_BLEED_MM:g}). Publisher states no "
+            "bleed of its own -- it has only a fixed print option -- so "
+            "this is a setting rather than a reading; pass 0 for a "
+            "document set up without bleed"
+        ),
+    )
+    parser.add_argument(
+        "--no-page-snap", action="store_true",
+        help=(
+            "keep the page size the file states. Without it, a page within "
+            "a millimetre of a standard size is set up as that size -- the "
+            "newsletters state 148.53 x 209.89mm and are A5 -- with every "
+            "item left where it is, so the difference falls at the right "
+            "and bottom trim"
+        ),
+    )
+    parser.add_argument(
         "--log-file", type=Path, default=None,
         help=(
             "where to write the diagnostic log "
@@ -138,6 +158,11 @@ def run(argv=None) -> int:
     # won, half of what was typed would be silently ignored.
     if args.facing_pages and args.no_facing_pages:
         parser.error("--facing-pages and --no-facing-pages contradict each other")
+
+    # A negative bleed is a page trimmed inside its own edges, which no
+    # reader means and IDML has no way to express.
+    if args.bleed < 0:
+        parser.error("--bleed cannot be negative")
     facing_pages = True if args.facing_pages else False if args.no_facing_pages else None
 
     log_path = None
@@ -166,6 +191,8 @@ def run(argv=None) -> int:
         codepage=codepage,
         wrap_images=not args.no_image_wrap,
         facing_pages=facing_pages,
+        bleed=args.bleed,
+        snap_page=not args.no_page_snap,
     )
     jobs, results = batch.plan(sources, args.source, output_root, args.force)
     skipped = len(results)

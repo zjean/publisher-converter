@@ -392,6 +392,79 @@ class FacingPagesFlagTest(unittest.TestCase):
         self.assertEqual(int(raised.exception.code), 2)
 
 
+class BleedFlagTest(unittest.TestCase):
+    """A setting, not a reading: no .pub states a document bleed.
+
+    Which is why it has a default rather than being read -- 3mm is what
+    the newsletters this converter was written for are printed with -- and
+    why zero has to be sayable over that default.
+    """
+
+    def setUp(self):
+        self.work = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (self.work / "a.pub").write_bytes(b"not a real .pub")
+        self.seen = []
+        original = convert.convert
+
+        def spy(source, destination, **kw):
+            self.seen.append(kw.get("bleed"))
+            return convert.Result(source=Path(source), output=Path(destination), pages=1)
+
+        cli.convert.convert = spy
+        self.addCleanup(setattr, cli.convert, "convert", original)
+
+    def _run(self, *extra):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            cli.run([str(self.work), "-o", str(self.work / "out"), "--no-log", *extra])
+        return self.seen[-1]
+
+    def test_the_default_is_three_millimetres(self):
+        self.assertEqual(self._run(), 3.0)
+
+    def test_a_figure_is_taken_as_millimetres(self):
+        self.assertEqual(self._run("--bleed", "5"), 5.0)
+
+    def test_zero_asks_for_a_document_set_up_without_bleed(self):
+        self.assertEqual(self._run("--bleed", "0"), 0.0)
+
+    def test_a_negative_bleed_is_refused(self):
+        with self.assertRaises(SystemExit) as raised:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                cli.run([
+                    str(self.work), "-o", str(self.work / "out"), "--no-log",
+                    "--bleed", "-1",
+                ])
+        self.assertEqual(int(raised.exception.code), 2)
+
+
+class PageSnapFlagTest(unittest.TestCase):
+    """The page is set up as its standard size unless told to leave it."""
+
+    def setUp(self):
+        self.work = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (self.work / "a.pub").write_bytes(b"not a real .pub")
+        self.seen = []
+        original = convert.convert
+
+        def spy(source, destination, **kw):
+            self.seen.append(kw.get("snap_page"))
+            return convert.Result(source=Path(source), output=Path(destination), pages=1)
+
+        cli.convert.convert = spy
+        self.addCleanup(setattr, cli.convert, "convert", original)
+
+    def _run(self, *extra):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            cli.run([str(self.work), "-o", str(self.work / "out"), "--no-log", *extra])
+        return self.seen[-1]
+
+    def test_snapping_is_what_happens_without_a_flag(self):
+        self.assertIs(self._run(), True)
+
+    def test_the_flag_keeps_the_size_the_file_states(self):
+        self.assertIs(self._run("--no-page-snap"), False)
+
+
 class FacingDetailLineTest(unittest.TestCase):
     """Saying so when the layout was decided from the file rather than asked
     for. A silent change of spread layout is the thing to avoid."""

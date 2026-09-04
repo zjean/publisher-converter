@@ -10,12 +10,13 @@ from __future__ import annotations
 import re
 
 PT_PER_INCH = 72.0
+PT_PER_MM = PT_PER_INCH / 25.4
 
 _UNIT_TO_PT = {
     "in": PT_PER_INCH,
     "pt": 1.0,
     "cm": PT_PER_INCH / 2.54,
-    "mm": PT_PER_INCH / 25.4,
+    "mm": PT_PER_MM,
     "pc": 12.0,
     "px": 0.75,  # librevenge assumes 96 dpi for px
     "twip": 1.0 / 20.0,

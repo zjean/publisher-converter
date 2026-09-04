@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import (
-    fontmetrics, idml, logsetup, metafile, model, pubfile, textrepair, wmf,
+    fontmetrics, idml, logsetup, metafile, model, pubfile, textrepair,
+    units, wmf,
 )
 
 log = logsetup.get_logger("convert")
@@ -53,6 +54,13 @@ EXIT_PARSE_FAILED = 4
 EXIT_WRITE_FAILED = 5
 
 PARSE_TIMEOUT_S = 300
+
+#: The document bleed to set up, in millimetres. Nothing in a .pub states
+#: one, so this is a choice rather than a reading: 3mm is what a commercial
+#: printer asks for, and it is what the newsletters this converter was
+#: written for are printed with. `--bleed 0` is the way to a document set
+#: up without it.
+DEFAULT_BLEED_MM = 3.0
 
 
 class ConversionError(Exception):
@@ -590,6 +598,193 @@ def _detect_facing_pages(
         and sheet_width < 3 * width - _TWO_UP_SLACK
         and sheet_height >= height - _TWO_UP_SLACK
     )
+
+
+# A length is read as metric when it lands this close to a whole or half
+# millimetre, and as imperial when it lands this close to a sixteenth of an
+# inch. Both are looser than the file's own precision -- Publisher stores
+# EMU, and 14mm comes back as 14.0000 -- and tight enough that neither grid
+# is hit by an accident of rounding.
+_MM_TOLERANCE = 0.01
+_INCH_TOLERANCE = 0.0005
+# Two lengths, not one. 2.5in and 5in happen to be whole half-millimetres
+# too, so a single agreeing length can be a coincidence; a document stating
+# two of them was laid out in millimetres.
+_METRIC_EVIDENCE = 2
+
+
+# The sizes a page is drawn to, in millimetres and in inches. Publisher
+# offers all of them by name, and a file that names one and then states a
+# size a fraction off it -- which is most of what long-lived documents do,
+# the size having survived a template, a printer driver and a unit round
+# trip -- was still meant as that size.
+_STANDARD_PAGES_MM = {
+    "A3": (297.0, 420.0),
+    "A4": (210.0, 297.0),
+    "A5": (148.0, 210.0),
+    "A6": (105.0, 148.0),
+    "B5": (176.0, 250.0),
+}
+_STANDARD_PAGES_IN = {
+    "US Letter": (8.5, 11.0),
+    "US Legal": (8.5, 14.0),
+    "US Tabloid": (11.0, 17.0),
+    "US Half Letter": (5.5, 8.5),
+}
+# How far off a standard a page may be and still be read as that standard.
+# A millimetre, which is an order of magnitude more than the corpus's worst
+# case -- `1336 kerkbode` is 0.53mm off A5 on the long side -- and two
+# orders less than the gap between any two of the sizes above.
+_PAGE_SNAP_TOLERANCE_MM = 1.0
+# Below this the trim did not really move and there is nothing to say
+# about it. libmspub reports a page in four decimal places of an inch, so
+# a page that *is* the standard still arrives about a thousandth of a
+# millimetre off it and is corrected silently; a twentieth of a millimetre
+# is far below what any trimmer holds and far above that rounding.
+_PAGE_SNAP_NOTE_MM = 0.05
+
+
+def _standard_pages():
+    """Every standard size in points, portrait and landscape both."""
+    for name, (width, height) in _STANDARD_PAGES_MM.items():
+        yield name, width * units.PT_PER_MM, height * units.PT_PER_MM
+    for name, (width, height) in _STANDARD_PAGES_IN.items():
+        yield name, width * units.PT_PER_INCH, height * units.PT_PER_INCH
+
+
+def _standard_page_size(width: float, height: float):
+    """The standard page this size is within a millimetre of, or None."""
+    tolerance = _PAGE_SNAP_TOLERANCE_MM * units.PT_PER_MM
+    for name, standard_width, standard_height in _standard_pages():
+        for candidate in ((standard_width, standard_height),
+                          (standard_height, standard_width)):
+            if (abs(width - candidate[0]) <= tolerance
+                    and abs(height - candidate[1]) <= tolerance):
+                return name, candidate
+    return None
+
+
+def _snap_page_size(document: model.Document):
+    """Trim the pages to the standard size they were drawn a hair off.
+
+    `1336 kerkbode` states 148.5265 x 209.8887mm. That is A5 as anybody
+    reading it means A5 -- half a millimetre out on one side and a tenth on
+    the other -- but it is not A5 as a reader shows it, and a document
+    whose setup says `Custom` is one nobody can hand to a printer without
+    explaining it first.
+
+    Only the page rectangle moves. Every item keeps the coordinates the
+    file gives it, which are stated from the top left, so the whole
+    difference is absorbed at the right and bottom edges -- 0.53mm and
+    0.11mm here, against margins of 16 and 17mm. The guides move with the
+    trim rather than with the content for the same reason: they are read as
+    positions and resolved into insets afterwards, so a guide stays under
+    the copy it was drawn for.
+
+    Nothing is snapped unless every page agrees on a size, since a document
+    whose pages differ is not one size drawn slightly wrong. A page already
+    at the standard is corrected silently -- see `_note_snapped_page`.
+    """
+    pages = list(document.pages) + list(document.masters)
+    if not pages:
+        return None
+    width, height = pages[0].width, pages[0].height
+    if any(page.width != width or page.height != height for page in pages):
+        return None
+    found = _standard_page_size(width, height)
+    if found is None:
+        return None
+    name, (snapped_width, snapped_height) = found
+    if snapped_width == width and snapped_height == height:
+        return None
+    for page in pages:
+        # Remembered, because the file's own anchors are stated from the
+        # centre of the page it states: every pass that matches a shape
+        # against the .pub measures from there, not from the new trim.
+        page.stated_width, page.stated_height = page.width, page.height
+        page.width, page.height = snapped_width, snapped_height
+    return name, (width, height), (snapped_width, snapped_height)
+
+
+def _note_snapped_page(document: model.Document, snapped) -> None:
+    """Say that the trim edge moved, and by how much.
+
+    The page is the one thing every measurement in the document is taken
+    against, so moving it -- even by half a millimetre -- is not something
+    to do silently.
+    """
+    if snapped is None:
+        return
+    name, (was_width, was_height), (width, height) = snapped
+    moved = max(abs(width - was_width), abs(height - was_height))
+    if moved < _PAGE_SNAP_NOTE_MM * units.PT_PER_MM:
+        return
+    document.warnings.append(
+        f"page set up as {name}: the file states "
+        f"{was_width / units.PT_PER_MM:.2f} x {was_height / units.PT_PER_MM:.2f}mm, "
+        f"which is {abs(width - was_width) / units.PT_PER_MM:.2f} and "
+        f"{abs(height - was_height) / units.PT_PER_MM:.2f}mm off {name} "
+        f"({width / units.PT_PER_MM:.0f} x {height / units.PT_PER_MM:.0f}mm). "
+        f"Nothing on the page moved, so the difference falls at the right "
+        f"and bottom trim -- pass --no-page-snap to keep the stated size"
+    )
+
+
+def _measurement_unit(document: model.Document) -> str:
+    """Millimetres or inches, from the lengths the document itself states.
+
+    Publisher keeps the measurement unit as an application option rather
+    than a document property -- it is in File > Options > Advanced, not in
+    the .pub -- so nothing in the file says which one to put on the ruler.
+    The geometry says it anyway, and it says it one-directionally.
+
+    A length typed in inches converts to an exact but awkward millimetre
+    value: 0.25in is 6.35mm, 8.5in is 215.9mm. A length typed in
+    millimetres converts to no round inch value at all: 14mm is 0.55118in.
+    So a length that is round in millimetres and *not* round in inches
+    could only have been typed in millimetres, while a length round in
+    inches is evidence of nothing -- and asking the question that way round
+    is what separates the corpus's metric files from its imperial ones.
+
+    `1336 kerkbode` is the case that needs it. Its page is 148.5265 x
+    209.8887mm, round in neither unit, but its margins are exactly 14, 15,
+    16 and 17mm against 0.55118, 0.59055, 0.62992 and 0.66929in. The
+    `Blank Note Card`, the one imperial file in the corpus, states nothing
+    that is round in millimetres alone: 8.5 x 11in with 0.25in margins.
+    """
+    metric = 0
+    for length in _stated_lengths(document):
+        millimetres = length / units.PT_PER_MM
+        inches = length / units.PT_PER_INCH
+        if abs(millimetres - round(millimetres * 2) / 2) > _MM_TOLERANCE:
+            continue
+        if abs(inches - round(inches * 16) / 16) <= _INCH_TOLERANCE:
+            continue
+        metric += 1
+    return "mm" if metric >= _METRIC_EVIDENCE else "in"
+
+
+def _stated_lengths(document: model.Document):
+    """Every length the document states about itself, in points.
+
+    The page and the margin guides, and nothing off a shape: a frame is
+    dragged to where it looks right, while these are the numbers somebody
+    typed into a dialog box -- which is what makes them worth reading a
+    unit off.
+    """
+    seen = set()
+    for page in list(document.pages) + list(document.masters):
+        lengths = [page.width, page.height]
+        if page.margins is not None:
+            lengths += [
+                page.margins.left, page.margins.top,
+                page.margins.right, page.margins.bottom,
+            ]
+        for length in lengths:
+            key = round(length, 4)
+            if key not in seen:
+                seen.add(key)
+                yield length
 
 
 def _restore_blank_pages(
@@ -2857,6 +3052,8 @@ def convert(
     codepage: Optional[str] = "auto",
     wrap_images: bool = True,
     facing_pages: Optional[bool] = None,
+    bleed: float = DEFAULT_BLEED_MM,
+    snap_page: bool = True,
 ) -> Result:
     """Convert one .pub file to an .idml package.
 
@@ -2866,13 +3063,20 @@ def convert(
     `facing_pages` None reads the layout off the file, which is what the
     command line does when neither flag is given; True and False are the
     operator overriding that either way.
+
+    `bleed` is in millimetres, and is the caller's alone: no .pub states a
+    document bleed (`_measurement_unit` says why the unit is not in there
+    either).
+
+    `snap_page` False keeps the page size the file states, however far off
+    a standard it is (`_snap_page_size`).
     """
     source = Path(source)
     result = Result(source=source)
     try:
         _convert(
             result, source, Path(destination), pubdump, codepage,
-            wrap_images, facing_pages,
+            wrap_images, facing_pages, bleed, snap_page,
         )
     except ConversionError as exc:
         result.error = str(exc)
@@ -2924,6 +3128,8 @@ def _convert(
     codepage: Optional[str],
     wrap_images: bool,
     facing_pages: Optional[bool],
+    bleed: float,
+    snap_page: bool,
 ) -> None:
     started = time.monotonic()
     log.info("converting %s -> %s", source, destination)
@@ -2970,6 +3176,11 @@ def _convert(
     # After the insets pass, which is where a table's rules and shades
     # arrive: a grid with no text is only blank if it draws nothing too.
     _drop_blank_tables(document)
+    # Before the margins, which are read as positions on the page and
+    # resolved against its size: a guide has to be resolved against the
+    # trim the document ends up with, not the one it was drawn on.
+    if snap_page:
+        _note_snapped_page(document, _snap_page_size(document))
     _apply_page_margins(document, structure)
     # Before the WordArt pass, which takes a shape's paint as it finds it.
     _restore_gradient_ramps(document, structure)
@@ -3011,12 +3222,19 @@ def _convert(
     _check_unnamed_languages(document)
     _check_overset_text(document)
 
+    # After `_apply_page_margins`, which is where the margins arrive: they
+    # are the lengths the unit is read off in the file that needs it most.
+    measurement_unit = _measurement_unit(document)
+    log.info("%s: measurement unit read as %s", source.name, measurement_unit)
+
     # No image_dir_name, so the pictures ride inside the package instead
     # of in a folder beside it that anyone could move away from it.
     writer = idml.IdmlWriter(
         document,
         wrap_images=wrap_images,
         facing_pages=facing_pages,
+        measurement_unit=measurement_unit,
+        bleed=bleed * units.PT_PER_MM,
     )
     try:
         writer.write(destination)

@@ -41,6 +41,11 @@ class Options:
     codepage: Optional[str] = "auto"
     wrap_images: bool = True
     facing_pages: Optional[bool] = None
+    #: Document bleed in millimetres. Not read from the file -- no .pub
+    #: states one -- so the default is the converter's own.
+    bleed: float = convert.DEFAULT_BLEED_MM
+    #: Whether to set a page up as the standard size it is a fraction off.
+    snap_page: bool = True
 
 
 def find_sources(root: Path, recursive: bool = True) -> List[Path]:
@@ -123,6 +128,8 @@ def run_batch(
             codepage=options.codepage,
             wrap_images=options.wrap_images,
             facing_pages=options.facing_pages,
+            bleed=options.bleed,
+            snap_page=options.snap_page,
         )
 
     # A ThreadPoolExecutor runs every job handed to it -- cancelling a

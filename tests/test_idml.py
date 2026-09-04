@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import unquote, urlsplit
 
-from pubidml import convert, fontmetrics, idml, model
+from pubidml import convert, fontmetrics, idml, model, units
 
 from . import support
 from .support import event
@@ -2956,3 +2956,48 @@ class FirstBaselineLiftTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DocumentSetupTest(unittest.TestCase):
+    """What the package says about the document as a whole."""
+
+    def preferences(self, **kwargs):
+        document = model.Document(pages=[model.Page(width=421.02, height=594.96)])
+        work = Path(tempfile.mkdtemp())
+        destination = work / "setup.idml"
+        idml.IdmlWriter(document, **kwargs).write(destination)
+        with zipfile.ZipFile(destination) as archive:
+            root = ET.fromstring(archive.read("Resources/Preferences.xml"))
+        return (
+            next(root.iter("DocumentPreferences")),
+            next(root.iter("ViewPreference")),
+        )
+
+    def test_the_ruler_is_marked_in_the_unit_the_document_was_typed_in(self):
+        _document, view = self.preferences(measurement_unit="mm")
+        self.assertEqual(view.get("HorizontalMeasurementUnits"), "Millimeters")
+        self.assertEqual(view.get("VerticalMeasurementUnits"), "Millimeters")
+
+    def test_an_imperial_document_gets_an_imperial_ruler(self):
+        _document, view = self.preferences(measurement_unit="in")
+        self.assertEqual(view.get("HorizontalMeasurementUnits"), "Inches")
+
+    def test_the_bleed_is_written_on_all_four_edges_as_one_figure(self):
+        # 3mm, which is what a printer asks for and what pub2idml sets up
+        # by default. IDML is in points, so the package states 8.503937.
+        document, _view = self.preferences(bleed=3.0 * units.PT_PER_MM)
+        self.assertEqual(document.get("DocumentBleedUniformSize"), "true")
+        for side in ("Top", "Bottom", "InsideOrLeft", "OutsideOrRight"):
+            self.assertAlmostEqual(
+                float(document.get(f"DocumentBleed{side}Offset")), 8.503937, places=5
+            )
+
+    def test_no_bleed_asked_for_is_a_document_set_up_without_one(self):
+        document, _view = self.preferences(bleed=0.0)
+        for side in ("Top", "Bottom", "InsideOrLeft", "OutsideOrRight"):
+            self.assertEqual(document.get(f"DocumentBleed{side}Offset"), "0")
+
+    def test_the_page_keeps_the_size_and_orientation_the_file_states(self):
+        document, _view = self.preferences()
+        self.assertEqual(document.get("PageWidth"), "421.02")
+        self.assertEqual(document.get("PageOrientation"), "Portrait")

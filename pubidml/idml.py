@@ -88,6 +88,12 @@ _NOTIONAL_IMAGE_DIR = "images"
 NO_PARAGRAPH_STYLE = "ParagraphStyle/$ID/[No paragraph style]"
 NO_CHARACTER_STYLE = "CharacterStyle/$ID/[No character style]"
 
+# What the ruler is marked in. A view preference and nothing more -- every
+# length in the package stays in points either way -- but it is the first
+# thing anybody continuing the layout meets, and Points is the wrong answer
+# for a document laid out to whole millimetres.
+_MEASUREMENT_UNITS = {"mm": "Millimeters", "in": "Inches"}
+
 # The four sides of a table cell, as IDML prefixes them: TopEdgeStroke...,
 # LeftEdgeStroke..., and so on.
 _CELL_EDGES = ("Top", "Left", "Bottom", "Right")
@@ -532,12 +538,20 @@ class IdmlWriter:
         image_dir_name: Optional[str] = None,
         wrap_images: bool = True,
         facing_pages: bool = False,
+        measurement_unit: str = "mm",
+        bleed: float = 0.0,
     ):
         self.doc = document
         self.ids = _Ids()
         self.image_dir_name = image_dir_name
         self.wrap_images = wrap_images
         self.facing_pages = facing_pages
+        self.measurement_unit = measurement_unit
+        #: Document bleed on all four edges, in points. Nothing in a .pub
+        #: states one -- Publisher has no document bleed at all, only a
+        #: fixed 0.125in print option -- so this is the caller's, and zero
+        #: means the document is set up without bleed rather than unknown.
+        self.bleed = bleed
         self.color_ids: Dict[model.Color, str] = {}
         # Equal gradients share one resource, which is why model.Gradient is
         # frozen: Publisher repeats the same ramp across a document.
@@ -1047,12 +1061,26 @@ class IdmlWriter:
                 "PagesPerDocument": str(max(1, len(self.doc.pages))),
                 "FacingPages": "true" if self.facing_pages else "false",
                 "PageOrientation": "Portrait" if first.height >= first.width else "Landscape",
+                # One figure on all four edges, which is what a bleed is
+                # asked for as. The uniform flag is what makes the reader
+                # show it as one figure rather than four; without it the
+                # four offsets are still honoured but arrive as a custom
+                # bleed nobody typed.
+                "DocumentBleedUniformSize": "true",
+                "DocumentBleedTopOffset": fmt(self.bleed),
+                "DocumentBleedBottomOffset": fmt(self.bleed),
+                "DocumentBleedInsideOrLeftOffset": fmt(self.bleed),
+                "DocumentBleedOutsideOrRightOffset": fmt(self.bleed),
             },
         )
+        units_name = _MEASUREMENT_UNITS.get(self.measurement_unit, "Millimeters")
         ET.SubElement(
             root,
             "ViewPreference",
-            {"HorizontalMeasurementUnits": "Points", "VerticalMeasurementUnits": "Points"},
+            {
+                "HorizontalMeasurementUnits": units_name,
+                "VerticalMeasurementUnits": units_name,
+            },
         )
         return _serialise(root)
 
