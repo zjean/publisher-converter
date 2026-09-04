@@ -25,6 +25,19 @@ needs_parser = unittest.skipUnless(
     PUBDUMP.exists(), f"pubdump not built at {PUBDUMP}; run 'make'"
 )
 
+#: The newsletters are the only samples carrying page-sized cover art, and
+#: they are not in the repository -- they are somebody's own documents. So a
+#: test reading one is a canary over this machine's corpus. `needs_parser`
+#: does not cover that and is the trap it looks like it covers: the build
+#: runner compiles the parser and has no corpus, which is exactly where a
+#: hardcoded newsletter path converts a file that is not there and fails
+#: rather than skips. Same caveat as `test_pubfile.needs_newsletter`.
+NEWSLETTERS = SAMPLES / "cgk"
+needs_newsletters = unittest.skipUnless(
+    (NEWSLETTERS / "1338 kerkbode.pub").exists(),
+    "the kerkbode newsletters are absent (not tracked)",
+)
+
 
 def fake_pubdump(directory: Path, script: str) -> Path:
     """A stand-in parser, so failure modes can be produced on demand."""
@@ -1454,9 +1467,10 @@ class PageSnapTest(unittest.TestCase):
         self.assertEqual(document.pages[0].file_size, first)
 
     @needs_parser
+    @needs_newsletters
     def test_the_newsletters_convert_to_an_a5_page(self):
         work = Path(tempfile.mkdtemp())
-        for source in sorted((SAMPLES / "cgk").glob("*kerkbode.pub")):
+        for source in sorted(NEWSLETTERS.glob("*kerkbode.pub")):
             with self.subTest(source=source.name):
                 destination = work / f"{source.stem}.idml"
                 result = convert.convert(source, destination)
@@ -1482,6 +1496,7 @@ class PageSnapTest(unittest.TestCase):
         self.assertEqual(document.warnings, [])
 
 
+@needs_newsletters
 class BleedContentTest(unittest.TestCase):
     """Whose art fills the bleed the document is set up with.
 
@@ -1510,7 +1525,7 @@ class BleedContentTest(unittest.TestCase):
         # 3mm is the default, and on the cover the file's own picture
         # covers all of it at the top and the bottom. Nothing was extended
         # to make that true.
-        for source in sorted((SAMPLES / "cgk").glob("*kerkbode.pub")):
+        for source in sorted(NEWSLETTERS.glob("*kerkbode.pub")):
             with self.subTest(source=source.name):
                 page, picture = self.cover(source)
                 over_top = -picture.y
@@ -1523,7 +1538,7 @@ class BleedContentTest(unittest.TestCase):
         # The setting is a document property and nothing else, which is why
         # `--bleed 0` is no answer to art that overhangs the trim: it
         # withdraws the allowance and leaves every item where it was.
-        source = SAMPLES / "cgk" / "1338 kerkbode.pub"
+        source = NEWSLETTERS / "1338 kerkbode.pub"
         work = Path(tempfile.mkdtemp())
         spreads, offsets = {}, {}
         for bleed in (0.0, convert.DEFAULT_BLEED_MM):
