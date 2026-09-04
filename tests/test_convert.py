@@ -1482,6 +1482,67 @@ class PageSnapTest(unittest.TestCase):
         self.assertEqual(document.warnings, [])
 
 
+class BleedContentTest(unittest.TestCase):
+    """Whose art fills the bleed the document is set up with.
+
+    The converter does not stretch anything out to the bleed box: items
+    keep the coordinates the file gives them. The newsletters do not need
+    it stretched -- they were drawn with full-bleed pictures -- and this is
+    what would break if a later pass ever clipped an item to the trim.
+    """
+
+    MM = 72.0 / 25.4
+
+    def cover(self, source: Path):
+        """Page one's page-sized picture, and the trim it is measured off."""
+        document = convert.parse_document(source)
+        convert._snap_page_size(document)
+        page = document.pages[0]
+        pictures = [
+            item for item in page.items
+            if item.width > 0.95 * page.width and item.height > 0.95 * page.height
+        ]
+        self.assertEqual(len(pictures), 1, f"{source.name}: {len(pictures)} found")
+        return page, pictures[0]
+
+    @needs_parser
+    def test_the_newsletters_own_pictures_fill_the_default_bleed(self):
+        # 3mm is the default, and on the cover the file's own picture
+        # covers all of it at the top and the bottom. Nothing was extended
+        # to make that true.
+        for source in sorted((SAMPLES / "cgk").glob("*kerkbode.pub")):
+            with self.subTest(source=source.name):
+                page, picture = self.cover(source)
+                over_top = -picture.y
+                over_bottom = picture.y + picture.height - page.height
+                self.assertGreaterEqual(over_top / self.MM, convert.DEFAULT_BLEED_MM)
+                self.assertGreaterEqual(over_bottom / self.MM, convert.DEFAULT_BLEED_MM)
+
+    @needs_parser
+    def test_the_bleed_asked_for_does_not_move_the_art(self):
+        # The setting is a document property and nothing else, which is why
+        # `--bleed 0` is no answer to art that overhangs the trim: it
+        # withdraws the allowance and leaves every item where it was.
+        source = SAMPLES / "cgk" / "1338 kerkbode.pub"
+        work = Path(tempfile.mkdtemp())
+        spreads, offsets = {}, {}
+        for bleed in (0.0, convert.DEFAULT_BLEED_MM):
+            destination = work / f"bleed-{bleed:g}.idml"
+            result = convert.convert(source, destination, bleed=bleed)
+            self.assertTrue(result.ok, result.error)
+            with zipfile.ZipFile(destination) as archive:
+                spreads[bleed] = archive.read("Spreads/Spread_spread1.xml")
+                preferences = ET.fromstring(archive.read("Resources/Preferences.xml"))
+            setup = next(preferences.iter("DocumentPreferences"))
+            offsets[bleed] = float(setup.get("DocumentBleedTopOffset"))
+        self.assertAlmostEqual(offsets[0.0], 0.0, places=6)
+        self.assertAlmostEqual(
+            offsets[convert.DEFAULT_BLEED_MM] / self.MM,
+            convert.DEFAULT_BLEED_MM, places=3,
+        )
+        self.assertEqual(spreads[0.0], spreads[convert.DEFAULT_BLEED_MM])
+
+
 class MeasurementUnitTest(unittest.TestCase):
     """Which unit the document's own geometry was typed in.
 

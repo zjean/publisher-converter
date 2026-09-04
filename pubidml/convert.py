@@ -58,8 +58,10 @@ PARSE_TIMEOUT_S = 300
 #: The document bleed to set up, in millimetres. Nothing in a .pub states
 #: one, so this is a choice rather than a reading: 3mm is what a commercial
 #: printer asks for, and it is what the newsletters this converter was
-#: written for are printed with. `--bleed 0` is the way to a document set
-#: up without it.
+#: written for are printed with -- their own page-sized pictures are drawn
+#: past the trim by up to 3.3mm, so the allowance is one the art already
+#: fills. Nothing is stretched to fill it where the art stops at the trim;
+#: `--bleed 0` is the way to a document set up without it.
 DEFAULT_BLEED_MM = 3.0
 
 #: And the most one can be asked for. A bleed is an allowance at the trim,

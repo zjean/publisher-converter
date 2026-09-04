@@ -823,13 +823,27 @@ These are real and deliberate, not bugs to be surprised by later.
   points or inches otherwise goes in unnoticed, and `nan` used to reach the
   package as `DocumentBleedTopOffset="nan"`.
 
-  What it does *not* do is extend anything into that bleed. Items keep the
-  coordinates the file gives them, so a full-page background stops at the
-  stated trim: after the snap that leaves about 0.53mm of accidental
-  overhang at the right and bottom and none at the left and top. The
-  setting declares the allowance a printer should trim to; it does not
-  manufacture art to fill it, and on a document whose background has to
-  bleed, `--bleed 0` is the more honest answer until it does.
+  What it does *not* do is manufacture art to fill that bleed — and on the
+  files this was written for it does not have to. The newsletters were
+  drawn with full-bleed pictures: twenty page-sized images across the
+  three, every one of them running past the trim on at least two edges,
+  and the cover picture on all three covering the whole 3mm allowance top
+  and bottom (3.27 and 3.11mm past it). Items keep the coordinates the
+  file gives them, so that bleed arrives on its own, which is the reason
+  the setting is worth having: without it the overhang reads as a mistake
+  rather than as the allowance it is. A page whose art stops at the trim
+  in Publisher stops there here too, and the bleed then declares an
+  allowance nothing fills — which is the state the `.pub` itself is in.
+  `--bleed 0` is how to say so, on a document that has no bleed art and is
+  going to a printer that way.
+
+  The snap moves the trim under that art, on two edges and by less than
+  the bleed. Items are stated from the top left, so the whole difference
+  falls at the right and bottom: on the newsletters the page narrows
+  0.53mm, so page-width art overhangs the right trim by that much, and it
+  *lengthens* 0.11mm, so page-height art stops 0.11mm short of the bottom
+  one. Neither is a bleed question — `--bleed 0` leaves both of them, and
+  `--no-page-snap` is what removes them.
 - **Margin and column guides are carried**, read out of the `.pub`
   rather than from libmspub, which reports exactly two properties for a
   page: `svg:width` and `svg:height`. The file keeps one set of guides
