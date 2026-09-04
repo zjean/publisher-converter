@@ -1160,40 +1160,6 @@ fitting). Worth doing as one piece of work, not two.
 
 ---
 
-## 17. The masthead ribbon keeps libmspub's floored turn
-
-### Why this matters
-
-`_restore_floored_turns` puts back the fraction libmspub throws away when
-it reports a shape's rotation — but only on a `Polygon`, by rotating its
-points about their own centre. The masthead ribbon is a `Path`, so it is
-skipped: its *ramp* is now placed at the file's exact −12.192°, while the
-shape carrying it keeps the floored −13°. Eight tenths of a degree apart,
-on the one shape in the corpus turned by anything other than a half turn.
-
-Measured, from the newsletters' PDFs: the heading bands went from −1.0007
-to −0.0429 against Publisher's −0.0411 when the flooring was corrected for
-them, so the size of the error is real and the correction works. Nothing
-has measured the ribbon's body against Publisher's outline, because the
-ramp was the visible half of the problem and it is fixed.
-
-### Approach
-
-The pass already has everything it needs — it finds the shape by
-`gradient_for`, works out `math.floor(found.rotation) - found.rotation`,
-and rotates. What is missing is the branch for a `Path`: rotate its `ops`
-about the shape's centre the way the polygon's points are rotated, then
-recompute the bounding box from them. A `Path` states curves as well as
-lines, so every coordinate pair in every op has to turn, not just the
-anchors.
-
-Worth checking first whether Affinity is even drawing the ribbon from the
-path rather than from the frame — the WordArt pass replaces it with a
-rotated `TextFrame`, and if the path no longer survives into the package
-there is nothing here to fix.
-
----
-
 ## Not worth doing
 
 Recorded so they don't get re-investigated:
@@ -1220,3 +1186,17 @@ Recorded so they don't get re-investigated:
   LibreOffice are casks, but the Python half is deliberately stdlib-only
   and the shipped artefact is a Windows executable. None of them would be
   present where the tool actually runs.
+- **The masthead ribbon's floored turn.** `_restore_floored_turns` only
+  reaches a `Polygon`, and the ribbon does arrive as a `Path` stating
+  −12.192230 where libmspub reports −13 — but the two paths it arrives as
+  are the WordArt guide pair, and `_recover_wordart` deletes both and puts
+  a `TextFrame` at the file's own −12.1922 in their place. Read back out
+  of the written IDML: the first spread of `1337` holds exactly one
+  rotated object, that frame, and no path or polygon at −13 anywhere on
+  it. The ramp rides on the run inside the frame, re-based by
+  `_rebased_ramp` against the same `art.rotation` the frame turns by, so
+  the ramp and the shape carrying it cannot be a degree apart — there is
+  no shape left to disagree with. Across all nine files the only
+  fractional turns the corpus states are the section bands, which are
+  `Polygon` and are corrected, and these guides, which are thrown away.
+  Which is what `_restore_floored_turns`' own docstring already says.
