@@ -879,9 +879,11 @@ keeping, because each one looks right until it is measured:
   navy at the foot. Eight bands an issue, all three issues, plus the
   page-11 panel in 1336 — which states the flip with *no* turn, and is
   what separates the two. A flip is a reflection, so it mirrors the
-  angle: `180 - angle` vertically, `-angle` horizontally, taken before
-  the turn goes on. Only the vertical one is measured; no shape in the
-  corpus states a horizontal flip.
+  angle: `-angle` for a vertical flip and `180 - angle` for a horizontal
+  one, both taken *after* the shape's turn goes on — which is the order
+  Publisher composes them in, and what `fa30554` settled by measuring the
+  ribbon and the flipped bands together. Only the vertical one is
+  measured; no shape in the corpus states a horizontal flip.
 
   Two more came out of the same measurement once it could see a sense.
   **The turn was being stretched with the ramp.** A diagonal ramp is laid
@@ -1155,6 +1157,40 @@ otherwise its later lines would inherit the step too. So it needs to know
 whether a paragraph fits on one line, which is the same measurement the
 overflowing verse line needs (`actions.md` on Publisher's letter-space
 fitting). Worth doing as one piece of work, not two.
+
+---
+
+## 17. The masthead ribbon keeps libmspub's floored turn
+
+### Why this matters
+
+`_restore_floored_turns` puts back the fraction libmspub throws away when
+it reports a shape's rotation — but only on a `Polygon`, by rotating its
+points about their own centre. The masthead ribbon is a `Path`, so it is
+skipped: its *ramp* is now placed at the file's exact −12.192°, while the
+shape carrying it keeps the floored −13°. Eight tenths of a degree apart,
+on the one shape in the corpus turned by anything other than a half turn.
+
+Measured, from the newsletters' PDFs: the heading bands went from −1.0007
+to −0.0429 against Publisher's −0.0411 when the flooring was corrected for
+them, so the size of the error is real and the correction works. Nothing
+has measured the ribbon's body against Publisher's outline, because the
+ramp was the visible half of the problem and it is fixed.
+
+### Approach
+
+The pass already has everything it needs — it finds the shape by
+`gradient_for`, works out `math.floor(found.rotation) - found.rotation`,
+and rotates. What is missing is the branch for a `Path`: rotate its `ops`
+about the shape's centre the way the polygon's points are rotated, then
+recompute the bounding box from them. A `Path` states curves as well as
+lines, so every coordinate pair in every op has to turn, not just the
+anchors.
+
+Worth checking first whether Affinity is even drawing the ribbon from the
+path rather than from the frame — the WordArt pass replaces it with a
+rotated `TextFrame`, and if the path no longer survives into the package
+there is nothing here to fix.
 
 ---
 

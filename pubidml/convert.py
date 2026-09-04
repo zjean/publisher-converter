@@ -62,6 +62,13 @@ PARSE_TIMEOUT_S = 300
 #: up without it.
 DEFAULT_BLEED_MM = 3.0
 
+#: And the most one can be asked for. A bleed is an allowance at the trim,
+#: which printers state in single-digit millimetres; the reason for a bound
+#: at all is the unit, since a figure meant as points or inches goes in
+#: unnoticed otherwise. 100mm is past anything real and still well short of
+#: the smallest page it could be set on.
+MAX_BLEED_MM = 100.0
+
 
 class ConversionError(Exception):
     """Raised when a .pub file cannot be converted at all."""
@@ -354,14 +361,21 @@ def _is_page_background(item: model.Item, page: model.Page) -> bool:
     writePageBackground emits one for the master and one for the page
     before any real shape, so they have to be stepped over before the
     master's own shapes can be counted off.
+
+    Measured against the size the file states rather than the trim: the
+    rectangle is synthesised at the file's own size, and `_snap_page_size`
+    moves the page rectangle out from under it by more than the tolerance
+    here -- 1.49pt on the newsletter corpus. Before the snap the two sizes
+    are the same number, so this is the same test either side of it.
     """
     if not isinstance(item, model.Rectangle):
         return False
+    width, height = page.file_size
     return (
         abs(item.x) < 1.0
         and abs(item.y) < 1.0
-        and abs(item.width - page.width) < 1.0
-        and abs(item.height - page.height) < 1.0
+        and abs(item.width - width) < 1.0
+        and abs(item.height - height) < 1.0
     )
 
 
@@ -607,10 +621,6 @@ def _detect_facing_pages(
 # is hit by an accident of rounding.
 _MM_TOLERANCE = 0.01
 _INCH_TOLERANCE = 0.0005
-# Two lengths, not one. 2.5in and 5in happen to be whole half-millimetres
-# too, so a single agreeing length can be a coincidence; a document stating
-# two of them was laid out in millimetres.
-_METRIC_EVIDENCE = 2
 
 
 # The sizes a page is drawn to, in millimetres and in inches. Publisher
@@ -633,8 +643,11 @@ _STANDARD_PAGES_IN = {
 }
 # How far off a standard a page may be and still be read as that standard.
 # A millimetre, which is an order of magnitude more than the corpus's worst
-# case -- `1336 kerkbode` is 0.53mm off A5 on the long side -- and two
-# orders less than the gap between any two of the sizes above.
+# case -- `1336 kerkbode` is 0.53mm off A5 on the long side -- and a factor
+# of eight inside the closest the sizes above come to each other, which is
+# A5 against US Half Letter at 8.3mm. No page can be within a millimetre of
+# two of them, which is what makes the match unambiguous rather than
+# nearest-wins.
 _PAGE_SNAP_TOLERANCE_MM = 1.0
 # Below this the trim did not really move and there is nothing to say
 # about it. libmspub reports a page in four decimal places of an inch, so
@@ -667,7 +680,7 @@ def _standard_page_size(width: float, height: float):
 def _snap_page_size(document: model.Document):
     """Trim the pages to the standard size they were drawn a hair off.
 
-    `1336 kerkbode` states 148.5265 x 209.8887mm. That is A5 as anybody
+    `1336 kerkbode` states 148.5265 x 209.8878mm. That is A5 as anybody
     reading it means A5 -- half a millimetre out on one side and a tenth on
     the other -- but it is not A5 as a reader shows it, and a document
     whose setup says `Custom` is one nobody can hand to a printer without
@@ -747,12 +760,29 @@ def _measurement_unit(document: model.Document) -> str:
     is what separates the corpus's metric files from its imperial ones.
 
     `1336 kerkbode` is the case that needs it. Its page is 148.5265 x
-    209.8887mm, round in neither unit, but its margins are exactly 14, 15,
+    209.8878mm, round in neither unit, but its margins are exactly 14, 15,
     16 and 17mm against 0.55118, 0.59055, 0.62992 and 0.66929in. The
     `Blank Note Card`, the one imperial file in the corpus, states nothing
     that is round in millimetres alone: 8.5 x 11in with 0.25in margins.
+
+    One such length is enough, and counting them is not the way to a
+    second opinion: the asymmetry above is the whole of the reading, and
+    the reverse count would undo it. Nine metric files in the corpus state
+    an A4 page with margins of exactly 0.5in, which is Publisher's own
+    template default rather than a number anybody typed -- so the inches
+    there outnumber the millimetres while saying nothing at all.
+
+    Nor is a threshold the way to guard against a coincidence, because the
+    coincidences are already gone: a length round in both units, 5in being
+    exactly 127mm, fails the inch test above and is counted for neither
+    side. What a threshold does instead is lose the common metric setup --
+    `_stated_lengths` dedupes by value, so four margins of 15mm are one
+    length, and with a page round in neither unit that one length is all
+    the evidence a wholly metric document has.
+
+    A document stating nothing round in millimetres alone gets the
+    fallback, which is inches.
     """
-    metric = 0
     for length in _stated_lengths(document):
         millimetres = length / units.PT_PER_MM
         inches = length / units.PT_PER_INCH
@@ -760,8 +790,8 @@ def _measurement_unit(document: model.Document) -> str:
             continue
         if abs(inches - round(inches * 16) / 16) <= _INCH_TOLERANCE:
             continue
-        metric += 1
-    return "mm" if metric >= _METRIC_EVIDENCE else "in"
+        return "mm"
+    return "in"
 
 
 def _stated_lengths(document: model.Document):
@@ -771,14 +801,26 @@ def _stated_lengths(document: model.Document):
     dragged to where it looks right, while these are the numbers somebody
     typed into a dialog box -- which is what makes them worth reading a
     unit off.
+
+    As the file states them, which for a trimmed page is not as they now
+    stand. The page is `file_size`, and the trim comes back off the right
+    and bottom margins: a margin guide is stated as a position from the
+    opposite edge and resolved as `width - position`
+    (`pubfile.Guides.margins`), so trimming the rectangle takes the trim
+    out of the margin rather than moving the guide. Left as it stands, a
+    typed 16mm reads as 15.47 on `1336 kerkbode` and stops being evidence
+    of anything -- and the page it was trimmed to is metric-round, so what
+    is left to read is `_snap_page_size`'s own arithmetic.
     """
     seen = set()
     for page in list(document.pages) + list(document.masters):
-        lengths = [page.width, page.height]
+        width, height = page.file_size
+        lengths = [width, height]
         if page.margins is not None:
             lengths += [
                 page.margins.left, page.margins.top,
-                page.margins.right, page.margins.bottom,
+                page.margins.right + (width - page.width),
+                page.margins.bottom + (height - page.height),
             ]
         for length in lengths:
             key = round(length, 4)
@@ -1161,31 +1203,13 @@ def _apply_page_margins(
         )
 
 
-#: Below this a corrected ramp turn is the turn it already had, and saying
-#: so would be counting a shape that needed nothing. At 0.005 degrees the
-#: widest ramp in the corpus moves four hundredths of a point end to end.
-_RAMP_ANGLE_EPSILON = 0.005
-
-
-def _ramp_span(found: "pubfile.ShapeGradient") -> float:
-    """How far the ramp runs, measured across the box the file states.
-
-    Not the box the item carries. The anchor measures a shape with its
-    outline while libmspub reports the path inside it -- 16pt apart on the
-    page-8 panel of the newsletter corpus -- and a turned shape's
-    page-aligned box is bigger than the shape in both directions, half
-    again as tall on the masthead ribbon. Measured across the item either
-    way leaves the ramp squeezed or stretched, reaching its end colours
-    early or not at all.
-
-    The angle used is the ramp's *inside* the shape, before the shape is
-    turned or mirrored, because that is the frame the file's box is in.
-    """
-    angle = idml._ramp_angle(found.angle, found.width, found.height)
-    return (
-        abs(found.width * math.cos(math.radians(angle)))
-        + abs(found.height * math.sin(math.radians(angle)))
-    )
+#: When two angles in this file count as the same angle. Both passes that
+#: put a turn back need it -- the ramp restoration, to tell a correction
+#: from the turn a shape already had, and the floored turns, to leave a
+#: whole degree alone -- and it is one number for one reason: at 0.005
+#: degrees the widest shape in the corpus moves four hundredths of a point
+#: end to end, which is under the precision anything downstream keeps.
+_ANGLE_EPSILON = 0.005
 
 
 def _ramp_turn(found: "pubfile.ShapeGradient", item: model.Item) -> float:
@@ -1202,12 +1226,42 @@ def _ramp_turn(found: "pubfile.ShapeGradient", item: model.Item) -> float:
     Two signs are in it. Publisher states a turn the other way about from
     the way it draws it -- the same negation `_restore_floored_turns`
     works in -- so the file's value is negated. And a turn the item already
-    carries is one the reader will apply to the ramp itself, so it is taken
-    off again rather than counted twice. That second term is not measured:
-    libmspub reports no rotation at all on any gradient shape in the
-    corpus, so every one of them has an item turn of zero.
+    carries is one the reader will apply to the ramp itself, so it is
+    *spent* rather than counted twice: an `ItemTransform` of `item.rotation`
+    turns the finished ramp by `-item.rotation` on the page, so the ramp
+    only still owes the difference, and the term goes on with the item's
+    own sign rather than against it.
+
+    libmspub reports no rotation on any gradient shape in the corpus, so
+    every shape reaching this pass has an item turn of zero. What makes the
+    term matter anyway is `_recover_wordart`, which turns a WordArt band
+    into a frame that carries `art.rotation` *after* this pass has run --
+    see `_rebased_ramp`, which is where the difference is actually taken.
     """
-    return model._fold_angle(-found.rotation - item.rotation)
+    return model._fold_angle(item.rotation - found.rotation)
+
+
+def _rebased_ramp(
+    gradient: Optional[model.Gradient], rotation: float
+) -> Optional[model.Gradient]:
+    """A ramp carried onto an item that turns by more than it used to.
+
+    `_ramp_turn` states the turn a ramp still owes *relative to the item
+    holding it*, so moving a ramp onto an item with a different turn has to
+    re-take that difference. One pass does: `_recover_wordart` reads a
+    band's paint off the guide path libmspub drew, which carries no
+    rotation, and puts it on a frame that carries `art.rotation`. The
+    frame's `ItemTransform` then turns the ramp by `-rotation` on the page,
+    so the ramp owes `rotation` less than it did -- and adding it here is
+    the same arithmetic as `_ramp_turn`'s `item.rotation` term, taken at
+    the moment the item acquires the turn.
+
+    Charged twice instead, the masthead ribbon runs 114.4 degrees on the
+    page where Publisher's own PDF export draws it at 102.2.
+    """
+    if gradient is None or not rotation:
+        return gradient
+    return replace(gradient, turn=model._fold_angle(gradient.turn + rotation))
 
 
 def _restore_gradient_ramps(
@@ -1230,8 +1284,12 @@ def _restore_gradient_ramps(
     second opinion: on the ramps libmspub does report in full, the
     waypoints this reconstruction produces are identical to its own, stop
     for stop, and so are the angles. What is added is the pair of colours
-    it drops. A shape whose fill states no waypoint list is left alone --
-    libmspub builds those from the two end colours itself, correctly.
+    it drops. A shape whose fill states no waypoint list keeps the ramp
+    libmspub built -- it builds those from the two end colours itself, and
+    gets the colours right -- but not its placement: the turn, the flip and
+    the box the ramp was measured across are put back on it the same way,
+    because libmspub drops those from every ramp alike. The masthead ribbon
+    is that case.
     """
     if structure is None or not structure.gradients:
         return
@@ -1264,13 +1322,13 @@ def _restore_gradient_ramps(
                 # down.
                 placed = item.style.gradient
                 if placed is not None and (
-                    abs(turn - placed.turn) > _RAMP_ANGLE_EPSILON
+                    abs(turn - placed.turn) > _ANGLE_EPSILON
                     or found.flipped_h != placed.flipped_h
                     or found.flipped_v != placed.flipped_v
-                    or placed.span is None
+                    or placed.box is None
                 ):
                     item.style.gradient = replace(
-                        placed, turn=turn, span=_ramp_span(found),
+                        placed, turn=turn, box=(found.width, found.height),
                         flipped_h=found.flipped_h, flipped_v=found.flipped_v,
                     )
                     restored += 1
@@ -1291,7 +1349,10 @@ def _restore_gradient_ramps(
                 turn=turn,
                 flipped_h=found.flipped_h,
                 flipped_v=found.flipped_v,
-                span=_ramp_span(found),
+                # The box the file measured the ramp across, which the
+                # writer lays it along and runs it the width of. Not
+                # always the box the item carries -- see `model.Gradient`.
+                box=(found.width, found.height),
                 radial=(
                     item.style.gradient.radial
                     if item.style.gradient is not None else False
@@ -1308,13 +1369,6 @@ def _restore_gradient_ramps(
 
     if restored:
         log.info("gradient ramps read from the file for %d shape(s)", restored)
-
-
-#: A turn stated in whole degrees has no fraction to put back, and most
-#: of the corpus states whole degrees. This leaves room around that zero
-#: for the arithmetic: at 0.005 degrees the widest band in the corpus
-#: moves four hundredths of a point, end to end.
-_TURN_EPSILON = 0.005
 
 
 def _restore_floored_turns(
@@ -1367,7 +1421,7 @@ def _restore_floored_turns(
             if found is None:
                 continue
             correction = math.floor(found.rotation) - found.rotation
-            if abs(correction) < _TURN_EPSILON:
+            if abs(correction) < _ANGLE_EPSILON:
                 continue
             radians = math.radians(correction)
             cos, sin = math.cos(radians), math.sin(radians)
@@ -2528,7 +2582,10 @@ def _place_unreported(
             unplaced.append((art, _NO_PAGE))
             continue
         page = document.pages[index]
-        frame = _wordart_frame([], art, page.width, page.height)
+        # The size the file states, not the trimmed one: the band's anchor
+        # is stated from the centre of the page the file describes, and
+        # `_recover_wordart` above measures from that same centre.
+        frame = _wordart_frame([], art, *page.file_size)
         if _band_is_occupied(page, frame):
             unplaced.append((art, _BAND_OCCUPIED))
             continue
@@ -2652,6 +2709,10 @@ def _wordart_frame(
         return None
 
     fill, gradient = first(lambda s: s.fill), first(lambda s: s.gradient)
+    # The frame below carries the shape's turn, which the guide path this
+    # ramp was read off did not, so the turn the ramp still owes changes
+    # hands with it.
+    gradient = _rebased_ramp(gradient, art.rotation)
     stroke = first(lambda s: s.stroke)
     # A shape with no fill of its own -- WordArt filled with a texture
     # reports one as a bitmap, not a colour -- has nothing but its outline

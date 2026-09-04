@@ -46,7 +46,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from pubidml import convert, idml, model  # noqa: E402
+from pubidml import convert, idml, model, pubfile  # noqa: E402
 
 
 # --- the PDF, far enough to read a shading -------------------------------
@@ -178,13 +178,16 @@ def shadings(path: Path):
 # --- the two readings, side by side --------------------------------------
 
 def ours(item) -> dict:
-    """The axis `idml.py` writes, as a bearing with y measured upwards."""
-    ramp = item.style.gradient
-    angle = idml._ramp_angle(
-        ramp.angle, item.width, item.height,
-        ramp.turn, ramp.flipped_h, ramp.flipped_v,
+    """The axis `idml.py` writes, as a bearing with y measured upwards.
+
+    Asked of the writer rather than worked out here, so that what this
+    prints is what the package will carry: `idml._ramp_placement` owns the
+    whole composition -- the stretch across the box the file states, then
+    the shape's turn, then its flips.
+    """
+    angle, _start, length = idml._ramp_placement(
+        item.style.gradient, item.width, item.height
     )
-    _start, length = idml._ramp_geometry(angle, item.width, item.height)
     # _ramp_geometry states the angle anticlockwise from left-to-right with
     # y increasing downwards, so the bearing is the angle itself once y is
     # turned back the way a PDF measures it.
@@ -205,6 +208,15 @@ def publishers_diagonal(width: float, height: float) -> float:
 
 def main(pub: Path, pdf: Path) -> None:
     document = convert.parse_document(pub)
+    # The ramps this compares are the ones the writer will be handed, and
+    # libmspub's replay is not yet that: the turn, the flip and the box the
+    # file measured the ramp across are all put back by the passes below.
+    # Without them every `turn` read here is zero, and the masthead ribbon
+    # -- the shape this script exists to measure -- prints as a plain
+    # quarter turn rather than the 102.19 Publisher draws.
+    structure = pubfile.read_structure(pub)
+    convert._restore_gradient_ramps(document, structure)
+    convert._restore_floored_turns(document, structure)
     found = shadings(pdf)
 
     print(f"{pub.name}: {len(document.pages)} pages")

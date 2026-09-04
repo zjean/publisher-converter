@@ -1022,6 +1022,79 @@ class GradientFillTest(unittest.TestCase):
             radial=radial,
         )
 
+    # The box the file states, where it is not the box the item carries.
+    # `1336 kerkbode`'s page-8 panel: the anchor measures 199.1 x 82.5 with
+    # the outline on, libmspub reports the 182.6 x 66.4 path inside it.
+    FILE_BOX = (199.1, 82.5)
+    ITEM_BOX = (182.6, 66.4)
+
+    def _boxed(self, angle: float):
+        document = model.Document(pages=[model.Page(width=400.0, height=600.0)])
+        ramp = model.Gradient(
+            stops=(
+                model.GradientStop(location=0.0, color=(102, 51, 0)),
+                model.GradientStop(location=100.0, color=(255, 255, 255)),
+            ),
+            angle=angle,
+            box=self.FILE_BOX,
+        )
+        document.pages[0].items.append(
+            model.Rectangle(
+                x=10.0, y=10.0, width=self.ITEM_BOX[0], height=self.ITEM_BOX[1],
+                style=model.GraphicStyle(fill=(102, 51, 0), gradient=ramp),
+            )
+        )
+        _, spread = self._parts(document)
+        return next(spread.iter("Rectangle"))
+
+    def test_a_diagonal_is_stretched_across_the_box_the_file_states(self):
+        # A diagonal ramp lies along its box's own diagonal, so which box
+        # it is settles the angle: 199.1 x 82.5 puts it at -112.51 where
+        # the 182.6 x 66.4 path inside it would say -109.98. Measuring the
+        # angle across one box and the distance across the other is a ramp
+        # running along a line it was not laid on.
+        self.assertEqual(
+            self._boxed(-135.0).get("GradientFillAngle"), "-112.507388"
+        )
+
+    def test_the_distance_comes_off_that_box_too(self):
+        # An unturned ramp runs the file box's height, not the item's.
+        self.assertEqual(self._boxed(0.0).get("GradientFillLength"), "82.5")
+
+    def test_a_file_box_with_no_size_falls_back_to_the_item(self):
+        # A ramp with no distance to run is not a ramp -- everything before
+        # its start takes the first stop and everything after it the last,
+        # so the shape comes out as two flat halves with a hard edge down
+        # the middle. An anchor box of nothing is no better than no box at
+        # all, so the item's own is what is left to measure across.
+        ramp = model.Gradient(
+            stops=(
+                model.GradientStop(location=0.0, color=(102, 51, 0)),
+                model.GradientStop(location=100.0, color=(255, 255, 255)),
+            ),
+            angle=0.0,
+            box=(0.0, 0.0),
+        )
+        angle, start, length = idml._ramp_placement(ramp, 100.0, 50.0)
+        self.assertAlmostEqual(angle, 90.0)
+        self.assertAlmostEqual(length, 50.0)
+        self.assertIsNotNone(start)
+
+    def test_a_ramp_with_no_box_anywhere_states_no_geometry(self):
+        # A run of text has no box of its own and the file stated none:
+        # there is a direction and nothing else honest to say.
+        ramp = model.Gradient(
+            stops=(
+                model.GradientStop(location=0.0, color=(102, 51, 0)),
+                model.GradientStop(location=100.0, color=(255, 255, 255)),
+            ),
+            angle=0.0,
+        )
+        angle, start, length = idml._ramp_placement(ramp)
+        self.assertAlmostEqual(angle, 90.0)
+        self.assertIsNone(start)
+        self.assertIsNone(length)
+
     def _parts(self, document: model.Document):
         path = write_package(document)
         with zipfile.ZipFile(path) as archive:
@@ -1384,6 +1457,41 @@ class TextGradientTest(unittest.TestCase):
         self.assertIn("Color/C_FFD17D", colours)      # the end that was lost
         for stop in graphic.iter("GradientStop"):
             self.assertIn(stop.get("StopColor"), colours)
+
+    # The three fields `convert` works out for a run's ramp and the writer
+    # is the only thing that reads. Nothing else exercises them end to end:
+    # the restoration tests assert on `model.Gradient` and then re-call
+    # `idml._ramp_angle` themselves, so a writer that stopped passing one
+    # of them along would leave every one of those green. That is how the
+    # masthead ribbon's double-counted turn reached a built package.
+    def _run(self, **ramp):
+        _, story = self._parts(
+            model.Span(
+                text="Kerkbode",
+                color=(145, 56, 1),
+                gradient=model.Gradient(stops=self.RAMP.stops, angle=0.0, **ramp),
+            )
+        )
+        return next(story.iter("CharacterStyleRange"))
+
+    def test_the_turn_the_shape_owes_reaches_the_angle(self):
+        # An unturned ramp on a 200 x 40 band runs up it, at 90; a shape
+        # turned 30 degrees further runs at 120.
+        self.assertEqual(self._run().get("GradientFillAngle"), "90")
+        self.assertEqual(self._run(turn=30.0).get("GradientFillAngle"), "120")
+
+    def test_a_mirrored_shape_reaches_the_angle_too(self):
+        # A vertical flip reflects the finished angle about the horizontal
+        # axis, turning the ramp that runs up the band into one running
+        # down it.
+        self.assertEqual(self._run(flipped_v=True).get("GradientFillAngle"), "-90")
+
+    def test_the_box_the_file_states_is_what_the_ramp_runs_over(self):
+        # Not the band's own 40: the file measures the ramp across the box
+        # it drew, outline and all.
+        self.assertEqual(
+            self._run(box=(200.0, 91.5)).get("GradientFillLength"), "91.5"
+        )
 
     def test_the_ramp_is_given_the_distance_to_run_over(self):
         # Without a length IDML ramps over nothing: everything before the

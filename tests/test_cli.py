@@ -437,6 +437,33 @@ class BleedFlagTest(unittest.TestCase):
         self.assertEqual(int(raised.exception.code), 2)
 
 
+    def test_a_bleed_that_is_not_a_number_is_refused(self):
+        # `float()` takes "nan" and "inf" happily, and neither is a valid
+        # xs:double: the package was written with
+        # DocumentBleedTopOffset="nan" and no error anywhere.
+        for value in ("nan", "inf", "-inf"):
+            with self.subTest(bleed=value):
+                with self.assertRaises(SystemExit) as raised:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        cli.run([
+                            str(self.work), "-o", str(self.work / "out"),
+                            "--no-log", "--bleed", value,
+                        ])
+                self.assertEqual(int(raised.exception.code), 2)
+
+    def test_a_bleed_wider_than_the_widest_page_is_refused(self):
+        # A bleed is a margin outside the trim, and one larger than the
+        # page is a number typed in the wrong unit -- points or inches
+        # rather than millimetres, which is the mistake worth catching.
+        with self.assertRaises(SystemExit) as raised:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                cli.run([
+                    str(self.work), "-o", str(self.work / "out"), "--no-log",
+                    "--bleed", "500",
+                ])
+        self.assertEqual(int(raised.exception.code), 2)
+
+
 class PageSnapFlagTest(unittest.TestCase):
     """The page is set up as its standard size unless told to leave it."""
 

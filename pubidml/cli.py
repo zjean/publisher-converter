@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import math
 import sys
 from pathlib import Path
 from typing import List
@@ -160,9 +161,17 @@ def run(argv=None) -> int:
         parser.error("--facing-pages and --no-facing-pages contradict each other")
 
     # A negative bleed is a page trimmed inside its own edges, which no
-    # reader means and IDML has no way to express.
-    if args.bleed < 0:
-        parser.error("--bleed cannot be negative")
+    # reader means and IDML has no way to express. `float()` also takes
+    # "nan" and "inf", and neither is a valid xs:double: the package came
+    # out carrying DocumentBleedTopOffset="nan" with no error anywhere.
+    if not math.isfinite(args.bleed) or args.bleed < 0:
+        parser.error("--bleed must be a finite number of millimetres, not negative")
+    # And an upper bound, because the number is in millimetres and the two
+    # units anyone would reach for by mistake are points and inches -- 3mm
+    # typed as points is 8.5, which is merely generous, but a bleed in the
+    # hundreds is a page-sized allowance nobody prints.
+    if args.bleed > convert.MAX_BLEED_MM:
+        parser.error(f"--bleed above {convert.MAX_BLEED_MM:g}mm is not a bleed; check the unit")
     facing_pages = True if args.facing_pages else False if args.no_facing_pages else None
 
     log_path = None

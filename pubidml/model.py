@@ -73,10 +73,18 @@ class Gradient:
     #: flips it.
     flipped_h: bool = False
     flipped_v: bool = False
-    #: How far the ramp runs, in points, where the file states a box to
-    #: measure it across. None means fall back to the item's own box, which
-    #: is all there is for a ramp libmspub reported and the file did not.
-    span: Optional[float] = None
+    #: The box the file measured this ramp across, in points, where the
+    #: file states one. Both the stretch and the distance come off it: a
+    #: diagonal is laid along *this* box's diagonal and runs the width of
+    #: *this* box, and the item's own box is only the fallback -- all there
+    #: is for a ramp libmspub reported and the file did not.
+    #:
+    #: The two are not always the same box. The anchor measures a shape
+    #: with its outline while libmspub reports the path inside it, 16pt
+    #: apart on the page-8 panel of the newsletter corpus; and a turned
+    #: shape's page-aligned box is bigger than the shape in both
+    #: directions, 231pt against 92.1 on the masthead ribbon.
+    box: Optional[Tuple[float, float]] = None
     radial: bool = False
 
 
@@ -537,6 +545,15 @@ class TrimmedSize:
     a point. Subclasses carry `stated_width`/`stated_height`, None while
     the rectangle is still the stated one.
     """
+
+    #: Declared here rather than left to the subclasses to define, because
+    #: the property below reads all four: a third subclass without them
+    #: fails at the first call otherwise, where this fails at the first
+    #: look.
+    width: float
+    height: float
+    stated_width: Optional[float]
+    stated_height: Optional[float]
 
     @property
     def file_size(self) -> Tuple[float, float]:

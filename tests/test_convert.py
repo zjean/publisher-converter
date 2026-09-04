@@ -754,6 +754,71 @@ class RealFileTest(unittest.TestCase):
         destination = work / f"{source.stem}.idml"
         return convert.convert(source, destination), destination
 
+    def documents_either_way(self, source: Path):
+        """The finished document, converted with the page snap on and off.
+
+        Captured at the writer rather than rebuilt from the passes: the
+        point is to catch a *new* pass reaching for the wrong page size,
+        and a test that lists the passes itself would not see one added.
+        """
+        captured = []
+        original = convert.idml.IdmlWriter
+
+        def capture(document, *args, **kwargs):
+            captured.append(document)
+            return original(document, *args, **kwargs)
+
+        convert.idml.IdmlWriter = capture
+        try:
+            for snap in (True, False):
+                work = Path(tempfile.mkdtemp())
+                convert.convert(
+                    source, work / f"{source.stem}.idml", snap_page=snap
+                )
+        finally:
+            convert.idml.IdmlWriter = original
+        self.assertEqual(len(captured), 2, "both conversions must reach the writer")
+        return captured
+
+    def test_the_page_snap_moves_no_item_the_file_placed(self):
+        # Every pass that ties an item back to the .pub matches it by where
+        # it sits relative to the centre of the page the *file* states, to
+        # half a point. Trimming the page rectangle moves that centre by
+        # half the trim -- 0.78pt on A5 -- so a pass that reaches for the
+        # trimmed size instead either misplaces what it found or, worse,
+        # silently finds nothing at all, which is indistinguishable from a
+        # file that stated nothing.
+        #
+        # So the snap is allowed to change the page rectangle and the
+        # margins resolved against it, and nothing else. This is the guard
+        # for the passes added later, not only the ones here now.
+        source = SAMPLES / "Cantico_dei_Cantici.pub"
+        if not source.exists():
+            self.skipTest("sample not present")
+        snapped, stated = self.documents_either_way(source)
+        self.assertNotEqual(
+            (snapped.pages[0].width, snapped.pages[0].height),
+            (stated.pages[0].width, stated.pages[0].height),
+            "this sample no longer snaps, so it guards nothing",
+        )
+        for index, (a, b) in enumerate(zip(snapped.pages, stated.pages)):
+            with self.subTest(page=index):
+                self.assertEqual(a.file_size, b.file_size)
+                self.assertEqual(
+                    [self.placed(item) for item in a.items],
+                    [self.placed(item) for item in b.items],
+                )
+
+    @staticmethod
+    def placed(item):
+        """What an item is and where the file put it, to a hundredth."""
+        return (
+            type(item).__name__,
+            round(item.x, 2), round(item.y, 2),
+            round(item.width, 2), round(item.height, 2),
+            round(item.rotation, 2),
+        )
+
     def test_every_sample_converts_to_a_well_formed_package(self):
         samples = sorted(SAMPLES.glob("*.pub"))
         self.assertTrue(samples, "no sample .pub files present")
@@ -1329,8 +1394,8 @@ class PageSnapTest(unittest.TestCase):
         }
 
     def test_the_newsletters_page_is_set_up_as_a5(self):
-        # 148.5265 x 209.8887mm, which is A5 as anybody reading it means A5.
-        document = self.document(148.5265, 209.8887, pages=4, masters=1)
+        # 148.5265 x 209.8878mm, which is A5 as anybody reading it means A5.
+        document = self.document(148.5265, 209.8878, pages=4, masters=1)
         snapped = convert._snap_page_size(document)
         self.assertEqual(snapped[0], "A5")
         self.assertEqual(self.sizes(document), {(148.0, 210.0)})
@@ -1355,17 +1420,38 @@ class PageSnapTest(unittest.TestCase):
         self.assertIsNone(convert._snap_page_size(document))
 
     def test_pages_that_differ_in_size_are_never_guessed_at(self):
-        document = self.document(148.5265, 209.8887, pages=2)
+        document = self.document(148.5265, 209.8878, pages=2)
         document.pages[1].width = 200.0 * self.MM
         self.assertIsNone(convert._snap_page_size(document))
         self.assertEqual(len(self.sizes(document)), 2)
 
     def test_a_trim_that_really_moved_is_reported(self):
-        document = self.document(148.5265, 209.8887)
+        document = self.document(148.5265, 209.8878)
         convert._note_snapped_page(document, convert._snap_page_size(document))
         self.assertEqual(len(document.warnings), 1)
         self.assertIn("A5", document.warnings[0])
         self.assertIn("--no-page-snap", document.warnings[0])
+
+    def test_the_report_says_how_far_each_edge_moved(self):
+        # The two numbers the whole setting rests on: what a reader has to
+        # know is that nothing on the page moved, so the difference is at
+        # the right and bottom trim, and how much it is there.
+        document = self.document(148.5265, 209.8878)
+        convert._note_snapped_page(document, convert._snap_page_size(document))
+        warning = document.warnings[0]
+        self.assertIn("0.53", warning)
+        self.assertIn("0.11", warning)
+        self.assertIn("148.53 x 209.89mm", warning)
+
+    def test_snapping_a_page_twice_does_not_forget_what_the_file_said(self):
+        # `file_size` is what every matcher measures from, and it is
+        # remembered by overwriting: a second pass would remember the trim
+        # as the file's own size and lose the real one for good.
+        document = self.document(148.5265, 209.8878)
+        convert._snap_page_size(document)
+        first = document.pages[0].file_size
+        self.assertIsNone(convert._snap_page_size(document))
+        self.assertEqual(document.pages[0].file_size, first)
 
     @needs_parser
     def test_the_newsletters_convert_to_an_a5_page(self):
@@ -1421,7 +1507,7 @@ class MeasurementUnitTest(unittest.TestCase):
         self.assertEqual(convert._measurement_unit(document), "in")
 
     def test_metric_margins_carry_a_page_round_in_neither_unit(self):
-        # `1336 kerkbode`: the page is 148.5265 x 209.8887mm, which was
+        # `1336 kerkbode`: the page is 148.5265 x 209.8878mm, which was
         # never typed, but the margins are exactly 14, 15, 16 and 17mm.
         document = self.document(
             421.02, 594.96,
@@ -1429,12 +1515,58 @@ class MeasurementUnitTest(unittest.TestCase):
         )
         self.assertEqual(convert._measurement_unit(document), "mm")
 
-    def test_an_inch_length_that_happens_to_be_half_millimetres_is_not_enough(self):
-        # 2.5in is 63.5mm and 5in is 127mm, both whole half-millimetres.
-        # One of them agreeing is a coincidence, so a document stating one
-        # among inches stays imperial.
+    def test_a_length_round_in_both_units_is_evidence_of_neither(self):
+        # 5in is exactly 127mm, so it is round in millimetres as well --
+        # and it is the inch test, not a count of agreeing lengths, that
+        # keeps it from reading as metric. A 5 x 7in page with 0.25in
+        # margins states nothing round in millimetres alone.
         document = self.document(5 * 72.0, 7 * 72.0, margins=(18.0,) * 4)
         self.assertEqual(convert._measurement_unit(document), "in")
+        # Named rather than implied: the coincidence really is in there.
+        page = document.pages[0]
+        self.assertAlmostEqual(page.width / self.MM, 127.0)
+
+    def test_four_equal_metric_margins_are_evidence_enough(self):
+        # The common metric setup, and the one the old two-length threshold
+        # got wrong: `_stated_lengths` dedupes by value, so four margins of
+        # 15mm are one length, and a page round in neither unit leaves it
+        # as the only evidence there is. One length round in millimetres
+        # and in no sixteenth of an inch is not a coincidence.
+        document = self.document(
+            421.02, 594.96, margins=tuple(15 * self.MM for _ in range(4))
+        )
+        self.assertEqual(convert._measurement_unit(document), "mm")
+
+    def test_the_unit_is_read_off_the_file_not_off_the_trim(self):
+        # `_snap_page_size` rounds the page rectangle to a standard, which
+        # is a metric one for nearly every document here -- so a unit read
+        # after it is partly reading our own arithmetic back. This page is
+        # US Letter as the file states it and A5 as the rectangle now
+        # stands, and the file is what was typed.
+        page = model.Page(width=210 * self.MM, height=297 * self.MM)
+        page.stated_width, page.stated_height = 612.0, 792.0
+        page.margins = model.PageMargins(18.0, 18.0, 18.0, 18.0)
+        document = model.Document(pages=[page])
+        self.assertEqual(convert._measurement_unit(document), "in")
+
+    def test_a_margin_the_trim_ate_into_is_read_as_it_was_typed(self):
+        # A right margin is stated as a guide position and resolved as
+        # `width - position`, so trimming the page takes the trim off the
+        # right and bottom margins. `1336 kerkbode` is 0.53mm off A5 at the
+        # right, which turns a typed 16mm into 15.47 -- round in neither
+        # unit, and two of its four metric lengths lost that way.
+        trim = 0.53 * self.MM
+        page = model.Page(width=421.02 - trim, height=594.96)
+        page.stated_width, page.stated_height = 421.02, 594.96
+        page.margins = model.PageMargins(
+            14 * self.MM, 15 * self.MM, 16 * self.MM - trim, 17 * self.MM
+        )
+        document = model.Document(pages=[page])
+        self.assertEqual(convert._measurement_unit(document), "mm")
+        self.assertIn(
+            round(16 * self.MM, 4),
+            [round(length, 4) for length in convert._stated_lengths(document)],
+        )
 
     def test_a_document_stating_nothing_metric_falls_back_to_inches(self):
         document = model.Document(pages=[])

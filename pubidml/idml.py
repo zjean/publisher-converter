@@ -37,7 +37,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import replace
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional
+from typing import Dict, List, Literal, NamedTuple, Optional
 from urllib.parse import quote
 
 from . import fontmetrics, imagemeta, model
@@ -412,13 +412,60 @@ def _ramp_geometry(
         value if abs(value) > 1e-9 else 0.0
         for value in (math.cos(radians), math.sin(radians))
     )
-    length = span if span is not None else abs(width * cos) + abs(height * sin)
+    length = span if span else abs(width * cos) + abs(height * sin)
     # Adding zero turns the -0.0 that negating a zero cosine leaves back
     # into 0.0, which is the same number and the only one of the two that
     # formats as "0".
     start_x = -cos * length / 2.0 + 0.0
     start_y = sin * length / 2.0 + 0.0
     return f"{fmt(start_x)} {fmt(start_y)}", length
+
+
+def _ramp_placement(
+    gradient: model.Gradient,
+    width: Optional[float] = None,
+    height: Optional[float] = None,
+):
+    """One ramp's angle, start point and distance, all off the same box.
+
+    The whole composition in one place, because the parts have to agree on
+    which box they are measured across and they used not to: the stretch
+    was taken across the box the *item* carries while the distance came
+    from the box the *file* states, which on the page-8 panel of the
+    newsletter corpus are 16pt apart and on the masthead ribbon 139pt. A
+    ramp measured that way runs along a line it was never laid on.
+
+    `gradient.box` is that file box, and the item's own is the fallback --
+    all there is for a ramp libmspub reported and the file did not. A run
+    of text has neither, and then there is a direction and nothing else to
+    say: `None` for both the start and the distance.
+
+    The distance is measured across the ramp's angle *inside* the shape,
+    before the shape's own turn goes on, because the box is in that frame
+    too. The start point is on the placed angle, which is where the reader
+    draws it. A mirror makes no difference to the distance either way,
+    since a reflection leaves both projections' magnitudes alone.
+    """
+    def usable(box):
+        # A box with a zero side measures nothing, and a ramp with no
+        # distance to run is not a ramp: it paints two flat halves with a
+        # hard edge between them. So it counts as no box rather than as a
+        # distance of zero, and the next one along gets its turn.
+        return box if box and all(box) else None
+
+    box = usable(gradient.box) or usable((width, height))
+    inside = _ramp_angle(gradient.angle, *(box or ()))
+    angle = _placed(
+        inside, gradient.turn, gradient.flipped_h, gradient.flipped_v
+    )
+    if box is None:
+        return angle, None, None
+    radians = math.radians(inside)
+    span = (
+        abs(box[0] * math.cos(radians)) + abs(box[1] * math.sin(radians))
+    )
+    start, length = _ramp_geometry(angle, *box, span=span)
+    return angle, start, length
 
 
 def _spanning_stops(stops):
@@ -538,7 +585,7 @@ class IdmlWriter:
         image_dir_name: Optional[str] = None,
         wrap_images: bool = True,
         facing_pages: bool = False,
-        measurement_unit: str = "mm",
+        measurement_unit: Literal["mm", "in"] = "mm",
         bleed: float = 0.0,
     ):
         self.doc = document
@@ -1073,7 +1120,12 @@ class IdmlWriter:
                 "DocumentBleedOutsideOrRightOffset": fmt(self.bleed),
             },
         )
-        units_name = _MEASUREMENT_UNITS.get(self.measurement_unit, "Millimeters")
+        # The fallback agrees with `convert._measurement_unit`'s own, which
+        # is the only thing that produces this value and produces nothing
+        # else -- so it is unreachable rather than a second opinion. It
+        # used to say Millimeters, which made an unrecognised unit read as
+        # metric here and imperial there.
+        units_name = _MEASUREMENT_UNITS.get(self.measurement_unit, "Inches")
         ET.SubElement(
             root,
             "ViewPreference",
@@ -1246,11 +1298,6 @@ class IdmlWriter:
         }
         gradient = item.style.gradient
         if gradient is not None and gradient in self.gradient_ids:
-            angle = _ramp_angle(
-                gradient.angle, item.width, item.height,
-                gradient.turn, gradient.flipped_h, gradient.flipped_v,
-            )
-            attributes["GradientFillAngle"] = fmt(angle)
             # An angle says which way the ramp runs, not how far, and a
             # ramp with no distance to run is not a ramp: everything before
             # its start point takes the first stop and everything after it
@@ -1258,7 +1305,10 @@ class IdmlWriter:
             # came out as two flat halves meeting in a hard edge down its
             # middle -- the fade over the whole shape is what the distance
             # is for.
-            start, length = _ramp_geometry(angle, item.width, item.height, gradient.span)
+            angle, start, length = _ramp_placement(
+                gradient, item.width, item.height
+            )
+            attributes["GradientFillAngle"] = fmt(angle)
             attributes["GradientFillStart"] = start
             attributes["GradientFillLength"] = fmt(length)
         if item.style.stroke is not None:
@@ -2014,14 +2064,6 @@ class IdmlWriter:
             self.gradient_ids.get(span.gradient) if span.gradient is not None else None
         )
         if reference:
-            angle = _ramp_angle(
-                span.gradient.angle, *(box or ()),
-                turn=span.gradient.turn,
-                flipped_h=span.gradient.flipped_h,
-                flipped_v=span.gradient.flipped_v,
-            )
-            attributes["FillColor"] = reference
-            attributes["GradientFillAngle"] = fmt(angle)
             # A shape gets its ramp geometry from its own bounds; a run has
             # none of its own, and the default is a length of nothing --
             # which paints every stop before the start point in the first
@@ -2029,8 +2071,10 @@ class IdmlWriter:
             # ramp comes out as two solid halves with a hard edge down the
             # middle. The band the headline sits in is the distance the
             # ramp was meant to run over, so it is stated here.
-            if box:
-                start, length = _ramp_geometry(angle, *box, span=span.gradient.span)
+            angle, start, length = _ramp_placement(span.gradient, *(box or ()))
+            attributes["FillColor"] = reference
+            attributes["GradientFillAngle"] = fmt(angle)
+            if start is not None:
                 attributes["GradientFillStart"] = start
                 attributes["GradientFillLength"] = fmt(length)
         else:

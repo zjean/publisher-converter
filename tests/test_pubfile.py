@@ -306,6 +306,20 @@ class BackgroundDetectionTest(unittest.TestCase):
         self.assertTrue(convert._is_page_background(
             model.Rectangle(x=0.0, y=0.0, width=612.0, height=792.0), page))
 
+    def test_a_background_on_a_trimmed_page_is_still_one(self):
+        # libmspub synthesises this rectangle at the size the *file* states,
+        # and `_snap_page_size` trims the page rectangle out from under it:
+        # 1.49pt on the newsletter corpus, against a tolerance of one. Read
+        # against the trim the rectangle stops being recognised, and its
+        # post-snap caller `_band_is_occupied` then finds every headline's
+        # band blocked by a background it should have stepped over -- with
+        # no warning telling that apart from a shape really being there.
+        page = page_with()
+        page.width, page.height = 610.51, 790.13
+        page.stated_width, page.stated_height = 612.0, 792.0
+        self.assertTrue(convert._is_page_background(
+            model.Rectangle(x=0.0, y=0.0, width=612.0, height=792.0), page))
+
     def test_ordinary_shapes_are_not(self):
         page = page_with()
         for item in (
@@ -1937,6 +1951,55 @@ class WordArtRecoveryTest(unittest.TestCase):
         self.assertEqual(span.font, "Monotype Corsiva")
         self.assertAlmostEqual(span.size_pt, 20.0)
 
+    def ramped_guides(self) -> model.Path:
+        """A band whose ramp arrived flattened, the way the masthead does."""
+        return self.guides(approximated_fill=True)
+
+    def ramp_structure(self, rotation: float) -> pubfile.FileStructure:
+        """The file's word on that band: a ramp, turned, and the words."""
+        return pubfile.FileStructure(
+            gradients=[
+                pubfile.ShapeGradient(
+                    stops=[(0.0, (0, 51, 128)), (1.0, (255, 255, 255))],
+                    # The band at (100, 200) 200 x 30 on a 612 x 792 page.
+                    centre_x=200.0 - 306.0, centre_y=215.0 - 396.0,
+                    width=200.0, height=30.0,
+                    rotation=rotation,
+                )
+            ],
+            wordart=[self.art(rotation=rotation)],
+        )
+
+    def test_a_turn_the_frame_carries_is_not_charged_to_the_ramp_as_well(self):
+        # The masthead ribbon, and the one case in the corpus that shows
+        # this: a turned WordArt band. `_restore_gradient_ramps` runs first
+        # and hands the ramp the whole turn, because the path it is looking
+        # at carries none; then this pass builds a frame that carries
+        # `art.rotation`, whose ItemTransform turns the ramp again. Spending
+        # the turn once is the whole of it -- charged twice the ribbon comes
+        # out at 114.4 degrees on the page where Publisher draws 102.2.
+        document = self.document_with(self.ramped_guides())
+        structure = self.ramp_structure(-12.192)
+        convert._restore_gradient_ramps(document, structure)
+        convert._recover_wordart(document, structure)
+        frame = document.pages[0].items[0]
+        self.assertAlmostEqual(frame.rotation, -12.192)
+        ramp = frame.story.paragraphs[0].spans[0].gradient
+        self.assertIsNotNone(ramp, "the ramp did not reach the run")
+        self.assertAlmostEqual(ramp.turn, 0.0)
+
+    def test_a_frame_with_no_turn_leaves_the_ramps_turn_alone(self):
+        # The control: an untured band spends nothing, so the turn the
+        # restoration pass worked out is the turn the writer gets.
+        document = self.document_with(self.ramped_guides())
+        structure = self.ramp_structure(0.0)
+        structure.gradients[0].rotation = 180.0
+        convert._restore_gradient_ramps(document, structure)
+        convert._recover_wordart(document, structure)
+        frame = document.pages[0].items[0]
+        ramp = frame.story.paragraphs[0].spans[0].gradient
+        self.assertAlmostEqual(ramp.turn, 180.0)
+
     def test_the_frame_is_centred_on_the_band(self):
         # The band is where the words go, and the frame is centred on it
         # rather than equal to it -- see the wrap allowance below. Centred
@@ -3128,25 +3191,57 @@ class GradientRestorationTest(unittest.TestCase):
         convert._restore_gradient_ramps(document, structure)
         self.assertAlmostEqual(self.placed(shape), -90.0)
 
-    def test_a_horizontal_flip_mirrors_the_ramp_the_other_way(self):
+    def restored(self, **stated) -> float:
+        """The placed angle for a ramp the file states this way about."""
         document, shape = self.document(
             model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
         )
         structure = self.structure()
-        structure.gradients[0].angle = 90.0
+        for name, value in stated.items():
+            setattr(structure.gradients[0], name, value)
         convert._restore_gradient_ramps(document, structure)
-        self.assertAlmostEqual(self.placed(shape), 180.0)
+        return self.placed(shape)
 
-        document, shape = self.document(
-            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
-        )
-        structure = self.structure()
-        structure.gradients[0].angle = 90.0
-        structure.gradients[0].flipped_h = True
-        convert._restore_gradient_ramps(document, structure)
+    def test_a_ramp_stated_at_ninety_runs_right_to_left(self):
+        # The control the mirror below is read against.
+        self.assertAlmostEqual(self.restored(angle=90.0), 180.0)
+
+    def test_a_horizontal_flip_mirrors_the_ramp_the_other_way(self):
         # A stated 90 lays this ramp right to left; mirrored about the
         # vertical axis it runs left to right instead.
-        self.assertAlmostEqual(self.placed(shape), 0.0)
+        self.assertAlmostEqual(
+            self.restored(angle=90.0, flipped_h=True), 0.0
+        )
+
+    def test_both_flips_at_once_compose_to_a_half_turn(self):
+        # The one combination no shape in the corpus states, so it is
+        # arrived at by composition rather than measured: two reflections
+        # about perpendicular axes are a point reflection, which is a half
+        # turn. What this pins is that the two flips really do compose --
+        # taking one as the answer and skipping the other passes every
+        # measured case here and fails only this. Which axis gets which
+        # formula is the measured part, and the single-flip tests above
+        # are what hold that.
+        plain = self.restored(angle=90.0)
+        self.assertAlmostEqual(
+            self.restored(angle=90.0, flipped_h=True, flipped_v=True),
+            model._fold_angle(plain + 180.0),
+        )
+
+    def test_the_turn_a_rotated_item_owes_is_what_it_has_not_spent(self):
+        # A turn neither 180 nor zero, and different on the two sides, is
+        # what tells the sign apart: the item is already turned -12, the
+        # file states the shade turned -30, so the ramp still owes the 18
+        # between them. With the sign the other way about this comes out
+        # at 42 -- the item's turn counted forwards instead of spent.
+        document, shape = self.document(
+            model.GraphicStyle(fill=(225, 225, 225), approximated_fill=True)
+        )
+        shape.rotation = -12.0
+        structure = self.structure()
+        structure.gradients[0].rotation = -30.0
+        convert._restore_gradient_ramps(document, structure)
+        self.assertAlmostEqual(shape.style.gradient.turn, 18.0)
 
     def test_a_turn_the_item_already_carries_is_not_counted_twice(self):
         # Where libmspub *does* report the rotation, the reader turns the
@@ -3172,10 +3267,9 @@ class GradientRestorationTest(unittest.TestCase):
         structure = self.structure()
         structure.gradients[0].height = 62.0
         convert._restore_gradient_ramps(document, structure)
-        self.assertAlmostEqual(shape.style.gradient.span, 62.0)
-        _start, length = idml._ramp_geometry(
-            self.placed(shape), shape.width, shape.height,
-            shape.style.gradient.span,
+        self.assertEqual(shape.style.gradient.box, (100.0, 62.0))
+        _angle, _start, length = idml._ramp_placement(
+            shape.style.gradient, shape.width, shape.height
         )
         self.assertAlmostEqual(length, 62.0)
 
@@ -3188,8 +3282,14 @@ class GradientRestorationTest(unittest.TestCase):
         structure = self.structure()
         structure.gradients[0].rotation = -12.192
         convert._restore_gradient_ramps(document, structure)
-        # The record's own box is 100 x 50 and the ramp is upright in it.
-        self.assertAlmostEqual(shape.style.gradient.span, 50.0)
+        # The record's own box is 100 x 50 and the ramp is upright in it,
+        # so the ramp runs the 50 rather than the 118.9 its page-aligned
+        # box comes to once the shape is turned.
+        self.assertEqual(shape.style.gradient.box, (100.0, 50.0))
+        _angle, _start, length = idml._ramp_placement(
+            shape.style.gradient, shape.width, shape.height
+        )
+        self.assertAlmostEqual(length, 50.0)
 
     def test_a_ramp_with_no_waypoints_still_gains_the_shape_s_turn(self):
         # libmspub builds a ramp with no waypoint list from the two end

@@ -759,6 +759,14 @@ class FileStructure:
         with its outline and libmspub reports the path inside it, a gap of
         16pt on one shape in the corpus. So the nearest size wins, and two
         equally near is an ambiguity rather than a guess.
+
+        Which puts a cost on the records `_read_gradients` keeps for a
+        shape stating no waypoints: one more record at a centre is one more
+        thing to be equally near, so a match that was unambiguous can
+        become an ambiguity and return None here. It does not on this
+        corpus -- every polygon and both WordArt runs still resolve -- but
+        a file that stacks a turned shape on an untuned one of the same
+        size at the same centre would lose both.
         """
         near = [
             found for found in self.gradients
@@ -2091,7 +2099,9 @@ def _read_gradients(data: bytes, palette: List[tuple]) -> List[ShapeGradient]:
         # and this is the only way back to it. Where the shape is neither,
         # there is nothing to carry and an extra record can only make an
         # ambiguity out of two shapes sharing a centre.
-        turned = rotation or flipped_h or flipped_v
+        # `% 360` because a full turn is no turn: it draws the same and
+        # would only add a record for the ambiguity below to trip over.
+        turned = rotation % 360.0 or flipped_h or flipped_v
         if not waypoints and not turned:
             continue
         stops = _ramp_stops(focus, waypoints, first, last) if waypoints else []

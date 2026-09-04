@@ -241,6 +241,26 @@ def page_origins(sheet, page_width: float, page_height: float):
     return [((width - page_width) / 2.0, down)]
 
 
+def ramps_on(page):
+    """Every ramp the writer will be handed on this page, with its item.
+
+    A shape carries its ramp on its style; a recovered WordArt headline
+    carries it on the text run instead, because what libmspub reported
+    describes the glyphs rather than a box behind them. Both are ramps the
+    reader draws, and only the first used to be measured.
+    """
+    for item in model._walk(page.items):
+        if item.style.gradient is not None:
+            yield item, item.style.gradient
+        story = getattr(item, "story", None)
+        if story is None:
+            continue
+        for paragraph in story.paragraphs:
+            for span in paragraph.spans:
+                if span.gradient is not None:
+                    yield item, span.gradient
+
+
 def main(pub: Path, pdf: Path) -> None:
     objs, found, sheet = shadings(pdf)
     document = convert.parse_document(pub)
@@ -249,6 +269,11 @@ def main(pub: Path, pdf: Path) -> None:
     # settle them have to have run.
     convert._restore_gradient_ramps(document, structure)
     convert._restore_floored_turns(document, structure)
+    # And the pass that turns a WordArt band into a frame carrying the
+    # ramp on its text run. Without it the headlines' ramps are invisible
+    # here -- which is how the masthead ribbon's turn came to be counted
+    # twice with both of these scripts calling every ramp a match.
+    convert._recover_wordart(document, structure)
 
     print(f"{pub.name}: {len(document.pages)} pages")
     print(f"{pdf.name}: {len(found)} shadings on {sheet[0]:.0f} x {sheet[1]:.0f}pt sheets\n")
@@ -261,15 +286,16 @@ def main(pub: Path, pdf: Path) -> None:
     upside_down = 0
     for pageno, page in enumerate(document.pages, 1):
         origins = page_origins(sheet, page.width, page.height)
-        for item in model._walk(page.items):
-            ramp = item.style.gradient
-            if ramp is None:
-                continue
+        for item, ramp in ramps_on(page):
             stops = idml._spanning_stops(ramp.stops)
-            angle = idml._ramp_angle(
-                ramp.angle, item.width, item.height,
-                ramp.turn, ramp.flipped_h, ramp.flipped_v,
+            placed, _start, _length = idml._ramp_placement(
+                ramp, item.width, item.height
             )
+            # The item's own turn is applied by its ItemTransform, so the
+            # bearing on the page is what the reader draws once both have
+            # gone on. A polygon carries no turn and this is the placed
+            # angle itself; a recovered headline carries the shape's.
+            angle = model._fold_angle(placed - item.rotation)
             stated = structure.gradient_for(
                 item.x + item.width / 2 - page.width / 2,
                 item.y + item.height / 2 - page.height / 2,
@@ -284,13 +310,11 @@ def main(pub: Path, pdf: Path) -> None:
             # could be this shape's ask Publisher what it draws at the
             # same place.
             ux, uy = math.cos(math.radians(angle)), math.sin(math.radians(angle))
-            # The distance the writer actually runs the ramp over, which is
-            # the box the file states rather than the item's own where the
-            # two differ -- an outline, or a turn.
-            _start, run = idml._ramp_geometry(
-                angle, item.width, item.height, ramp.span
-            )
-            half = run / 2.0
+            # The distance the writer actually runs the ramp over, which
+            # `_ramp_placement` above already worked out: the box the file
+            # states rather than the item's own, where the two differ --
+            # an outline, or a turn.
+            half = _length / 2.0
             steps = 21
             best = None
             for across, down in origins:

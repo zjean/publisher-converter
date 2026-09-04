@@ -750,7 +750,7 @@ These are real and deliberate, not bugs to be surprised by later.
   the document carries a field table *and* the text came from a master,
   so a typed `#` is left alone.
 - **A page a hair off a standard size is set up as that size.** The
-  three newsletters state `148.5265 × 209.8887mm` — A5 as anybody reading
+  three newsletters state `148.5265 × 209.8878mm` — A5 as anybody reading
   it means A5, half a millimetre out on one side and a tenth on the other,
   but not A5 as a reader shows it, and a document whose setup says
   `Custom` is one nobody can hand to a printer without explaining first.
@@ -772,9 +772,11 @@ These are real and deliberate, not bugs to be surprised by later.
   already *is* the standard is corrected silently, because libmspub
   reports four decimal places of an inch and an exact A4 therefore arrives
   a thousandth of a millimetre off. `--no-page-snap` keeps the stated size.
-  Across the corpus this fires on the three newsletters and on
-  `Cantico_dei_Cantici` (148.5 × 210mm), and leaves `Lisa Hoogendijk`
-  (280 × 350mm) alone.
+  Across the 22-file corpus the snap itself fires on 19 — every A4 fixture
+  included, which is what the silent correction is for — and *reports* on
+  four: the three newsletters (0.53mm) and `Cantico_dei_Cantici`
+  (148.5 × 210mm, 0.50mm). `Lisa Hoogendijk` (280 × 350mm) matches no
+  standard and is left alone.
 - **The document is set up in the unit it was laid out in.** The ruler
   reads millimetres or inches rather than points, decided per file from
   the lengths the document states about itself — its page size and its
@@ -788,12 +790,24 @@ These are real and deliberate, not bugs to be surprised by later.
   while a length typed in millimetres converts to no round inch value at
   all (`14mm` is `0.55118in`). So a length round in millimetres and *not*
   round in inches could only have been typed in millimetres; a length
-  round in inches is evidence of nothing. Two such lengths settle it,
-  because `2.5in` and `5in` happen to be whole half-millimetres too and
-  one agreeing length can be a coincidence.
+  round in inches is evidence of nothing. One such length settles it —
+  there is no counting, because the reverse count would undo the asymmetry
+  the whole reading rests on: nine metric files here state an A4 page with
+  margins of exactly `0.5in`, Publisher's own template default rather than
+  a number anybody typed, so the inches outnumber the millimetres while
+  saying nothing at all. A length round in *both* units, `5in` being
+  exactly `127mm`, is already excluded by the inch test above and counts
+  for neither side.
+
+  The lengths read are the ones the *file* states, which for a trimmed
+  page is not the ones now standing: the page comes from before the snap,
+  and the trim is added back to the right and bottom margins, which absorb
+  it. Otherwise a document would be read partly off the trim this
+  converter chose for it — and the standard sizes are metric, so the
+  reading would tend to confirm itself.
 
   `1336 kerkbode` is the case that needs the margins rather than the page:
-  its page is `148.5265 × 209.8887mm`, round in neither unit and typed by
+  its page is `148.5265 × 209.8878mm`, round in neither unit and typed by
   nobody, but its margins are exactly 14, 15, 16 and 17mm. Across the
   22-file corpus this reads every European file as metric and the one
   US-letter file as imperial. It is a view preference and nothing more —
@@ -802,7 +816,20 @@ These are real and deliberate, not bugs to be surprised by later.
   at all: `Allow bleeds` is a print option with a fixed 0.125in, and
   searching the whole `Contents` stream of all three newsletters for 3mm
   (`108000` EMU) finds nothing. So the package is set up with `--bleed`,
-  3mm by default, written as one uniform figure on all four edges.
+  3mm by default, written as one uniform figure on all four edges;
+  `--bleed 0` is a document set up without one. The figure has to be a
+  finite, non-negative number of millimetres no larger than 100 — the
+  bound is there for the unit rather than the size, since a bleed meant as
+  points or inches otherwise goes in unnoticed, and `nan` used to reach the
+  package as `DocumentBleedTopOffset="nan"`.
+
+  What it does *not* do is extend anything into that bleed. Items keep the
+  coordinates the file gives them, so a full-page background stops at the
+  stated trim: after the snap that leaves about 0.53mm of accidental
+  overhang at the right and bottom and none at the left and top. The
+  setting declares the allowance a printer should trim to; it does not
+  manufacture art to fill it, and on a document whose background has to
+  bleed, `--bleed 0` is the more honest answer until it does.
 - **Margin and column guides are carried**, read out of the `.pub`
   rather than from libmspub, which reports exactly two properties for a
   page: `svg:width` and `svg:height`. The file keeps one set of guides
