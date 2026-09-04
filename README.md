@@ -817,11 +817,20 @@ These are real and deliberate, not bugs to be surprised by later.
   searching the whole `Contents` stream of all three newsletters for 3mm
   (`108000` EMU) finds nothing. So the package is set up with `--bleed`,
   3mm by default, written as one uniform figure on all four edges;
-  `--bleed 0` is a document set up without one. The figure has to be a
-  finite, non-negative number of millimetres no larger than 100 — the
-  bound is there for the unit rather than the size, since a bleed meant as
-  points or inches otherwise goes in unnoticed, and `nan` used to reach the
-  package as `DocumentBleedTopOffset="nan"`.
+  `--bleed 0` is a document set up without one. It goes on
+  `DocumentPreference` — singular, the way `MarginPreference` and
+  `ViewPreference` are, and named plural it reaches nothing: Affinity's
+  importer matches this element by name, and its grammar (compiled into
+  `liblibidmlimport.dylib`, where the element and every attribute it reads
+  survive in the mangled names) takes the page size, the facing-pages flag
+  and the five bleed attributes off it and nothing else. The plural is how
+  the setup arrived as no setup at all, in a document opening with a blank
+  bleed field.
+
+  The figure has to be a finite, non-negative number of millimetres no
+  larger than 100 — the bound is there for the unit rather than the size,
+  since a bleed meant as points or inches otherwise goes in unnoticed, and
+  `nan` used to reach the package as `DocumentBleedTopOffset="nan"`.
 
   What it does *not* do is manufacture art to fill that bleed — and on the
   files this was written for it does not have to. The newsletters were

@@ -1463,7 +1463,7 @@ class PageSnapTest(unittest.TestCase):
                 self.assertTrue(result.ok, result.error)
                 with zipfile.ZipFile(destination) as archive:
                     root = ET.fromstring(archive.read("Resources/Preferences.xml"))
-                setup = next(root.iter("DocumentPreferences"))
+                setup = next(root.iter("DocumentPreference"))
                 self.assertAlmostEqual(
                     float(setup.get("PageWidth")) / self.MM, 148.0, places=3
                 )
@@ -1533,7 +1533,7 @@ class BleedContentTest(unittest.TestCase):
             with zipfile.ZipFile(destination) as archive:
                 spreads[bleed] = archive.read("Spreads/Spread_spread1.xml")
                 preferences = ET.fromstring(archive.read("Resources/Preferences.xml"))
-            setup = next(preferences.iter("DocumentPreferences"))
+            setup = next(preferences.iter("DocumentPreference"))
             offsets[bleed] = float(setup.get("DocumentBleedTopOffset"))
         self.assertAlmostEqual(offsets[0.0], 0.0, places=6)
         self.assertAlmostEqual(

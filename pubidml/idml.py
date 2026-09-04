@@ -1099,9 +1099,19 @@ class IdmlWriter:
             "idPkg:Preferences", {"xmlns:idPkg": IDPKG, "DOMVersion": DOM_VERSION}
         )
         first = self.doc.pages[0] if self.doc.pages else model.Page()
+        # Singular, and not a typo to correct: Affinity's importer matches
+        # this element as `DocumentPreference`, the way it matches
+        # MarginPreference and ViewPreference, and its grammar reads
+        # PageHeight, PageWidth, FacingPages and the five bleed attributes
+        # off it. Named plural it is not matched at all, and the document
+        # opens with no bleed, no stated page size and no facing pages --
+        # which is how it opened until the reader's own grammar was read
+        # out of liblibidmlimport.dylib. PagesPerDocument and
+        # PageOrientation are not in that grammar; they stay because
+        # InDesign's own packages carry them.
         ET.SubElement(
             root,
-            "DocumentPreferences",
+            "DocumentPreference",
             {
                 "PageHeight": fmt(first.height),
                 "PageWidth": fmt(first.width),

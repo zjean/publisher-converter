@@ -716,7 +716,7 @@ class FacingPagesTest(unittest.TestCase):
             preferences = ET.fromstring(archive.read("Resources/Preferences.xml"))
         self.assertEqual(counts, ["1"] * 5)
         self.assertEqual(
-            next(preferences.iter("DocumentPreferences")).get("FacingPages"), "false"
+            next(preferences.iter("DocumentPreference")).get("FacingPages"), "false"
         )
 
     def test_facing_pages_puts_the_cover_alone_then_pairs_the_rest(self):
@@ -732,7 +732,7 @@ class FacingPagesTest(unittest.TestCase):
         with zipfile.ZipFile(self._package(4, facing=True)) as archive:
             preferences = ET.fromstring(archive.read("Resources/Preferences.xml"))
         self.assertEqual(
-            next(preferences.iter("DocumentPreferences")).get("FacingPages"), "true"
+            next(preferences.iter("DocumentPreference")).get("FacingPages"), "true"
         )
 
     def test_an_even_page_sits_left_of_the_spine_and_an_odd_page_right(self):
@@ -3077,9 +3077,20 @@ class DocumentSetupTest(unittest.TestCase):
         with zipfile.ZipFile(destination) as archive:
             root = ET.fromstring(archive.read("Resources/Preferences.xml"))
         return (
-            next(root.iter("DocumentPreferences")),
+            next(root.iter("DocumentPreference")),
             next(root.iter("ViewPreference")),
         )
+
+    def test_the_document_element_is_named_the_way_a_reader_looks_it_up(self):
+        # Singular. Affinity's importer declares the element as
+        # Element<Id::DocumentPreference, Attribute<Id::PageHeight>, ...> --
+        # the grammar is compiled into liblibidmlimport.dylib, where the
+        # mangled name reads `18DocumentPreference` and the plural appears
+        # in no form anywhere in the binary. Named plural the element is
+        # not matched at all, and the page size, the facing-pages flag and
+        # the bleed are all read from nothing.
+        document, _view = self.preferences()
+        self.assertEqual(document.tag, "DocumentPreference")
 
     def test_the_ruler_is_marked_in_the_unit_the_document_was_typed_in(self):
         _document, view = self.preferences(measurement_unit="mm")
