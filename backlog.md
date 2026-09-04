@@ -78,6 +78,23 @@ and column, but the file gives four insets per cell, and the grid the table
 draws is enough to tie a cells chunk back to the table in the event stream
 — 18 tables, 974 cells, no ambiguous signature anywhere in the corpus.
 
+That tie was a hash on the grid rounded to a tenth of a point, and the
+rounding was doing no work: the two sides measure one table by different
+routes — libmspub through four-decimal inches, the file straight from EMU
+— and part by up to 0.0036pt, which a rounded comparison hides only while
+the value keeps clear of a boundary. Eleven row heights in the corpus are
+9.9504 against 9.9528 and agree only by sitting 0.0004pt above the cliff
+at 9.95; half a thousandth shorter and they round apart, the lookup
+misses, and the table loses its padding, its alignment, its rules and its
+shading in one step, silently. `FileStructure._table_for` now compares the
+grids as measured, to a twentieth of a point — fourteen times the widest
+disagreement, and a hundred and thirtieth of the 6.5pt that separates the
+closest two same-shaped grids in any one file — and two candidates inside
+it is an ambiguity rather than a match. A table the lookup does not reach
+is counted and reported, since it converts with Affinity's own padding and
+a line around every cell and nothing else on the page says so. Every
+package in the corpus is byte-for-byte what it was.
+
 Still not carried: per-cell fill and rule weights and colours. That is no
 longer a limit of the reader but of the corpus — **no table in any sample
 file records either**, and since a field the file omits is absent rather

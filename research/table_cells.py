@@ -53,7 +53,7 @@ def dump(source: Path) -> None:
     print(f"\n===== {source.name}: {len(tables)} table(s)")
 
     for seq, offset in tables:
-        fields, signature = pubfile._table_grid(contents, offset)
+        fields, signature, _grid = pubfile._table_grid(contents, offset)
         if signature is None:
             print(f"  table seq={seq}: no grid")
             continue

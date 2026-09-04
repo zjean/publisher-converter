@@ -225,6 +225,9 @@ _GUIDE_POSITION, _GUIDE_IS_MARGIN = 0x01, 0x04
 # edge can land a fraction of a point outside it. The same half-point the
 # Escher matching uses, and for the same reason.
 _GUIDE_TOLERANCE = 0.5
+#: How far two measurements of one table's grid may part and still be
+#: that table, in points. `FileStructure._table_for` says why.
+_GRID_TOLERANCE = 0.05
 
 _TABLE_CHUNK, _CELLS_CHUNK = 0x10, 0x63
 _SHAPE_CHUNK = 0x01
@@ -522,6 +525,18 @@ class TableStructure:
     cell_order: List[Tuple[int, int]] = field(
         default_factory=list, compare=False
     )
+    #: The grid this table draws, in points, exactly as the chunk states
+    #: it -- not rounded to the signature it is filed under. The signature
+    #: is what makes two statements of one grid a single entry; this is
+    #: what a grid libmspub measured is *matched* against, because the two
+    #: routes to the same table part by thousandths and a rounded value
+    #: cannot be compared to a tolerance (`FileStructure._table_for`).
+    #:
+    #: Out of the equality check along with the rest: two chunks stating
+    #: one grid part in the last decimal, and comparing that would make
+    #: every such pair disagree and null each other out.
+    column_widths: List[float] = field(default_factory=list, compare=False)
+    row_heights: List[float] = field(default_factory=list, compare=False)
 
 
 @dataclass(frozen=True)
@@ -913,7 +928,7 @@ class FileStructure:
 
         None where any of the three is missing or disagrees.
         """
-        found = self.tables.get(table_signature(column_widths, row_heights))
+        found = self._table_for(column_widths, row_heights)
         if found is None or not found.cell_order:
             return None
         if not self.story_ids or len(self.story_ids) != len(self.story_texts):
@@ -971,32 +986,93 @@ class FileStructure:
             return None
         return self.masters.get(chunk.applied_master)
 
+    def _table_for(
+        self, column_widths: List[float], row_heights: List[float]
+    ) -> Optional[TableStructure]:
+        """The table drawing this grid, matched within a tolerance.
+
+        Nothing in the event stream identifies which chunk a table came
+        from, so the grid it draws is the only way back to it -- and the
+        two sides measure that grid by different routes. libmspub's
+        arrive by way of four-decimal inches, the file's straight from
+        EMU, so they agree to thousandths and no further: 0.0036pt is the
+        widest they part across the corpus.
+
+        Rounding both to a tenth and matching the results does not absorb
+        that. It only hides it while the value keeps clear of a boundary:
+        a pair that straddles one rounds two ways, and the disagreement
+        that was a thousandth becomes a tenth. Eleven row heights in the
+        corpus are one such pair -- 9.9504 measured by libmspub against
+        9.9528 by the file -- and they agree only because both sit
+        0.0004pt above the boundary at 9.95. A row 0.0005pt shorter
+        splits them onto 9.9 and 10.0 and the lookup misses, and the miss
+        costs the whole table: its padding, its alignment, its rules and
+        its shading. So the grids are compared as measured, to a
+        tolerance that covers the disagreement instead.
+
+        A twentieth of a point is fourteen times the widest disagreement
+        and a hundred and thirtieth of the 6.5pt that separates the
+        closest two same-shaped grids in any one corpus file, so there is
+        no reading of the evidence in which it reaches the wrong table.
+        Two candidates inside it is an ambiguity, not a match, the same
+        answer a shared signature already gets.
+
+        A structure filed under a signature but stating no grid of its
+        own is measured against the signature, which is the same grid
+        rounded.
+        """
+        near = []
+        for signature, table in self.tables.items():
+            if table is None:
+                # A signature two tables share: unusable either way, but
+                # still a grid that is claimed, so a nearby match must not
+                # step in and answer for it.
+                widths, heights = signature
+            else:
+                widths = table.column_widths or signature[0]
+                heights = table.row_heights or signature[1]
+            if len(widths) != len(column_widths) or len(heights) != len(row_heights):
+                continue
+            apart = max(
+                (
+                    abs(mine - theirs)
+                    for mine, theirs in zip(
+                        list(column_widths) + list(row_heights),
+                        list(widths) + list(heights),
+                    )
+                ),
+                default=0.0,
+            )
+            if apart <= _GRID_TOLERANCE:
+                near.append(table)
+        return near[0] if len(near) == 1 else None
+
     def cell_insets(
         self, column_widths: List[float], row_heights: List[float]
     ) -> Optional[Dict[tuple, tuple]]:
         """Insets by (row, column) for the table with this grid, if known."""
-        found = self.tables.get(table_signature(column_widths, row_heights))
+        found = self._table_for(column_widths, row_heights)
         return found.insets if found is not None else None
 
     def cell_alignments(
         self, column_widths: List[float], row_heights: List[float]
     ) -> Optional[Dict[tuple, str]]:
         """Vertical alignment by (row, column) for this grid, if known."""
-        found = self.tables.get(table_signature(column_widths, row_heights))
+        found = self._table_for(column_widths, row_heights)
         return found.alignments if found is not None else None
 
     def cell_rules(
         self, column_widths: List[float], row_heights: List[float]
     ) -> Optional[Dict[tuple, "CellRule"]]:
         """The lines drawn on this grid, by (row, column, side), if known."""
-        found = self.tables.get(table_signature(column_widths, row_heights))
+        found = self._table_for(column_widths, row_heights)
         return found.rules if found is not None else None
 
     def cell_shades(
         self, column_widths: List[float], row_heights: List[float]
     ) -> Optional[Dict[tuple, Tuple[int, int, int]]]:
         """The cells filled on this grid, by (row, column), if known."""
-        found = self.tables.get(table_signature(column_widths, row_heights))
+        found = self._table_for(column_widths, row_heights)
         return found.shades if found is not None else None
 
 
@@ -1265,7 +1341,7 @@ def _page_structure(contents: bytes, seq: int, offset: int) -> PageStructure:
 
 
 def _table_grid(contents: bytes, offset: int):
-    """One table chunk's fields and its grid, in points.
+    """One table chunk's fields, its signature and its grid, in points.
 
     The row/column array runs every column and then every row, the same
     split libmspub makes, and both are sizes rather than positions.
@@ -1288,10 +1364,12 @@ def _table_grid(contents: bytes, offset: int):
     rows = fields.get(_TABLE_ROW_COUNT, 0)
     columns = fields.get(_TABLE_COLUMN_COUNT, 0)
     if not rows or not columns or len(sizes) < rows + columns:
-        return None, None
+        return None, None, None
     widths = [size / _EMU_PER_POINT for size in sizes[:columns]]
     heights = [size / _EMU_PER_POINT for size in sizes[columns:columns + rows]]
-    return fields, table_signature(widths, heights)
+    # Both: the signature files the table, and the grid as measured is
+    # what another measurement of it is matched against.
+    return fields, table_signature(widths, heights), (widths, heights)
 
 
 def _table_cells(contents: bytes, offset: int) -> TableStructure:
@@ -1519,13 +1597,14 @@ def _read_tables(
     for seq, kind, offset in refs:
         if kind != _TABLE_CHUNK:
             continue
-        fields, signature = _table_grid(contents, offset)
+        fields, signature, grid = _table_grid(contents, offset)
         if signature is None:
             continue
         cells_offset = cells_at.get(fields.get(_TABLE_CELLS_SEQNUM))
         if cells_offset is None:
             continue
         table = _table_cells(contents, cells_offset)
+        table.column_widths, table.row_heights = grid
         # A table's drawing names it by the seqnum its own chunk carries,
         # which is also the seqnum its page lists the shape by.
         columns, rows = signature

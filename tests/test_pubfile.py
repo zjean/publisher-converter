@@ -952,7 +952,8 @@ class CellInsetApplicationTest(unittest.TestCase):
         return pubfile.FileStructure(
             tables={
                 signature: pubfile.TableStructure(
-                    insets=insets, rules=rules or {}, shades=shades or {}
+                    insets=insets, rules=rules or {}, shades=shades or {},
+                    column_widths=list(widths), row_heights=list(heights),
                 )
             }
         )
@@ -977,6 +978,51 @@ class CellInsetApplicationTest(unittest.TestCase):
             document, self.structure_with({(0, 0): (1.0, 1.0, 1.0, 1.0)}, widths=(99.0,))
         )
         self.assertIsNone(table.cells[0].insets)
+
+    def test_a_grid_measured_a_thousandth_apart_still_matches(self):
+        # The two sides measure one table by different routes -- libmspub
+        # through four-decimal inches, the file straight from EMU -- so
+        # they part by thousandths. Rounding both to a tenth does not
+        # absorb that: it only hides it while the value keeps clear of a
+        # boundary, and 9.95pt is a boundary. The corpus clears it by
+        # 0.0004pt, so this is the miss that is one row height away.
+        document, table = self.document_with_table()
+        table.row_heights = [9.9498]
+        convert._apply_cell_insets(
+            document,
+            self.structure_with({(0, 0): (1.0, 2.0, 3.0, 4.0)}, heights=(9.9502,)),
+        )
+        self.assertEqual(table.cells[0].insets, model.CellInsets(1.0, 2.0, 3.0, 4.0))
+
+    def test_a_grid_a_point_out_is_a_different_table(self):
+        # The tolerance is not a licence to match the nearest thing going.
+        # The closest two same-shaped grids in one corpus file are 6.5pt
+        # apart, so a point is already far outside a measurement's error.
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document,
+            self.structure_with({(0, 0): (1.0, 2.0, 3.0, 4.0)}, heights=(19.0,)),
+        )
+        self.assertIsNone(table.cells[0].insets)
+
+    def test_a_table_the_file_does_not_describe_is_counted(self):
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 1.0, 1.0, 1.0)}, widths=(99.0,))
+        )
+        self.assertTrue(
+            any("padding" in warning for warning in document.warnings),
+            document.warnings,
+        )
+
+    def test_a_table_that_is_matched_is_not_counted(self):
+        document, table = self.document_with_table()
+        convert._apply_cell_insets(
+            document, self.structure_with({(0, 0): (1.0, 2.0, 3.0, 4.0)})
+        )
+        self.assertFalse(
+            [w for w in document.warnings if "padding" in w], document.warnings
+        )
 
     def test_an_ambiguous_grid_is_not_applied(self):
         document, table = self.document_with_table()

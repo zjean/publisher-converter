@@ -1034,12 +1034,19 @@ def _apply_cell_insets(
     if structure is None or not structure.tables:
         return
 
-    tables = cells = silenced = 0
+    tables = cells = silenced = unmatched = 0
     for item in document.all_items():
         if not isinstance(item, model.Table):
             continue
         insets = structure.cell_insets(item.column_widths, item.row_heights)
         if insets is None:
+            # The grid libmspub measured reaches no chunk: either the file
+            # describes no table of that shape, or two of them draw one
+            # grid and neither can be told from the other. Counted, because
+            # the table still converts -- with the reader's padding, the
+            # reader's alignment and the reader's lines around every cell
+            # -- and nothing else on the page says so.
+            unmatched += 1
             continue
         alignments = (
             structure.cell_alignments(item.column_widths, item.row_heights) or {}
@@ -1060,10 +1067,20 @@ def _apply_cell_insets(
         if not drawn and not shades:
             silenced += 1
 
-    if tables:
+    if tables or unmatched:
         log.info(
-            "cell insets read for %d table(s), %d cell(s); %d drawn",
-            tables, cells, tables - silenced,
+            "cell insets read for %d table(s), %d cell(s); %d drawn; "
+            "%d table(s) unmatched",
+            tables, cells, tables - silenced, unmatched,
+        )
+    if unmatched:
+        document.warnings.append(
+            f"{unmatched} table(s) converted with the reader's own padding: "
+            f"the grid libmspub measured for them matches no table in the "
+            f"file, so their cell padding, vertical alignment and ruling "
+            f"could not be read. Publisher's padding is tighter than "
+            f"Affinity's default and an unstated cell edge is one Affinity "
+            f"rules itself, so check these tables against the original"
         )
     if silenced:
         document.warnings.append(
