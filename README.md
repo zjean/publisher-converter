@@ -164,8 +164,9 @@ git tag v1.1.0 && git push origin v1.1.0
 ```
 
 A tagged release names its version in the filename —
-`pub2idml-v1.1.0.exe`, `pub2idml-gui-v1.1.0.exe`, and a `.sha256` beside
-each — because a tagged download outlives the page it came from. It ends
+`pub2idml-v1.1.0.exe`, `pub2idml-gui-v1.1.0.exe`,
+`pub2idml-gui-v1.1.0.zip`, and a `.sha256` beside each — because a tagged
+download outlives the page it came from. It ends
 up in a downloads folder, on a shared drive, forwarded to whoever needs
 it next, and a bare `pub2idml.exe` says nothing about which build it is;
 two of them in one folder cannot be told apart at all. The rolling
@@ -262,6 +263,17 @@ it. It is a second executable rather than a second mode of the first
 because a windowed Windows executable has no stdout: a program that could
 run either way would leave the command line silent whenever someone ran
 it there.
+
+Every release carries it twice, as the same executable either way:
+`pub2idml-gui.exe` and `pub2idml-gui.zip`. The archive is there because a
+bare `.exe` is the hard part of handing this to the people it was written
+for — the browser warns before it will save one, and a mail system or a
+shared drive refuses it outright often enough that the download simply
+never arrives. A `.zip` travels where the `.exe` cannot. The `.exe` stays
+beside it, because unzipping is a step for anyone who did not need it.
+The archive holds the executable and nothing else, under the same name
+the release gives it, so the versioned download stays versioned once it
+is unpacked.
 
 Drag a folder onto the program's icon, or open it and choose one. That
 icon drop is the only drag gesture the window supports — there is

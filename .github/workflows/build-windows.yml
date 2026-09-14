@@ -312,6 +312,25 @@ jobs:
           COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
+
+          # The windowed build ships zipped as well as bare. A .exe is the
+          # hard part of handing this to the people it was written for: the
+          # browser warns before it will save one, and a mail system or a
+          # shared drive refuses it outright often enough that the download
+          # never arrives. A .zip travels where the .exe cannot. The .exe
+          # stays beside it, because unzipping is a step for anyone who did
+          # not need it.
+          #
+          # -j so the archive holds the executable and nothing else: a zip
+          # that unpacks a `dist/` folder onto the desktop has hidden the
+          # program it was carrying.
+          zip -q -j -X dist/pub2idml-gui.zip dist/pub2idml-gui.exe
+          # Checksummed over the archive rather than over what is inside
+          # it: the archive is the download, so it is what a reader can
+          # check. The executable's own hash is published beside it and
+          # still describes the file that comes out.
+          (cd dist && sha256sum pub2idml-gui.zip > pub2idml-gui.zip.sha256)
+
           cat > notes.md <<NOTES
           Automatic build of \`${COMMIT}\` on $(date -u +%Y-%m-%d).
 
@@ -321,6 +340,10 @@ jobs:
 
           The executable is unsigned, so SmartScreen shows a warning on
           first run: **More info -> Run anyway**.
+
+          The windowed build is attached twice, as the same executable
+          either way: \`pub2idml-gui.exe\`, and \`pub2idml-gui.zip\` for
+          the download paths that will not carry a bare one.
 
           Usage and options: see the README.
           NOTES
@@ -339,6 +362,7 @@ jobs:
           gh release create latest \
             dist/pub2idml.exe dist/pub2idml.exe.sha256 \
             dist/pub2idml-gui.exe dist/pub2idml-gui.exe.sha256 \
+            dist/pub2idml-gui.zip dist/pub2idml-gui.zip.sha256 \
             --prerelease --title "Latest build (main)" --notes-file notes.md \
             --target "$COMMIT"
 
@@ -388,9 +412,19 @@ jobs:
             printf '%s  %s\n' "$hash" "$base-$TAG.exe" > "$base-$TAG.exe.sha256"
             rm "$base.exe.sha256"
           done
+
+          # Zipped here rather than beside the rolling build's archive, and
+          # after the rename rather than before it, so the executable
+          # inside carries the version too. An archive holding a bare
+          # pub2idml-gui.exe would put the nameless file back the moment
+          # somebody extracted it -- which is the whole of what the
+          # versioned filename above exists to stop, undone one step later.
+          zip -q -j -X "pub2idml-gui-$TAG.zip" "pub2idml-gui-$TAG.exe"
+          sha256sum "pub2idml-gui-$TAG.zip" > "pub2idml-gui-$TAG.zip.sha256"
           cd ..
 
           gh release create "$TAG" \
             "dist/pub2idml-$TAG.exe" "dist/pub2idml-$TAG.exe.sha256" \
             "dist/pub2idml-gui-$TAG.exe" "dist/pub2idml-gui-$TAG.exe.sha256" \
+            "dist/pub2idml-gui-$TAG.zip" "dist/pub2idml-gui-$TAG.zip.sha256" \
             --title "pub2idml $TAG" --generate-notes
