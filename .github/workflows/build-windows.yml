@@ -237,6 +237,17 @@ jobs:
             dist/pub2idml-gui.exe
             dist/pub2idml-gui.exe.sha256
           if-no-files-found: error
+          # This artifact exists to hand the binaries to the publish job a
+          # minute later, and the two executables are 87MB a build. At
+          # GitHub's 90-day default that is a gigabyte of dead weight
+          # inside a fortnight, and the quota it fills is the account's,
+          # not the repository's -- which is a build that fails at the
+          # upload with everything before it green, for a reason nothing
+          # in the log ties to the commit that tripped it. Seven days is
+          # far longer than the handover needs and still leaves a week to
+          # pull a build by hand. The durable copy is the release asset:
+          # it does not expire and needs no login.
+          retention-days: 7
 
       # Kept even when earlier steps fail: this is the diagnostic trail.
       - name: Upload logs and converted output
@@ -249,6 +260,10 @@ jobs:
             C:\isolated\out\conversion-report.csv
             C:\isolated\pub2idml-self-test.log
           if-no-files-found: warn
+          # Kept longer than the executables and costing almost nothing to:
+          # these are four kilobytes of text, and the reason to want them
+          # is a failure somebody only got round to looking at later.
+          retention-days: 30
 
   # Publishing is a separate job purely to contain the write token. It runs
   # only after the build and every check above have passed, does nothing but
@@ -300,7 +315,7 @@ jobs:
 
       # Every green build on main replaces a rolling prerelease, so the
       # newest executable always has a stable download URL. Build artifacts
-      # expire after 90 days and need a login; release assets do not.
+      # expire in a week and need a login; release assets do not.
       - name: Publish rolling prerelease
         if: github.ref == 'refs/heads/main'
         env:
