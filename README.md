@@ -174,7 +174,7 @@ two of them in one folder cannot be told apart at all. The rolling
 `gh release download` above stay stable.
 
 Build artifacts are also attached to each Actions run, but they expire
-after a week and need a GitHub login — the release assets do not.
+after a day and need a GitHub login — the release assets do not.
 
 ### Running pub2idml.exe on Windows
 
