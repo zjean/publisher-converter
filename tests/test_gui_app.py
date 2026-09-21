@@ -8,6 +8,7 @@ turns them on.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import shutil
@@ -30,6 +31,66 @@ except Exception as exc:            # ImportError, or TclError with no display
 # in a CI log leaves the reader to guess between a Python built without
 # _tkinter and a runner with no display, and those have different fixes.
 _NO_TK = f"no usable tkinter: {_WHY}"
+
+
+def _live_interpreters() -> int:
+    """How many Tk interpreters are still alive in this process."""
+    return sum(1 for o in gc.get_objects() if isinstance(o, tkinter.Tk))
+
+
+def release_interpreters() -> None:
+    """Free the windows this module has finished with, on this thread.
+
+    gc.collect() frees on the thread that calls it, so calling it here --
+    the main thread, the one that built every window in this module --
+    is what keeps the Tcl interpreters from being freed later on a
+    worker thread belonging to some other module's test.
+    """
+    gc.collect()
+
+
+def tearDownModule():
+    # The handover point: after this, the runner moves on to modules that
+    # start worker threads, and nothing of ours may be left for them.
+    if tkinter is not None:
+        release_interpreters()
+
+
+@unittest.skipIf(tkinter is None, _NO_TK)
+class InterpreterLifetimeTest(unittest.TestCase):
+    """This module must not leave a Tk interpreter to another module.
+
+    A window is a mesh of reference cycles -- every widget keeps its
+    children as attributes and tkinter keeps a .master back to the
+    parent -- so destroy() does not make it go away: only the cycle
+    collector can free it, and the collector runs on whichever thread
+    trips it. test_gui_runner, two modules along, converts on a pool of
+    worker threads, and a Tcl interpreter freed on a thread other than
+    the one that made it does not raise: Tcl aborts the process with
+    "Tcl_AsyncDelete: async handler deleted by the wrong thread", which
+    ends the whole test run with no traceback.
+
+    So this module collects its own leavings, on the main thread, where
+    freeing them is safe.
+    """
+
+    def test_a_window_no_one_holds_is_released_here_and_not_elsewhere(self):
+        from pubidml.gui import app
+        # From a clean slate: earlier tests in this module leave windows
+        # of their own, and counting those as the baseline would let this
+        # test pass on a collection that merely broke even.
+        release_interpreters()
+        before = _live_interpreters()
+        application = app.Application()
+        application.destroy()
+        del application
+        release_interpreters()
+        self.assertEqual(
+            _live_interpreters(), before,
+            "a closed window is still holding a Tk interpreter: it will be "
+            "freed by whichever thread next trips the collector, and on a "
+            "worker thread that aborts the process",
+        )
 
 
 @unittest.skipIf(tkinter is None, _NO_TK)
